@@ -1,0 +1,136 @@
+{$DEFINE SRL_OSR}
+
+{$IFNDEF SRL_HINTS}
+  {$IFDEF HINTS}
+    {$DEFINE SRL_HAD_HINTS}
+  {$ENDIF}
+
+  {$HINTS OFF}
+{$ENDIF}
+
+{$I utils.simba}
+
+procedure TSRL.Setup;
+begin
+  { override me to setup things }
+  
+  Self.IsSetup := True;
+end;
+
+procedure TSRL.Debug(Bitmap: TMufasaBitmap); overload;
+begin
+  { override me to debug things }
+end;
+
+procedure TSRL.Debug; overload;
+var
+  Bitmap: TMufasaBitmap;
+begin
+  Freeze();
+
+  try
+    Bitmap.FromClient();
+
+    Self.Debug(Bitmap);
+
+    Bitmap.Debug();
+    Bitmap.Free();
+  finally
+    Unfreeze();
+  end;
+end;
+
+begin
+  SRL.Setup();
+end;
+
+{$SCOPEDENUMS ON}
+
+// The following allows individual include files to compile on their own with just having {$I SRL/osr.simba}
+// Summary: It includes this file until the current file is reached.
+
+{$IFNDEF SRL_OCR_INCLUDED}             {$I osr/ocr.simba}
+{$IFNDEF SRL_MISC_INCLUDED}            {$I osr/misc.simba}
+{$IFNDEF SRL_ITEMFINDER_INCLUDED}      {$I osr/itemfinder/itemfinder.simba}
+{$IFNDEF SRL_RSCLIENT_INCLUDED}        {$I osr/rsclient.simba}
+{$IFNDEF SRL_INTERFACE_INCLUDED}       {$I osr/interface.simba}
+{$IFNDEF SRL_CHOOSEOPTION_INCLUDED}    {$I osr/chooseoption.simba}
+{$IFNDEF SRL_CHATBUTTONS_INCLUDED}     {$I osr/chatbuttons.simba}
+{$IFNDEF SRL_LOGIN_INCLUDED}           {$I osr/login.simba}
+{$IFNDEF SRL_CHAT_INCLUDED}            {$I osr/chat.simba}
+{$IFNDEF SRL_MAKE_INCLUDED}            {$I osr/make.simba}
+{$IFNDEF SRL_GAMETABS_INCLUDED}        {$I osr/gametabs.simba}
+{$IFNDEF SRL_GAMETAB_INCLUDED}         {$I osr/gametab.simba}
+{$IFNDEF SRL_OPTIONS_INCLUDED}         {$I osr/options.simba}
+{$IFNDEF SRL_LOGOUT_INCLUDED}          {$I osr/logout.simba}
+{$IFNDEF SRL_MINIMAP_INCLUDED}         {$I osr/minimap.simba}
+{$IFNDEF SRL_MAINSCREEN_INCLUDED}      {$I osr/mainscreen.simba}
+{$IFNDEF SRL_INTERFACEAREA_INCLUDED}   {$I osr/interfacearea.simba}
+{$IFNDEF SRL_MM2MS_PROJECTOR_INCLUDED} {$I osr/mm2ms_projector.simba}
+{$IFNDEF SRL_MM2MS_INCLUDED}           {$I osr/mm2ms.simba}
+{$IFNDEF SRL_XPBAR_INCLUDED}           {$I osr/xpbar.simba}
+{$IFNDEF SRL_INVENTORY_INCLUDED}       {$I osr/inventory.simba}
+{$IFNDEF SRL_BANK_INCLUDED}            {$I osr/bank.simba}
+{$IFNDEF SRL_BANKPIN_INCLUDED}         {$I osr/bankpin.simba}
+{$IFNDEF SRL_GRANDEXCHANGE_INCLUDED}   {$I osr/grandexchange.simba}
+{$IFNDEF SRL_DEPOSITBOX_INCLUDED}      {$I osr/depositbox.simba}
+{$IFNDEF SRL_CRAFTSCREEN_INCLUDED}     {$I osr/craftscreen.simba}
+{$IFNDEF SRL_WALKER_MAP_INCLUDED}      {$I osr/walker/walker_map.simba}
+{$IFNDEF SRL_WALKER_INCLUDED}          {$I osr/walker/walker.simba}
+{$IFNDEF SRL_STATS_INCLUDED}           {$I osr/stats.simba}
+{$IFNDEF SRL_EQUIPMENT_INCLUDED}       {$I osr/equipment.simba}
+{$IFNDEF SRL_ANTIBAN_INCLUDED}         {$I osr/antiban.simba}
+{$IFNDEF SRL_COMBAT_INCLUDED}          {$I osr/combat.simba}
+{$IFNDEF SRL_MAGIC_INCLUDED}           {$I osr/magic.simba}
+{$IFNDEF SRL_PRAYER_INCLUDED}          {$I osr/prayer.simba}
+{$IFNDEF SRL_KEYBINDINGS_INCLUDED}     {$I osr/keybindings.simba}
+
+{$SCOPEDENUMS OFF}
+
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+{$ELSE}{$ENDIF}
+
+{$IFDEF SRL_HAD_HINTS}
+  {$HINTS ON}
+{$ENDIF}
+
+procedure TSRL.Setup; override; // Called first. Don't setup multiple times.
+begin
+  if Self.IsSetup then
+    Exit;
+    
+  inherited;
+end;

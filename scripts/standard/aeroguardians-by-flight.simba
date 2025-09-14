@@ -1,0 +1,4494 @@
+{$UNDEF SCRIPT_ID}{$DEFINE SCRIPT_ID := 'd367e87f-da39-46ac-89df-f5b80f79d8a5'}
+{$UNDEF SCRIPT_REVISION}{$DEFINE SCRIPT_REVISION := '35'}
+program AeroGuardians;
+{$DEFINE SRL_USE_REMOTEINPUT}
+//{$DEFINE SRL_DISABLE_REMOTEINPUT}
+{$I WaspLib/osr.simba}
+
+Const
+{---------Advanced script settings---------}
+  NEAREND          : Int32   = 93;   // % of Great Guardian power for end-game script logic to kick in
+  FORCEBALANCE     : Boolean = True; // Forces the script to keep points balanced at the cost of speed
+  EXPERIMENTALWALK : Boolean = True; // Experimental hybrid walking to blend mainscreen walking with minimap walking (false for MS walking)
+  DEBUGMODE        : Boolean = True; // Enable debug mode?
+  FASTMODE         : Boolean = True; // Optimized gameplay at the expense of certain failsafes
+  DISABLEINPUT     : Boolean = True; // Disable input while the script is running
+{-----------------End setup-----------------}
+
+
+  UNKNOWN    : Int32 = -1;
+  TYPEAIR    : Int32 = 0;
+  TYPEWATER  : Int32 = 1;
+  TYPEEARTH  : Int32 = 2;
+  TYPEFIRE   : Int32 = 3;
+  TYPEMIND   : Int32 = 4;
+  TYPEBODY   : Int32 = 5;
+  TYPECOSMIC : Int32 = 6;
+  TYPECHAOS  : Int32 = 7;
+  TYPENATURE : Int32 = 8;
+  TYPELAW    : Int32 = 9;
+  TYPEDEATH  : Int32 = 10;
+  TYPEBLOOD  : Int32 = 11;
+  INACTIVE   : Int32 = 12;
+
+Type
+  TGUI = record(TScriptForm)
+    Config: TConfigJSON;
+  end;
+
+  EState = (
+    ENTER_GAME,WAITING,NEW_GAME,GATHER_FRAGMENTS,GATHER_ESSENCE,
+    CRAFT_ESSENCE,CRAFT_RUNES,POWERUP,EXIT_ALTAR,CHANGE_WORLDS
+  );
+
+  TObjArray = record
+    MapObjects  : PRSMapObjectArray;
+    ObjectsCache: TRSObjectV2Array;
+  end;
+
+  TScript = record
+    Version                            : String;
+
+    State                              : EState;
+
+    GuardianPowerBox,EEnergyBox,
+    CEnergyBox,PBox,TimeBox            : TBox;    //TORWENT EDIT
+
+    ECircle, CCircle, PCircle          : TCircle; //TORWENT EDIT
+
+    PouchIterations,EssLimit,
+    RCLvl,RIndex,StartXP,WinCount,
+    LossCount,EPoints,CPoints,
+    LossStreak,FragsToMine,TempIte,
+    MSpeed,DTM_Corner                  : Int32;
+
+    FailReason                         : String;
+
+    DropRunes,DropCells,KeepTalismans,
+    CraftedRunes                       : TStringArray;
+
+    RunesCount                         : TIntegerArray;
+
+    GameOver,IsRunning,CanMineEast,
+    IsObelisk,FoundObj,ForceBal,
+    CanUsePouches,IsPortal,CastSpell,
+    TakeBreaks,TakeSleeps,RepairShields,
+    AutoFrags,CraftC,CraftL,CraftD,
+    CraftB,CatalyticOnly,ElementalOnly,
+    CreateShields,MadeShield,
+    DetailedReport,UISet               : Boolean;
+
+    Obj_Barrier,Obj_Workbench,
+    Obj_Depositpool,Obj_UnchargedCells,
+    Obj_WeakCells,Obj_GreatGuardian,
+    Obj_RubbleW,Obj_RubbleE,
+    Obj_WestPortal,Obj_HugeRemains,
+    Obj_LargeRemains,Obj_Portal,
+    Obj_ShieldN,Obj_ShieldNW,
+    Obj_ShieldNE,WalkerObj             : TRSObjectV2;
+
+    NPC_Cordelia                       : TRSNPCV2;
+    Altars,ExitPortals,Remains,Parts   : TObjArray;
+    Obj_Obelisks                       : Array [TYPEAIR..TYPEBLOOD] of TRSObjectV2;
+
+    MsgCooldown,DropTimer,GameTimer    : TCountDown;
+    TrueRunTime,ActionTimer            : TStopwatch;
+    ShutdownTime                       : Int64;
+  end;
+
+Const
+  TEMPLEBOUNDS      : TPointArray   = [[10356,12498],[10328,12498],[10288,12458],[10288,12378],
+                                       [10364,12334],[10428,12366],[10444,12406],[10448,12462],
+                                       [10436,12478],[10388,12498]];
+
+  WESTBOUNDS        : TBox          = [10248,12386,10286,12450];
+  EASTBOUNDS        : TBox          = [10448,12378,10480,12458];
+  LOBBYBOUNDS       : TBox          = [10348,12500,10388,12558];
+  RUNENAMES         : TStringArray  = ['air','water','earth','fire','mind','body','cosmic',
+                                       'chaos','nature','law','death','blood'];
+  GAMEWORLDS        : TIntegerArray = [445,464,478,490,492];
+  OBELISKIDS        : TIntegerArray = [43701,43702,43703,43704,43705,43709,43710,43706,43711,
+                                       43712,43707,43708];
+
+Var
+  Bot: TScript;
+  GUI: TGUI;
+
+  GotR_Chunk        : TRSMapChunk := [[55,148,57,147], [0]];
+  Altars_Chunk      : TRSMapChunk := [[33,75,44,75], [0]];
+  Blood_Chunk       : TRSMapChunk := [[49,75,50,75], [0]];
+
+procedure TScript.WriteMsg(Message: String);
+begin
+  WriteLn('[Bot]: '+Message);
+end;
+
+procedure TScript.DownloadToFile(const URL, Filename: string);
+var
+  Client: Int32;
+begin
+  Self.WriteMsg('Downloading assets');
+  Client := InitializeHTTPClient(False);
+  try
+    GetHTTPPageEx(Client, URL, Filename);
+  finally
+    FreeHTTPClient(Client);
+  end;
+end;
+
+procedure TGUI.StartScript(Sender: TObject); override;
+var
+  S: TObject;
+  MaxRun,i: Int32;
+  e_Run,e_BA,e_BF,e_SA,
+  e_SF,e_Frags,e_RDrop,
+  e_CDrop,e_TKeep: TEdit;
+  cb_Breaks,cb_Sleeps,cb_Spell,
+  cb_Frags,cb_Repair,cb_Create,
+  cb_Cat,cb_Ele,cb_CC,cb_CL,
+  cb_CD,cb_CB,cb_DR: TCheckBox;
+  RuneTypes: TStringArray = ['Air','Water','Earth','Fire','Mind',
+                             'Body','Cosmic','Chaos','Nature',
+                             'Law','Death','Blood'];
+  CellTypes: TStringArray = ['Weak','Medium','Strong','Overpowered'];
+begin
+  inherited;
+
+  Self.Form.Close();
+  Bot.WriteMsg('Starting script');
+
+{ Time settings }
+  e_Run             := Self.Form.GetChild('box_run_edit');
+  MaxRun            := StrToInt(e_Run.getText);
+  Bot.ShutdownTime  := (MaxRun * 60000) + Random(- (MaxRun * 6000), (MaxRun * 6000));
+
+  cb_Breaks         := Self.Form.GetChild('cb_breaks_checkbox');
+  Bot.TakeBreaks    := cb_Breaks.IsChecked;
+  if Bot.TakeBreaks then
+  begin
+    e_BA            := Self.Form.GetChild('box_ba_edit');
+    e_BF            := Self.Form.GetChild('box_bf_edit');
+    Antiban.AddBreak(ONE_MINUTE*StrToInt(e_BA.getText),ONE_MINUTE*StrToInt(e_BF.getText), 0.15, 1.0);
+  end;
+
+  cb_Sleeps         := Self.Form.GetChild('cb_sleeps_checkbox');
+  Bot.TakeSleeps    := cb_Sleeps.IsChecked;
+  if Bot.TakeSleeps then
+  begin
+    e_SA            := Self.Form.GetChild('box_sa_edit');
+    e_SF            := Self.Form.GetChild('box_sf_edit');
+    Antiban.AddSleep(e_SA.getText, StrToInt(e_SF.getText) * ONE_HOUR, 0.1, 1.0);
+  end;
+
+{ General settings }
+  e_Frags            := Self.Form.GetChild('box_frags_edit');
+  Bot.FragsToMine    := StrToInt(e_Frags.getText);
+  cb_Frags           := Self.Form.GetChild('cb_frags_checkbox');
+  Bot.AutoFrags      := cb_Frags.IsChecked;
+  cb_Spell           := Self.Form.GetChild('cb_spell_checkbox');
+  Bot.CastSpell      := cb_Spell.IsChecked;
+  cb_Create          := Self.Form.GetChild('cb_create_checkbox');
+  Bot.CreateShields  := cb_Create.IsChecked;
+  cb_Repair          := Self.Form.GetChild('cb_repair_checkbox');
+  Bot.RepairShields  := cb_Repair.IsChecked;
+  cb_Cat             := Self.Form.GetChild('cb_cat_checkbox');
+  Bot.CatalyticOnly  := cb_Cat.IsChecked;
+  cb_Ele             := Self.Form.GetChild('cb_ele_checkbox');
+  Bot.ElementalOnly  := cb_Ele.IsChecked;
+  cb_DR              := Self.Form.GetChild('cb_dr_checkbox');
+  Bot.DetailedReport := cb_DR.IsChecked;
+
+  Self.Config.Put('autofrags', cb_Frags.IsChecked);
+  Self.Config.Put('castspell', cb_Spell.IsChecked);
+  Self.Config.Put('createshields', cb_Create.IsChecked);
+  Self.Config.Put('repairshields', cb_Repair.IsChecked);
+  Self.Config.Put('catalyticonly', cb_Cat.IsChecked);
+  Self.Config.Put('elementalonly', cb_Ele.IsChecked);
+  Self.Config.Put('detailedreport', cb_DR.IsChecked);
+
+{ Rune settings }
+  cb_CC              := Self.Form.GetChild('cb_cc_checkbox');
+  Bot.CraftC         := cb_CC.IsChecked;
+  cb_CL              := Self.Form.GetChild('cb_cl_checkbox');
+  Bot.CraftL         := cb_CL.IsChecked;
+  cb_CD              := Self.Form.GetChild('cb_cd_checkbox');
+  Bot.CraftD         := cb_CD.IsChecked;
+  cb_CB              := Self.Form.GetChild('cb_cb_checkbox');
+  Bot.CraftB         := cb_CB.IsChecked;
+
+  Self.Config.Put('craftcosmics', cb_CC.IsChecked);
+  Self.Config.Put('craftlaws', cb_CL.IsChecked);
+  Self.Config.Put('craftdeaths', cb_CD.IsChecked);
+  Self.Config.Put('craftbloods', cb_CB.IsChecked);
+
+  e_RDrop           := Self.Form.GetChild('box_rdrop_edit');
+  if Length(e_RDrop.getText) > 0 then
+  begin
+    for i:=0 to High(RuneTypes) do
+      if Pos(RuneTypes[i], Capitalize(e_RDrop.getText)) > 0 then
+        Bot.DropRunes += RuneTypes[i]+' rune';
+  end;
+
+  e_CDrop           := Self.Form.GetChild('box_cdrop_edit');
+  if Length(e_CDrop.getText) > 0 then
+  begin
+    for i:=0 to High(CellTypes) do
+      if Pos(CellTypes[i], Capitalize(e_CDrop.getText)) > 0 then
+        Bot.DropCells += CellTypes[i]+' cell';
+  end;
+
+  e_TKeep           := Self.Form.GetChild('box_tkeep_edit');
+  if Length(e_TKeep.getText) > 0 then
+  begin
+    for i:=6 to High(RuneTypes) do
+      if Pos(RuneTypes[i], Capitalize(e_TKeep.getText)) > 0 then
+        Bot.KeepTalismans += 'Portal talisman ('+Lowercase(RuneTypes[i])+')';
+  end;
+
+  Self.Config.Put('droprunes', e_RDrop.getText);
+  Self.Config.Put('dropcells', e_CDrop.getText);
+  Self.Config.Put('keeptalismans', e_TKeep.getText);
+
+  S := Sender;
+end;
+
+function TGUI.CreateSettingsTab(): TTabSheet;
+  type TGUI = TGUI;
+  procedure TGUI.UpdateCat(Sender: TObject);
+  var
+    S,Cat,Ele: TCheckBox;
+  begin
+    S   := Sender;
+    Cat := Self.Form.GetChild('cb_cat_checkbox');
+    Ele := Self.Form.GetChild('cb_ele_checkbox');
+
+    if Cat.IsChecked then
+      if Ele.IsChecked then
+        Ele.SetChecked(False);
+  end;
+  procedure TGUI.UpdateEle(Sender: TObject);
+  var
+    S,Cat,Ele: TCheckBox;
+  begin
+    S   := Sender;
+    Cat := Self.Form.GetChild('cb_cat_checkbox');
+    Ele := Self.Form.GetChild('cb_ele_checkbox');
+
+    if Ele.IsChecked then
+      if Cat.IsChecked then
+        Cat.SetChecked(False);
+  end;
+
+var
+  lb_Time,lb_Script,lb_Rune: TLabel;
+  cb_Breaks,cb_Sleeps,
+  cb_Spell,cb_Repair,
+  cb_Create,cb_Frags,
+  cb_Cat,cb_Ele,cb_CC,
+  cb_CL,cb_CD,cb_CB,
+  cb_DR: TLabeledCheckBox;
+  box_Run,box_BA,box_BF,
+  box_SA,box_SF,box_Frags,
+  box_CDrop,box_RDrop,
+  box_Tkeep: TLabeledEdit;
+begin
+  Result.Init(nil);
+  Result.SetCaption('Script settings');
+  Result.SetName('Settings_Tab');
+
+{ Setup time settings }
+  with lb_Time do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(25));
+    SetTop(TControl.AdjustToDPI(10));
+    SetFontColor(2145591);
+    GetFont().SetSize(15);
+    SetCaption('Time settings');
+  end;
+
+  with box_Run do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(5));
+    SetTop(TControl.AdjustToDPI(45));
+    SetName('box_Run');
+    SetCaption('Max run time');
+    SetToolTip('Time in minutes');
+    SetText('700');
+    SetFontColor($00FFFF);
+  end;
+
+  with cb_Breaks do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(25));
+    SetTop(TControl.AdjustToDPI(105));
+    SetName('cb_breaks');
+    SetCaption('Take breaks');
+    SetFontColor($00FFFF);
+    SetChecked(True);
+  end;
+
+  with box_BA do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(5));
+    SetTop(TControl.AdjustToDPI(125));
+    SetName('box_ba');
+    SetCaption('Break after');
+    SetToolTip('Time in minutes');
+    SetText(ToStr(RandomRange(55,150)));
+    SetFontColor($00FFFF);
+  end;
+
+  with box_BF do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(5));
+    SetTop(TControl.AdjustToDPI(170));
+    SetName('box_bf');
+    SetCaption('Break for');
+    SetToolTip('Time in minutes');
+    SetText(ToStr(RandomRange(7,25)));
+    SetFontColor($00FFFF);
+  end;
+
+  with cb_Sleeps do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(25));
+    SetTop(TControl.AdjustToDPI(220));
+    SetName('cb_sleeps');
+    SetCaption('Take sleeps');
+    SetFontColor($00FFFF);
+  end;
+
+  with box_SA do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(5));
+    SetTop(TControl.AdjustToDPI(240));
+    SetName('box_sa');
+    SetCaption('Sleep at');
+    SetToolTip('Time in 24Hr format');
+    SetText(ToStr(RandomRange(20,22))+':'+ToStr(RandomRange(0,59))+':00');
+    SetFontColor($00FFFF);
+  end;
+
+  with box_SF do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(5));
+    SetTop(TControl.AdjustToDPI(285));
+    SetName('box_sf');
+    SetCaption('Sleep for');
+    SetToolTip('Time in hours');
+    SetText(ToStr(RandomRange(6,9)));
+    SetFontColor($00FFFF);
+  end;
+
+{ Setup general settings }
+  with lb_Script do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(280));
+    SetTop(TControl.AdjustToDPI(10));
+    SetFontColor(2145591);
+    GetFont().SetSize(15);
+    SetCaption('General settings');
+  end;
+
+  with box_Frags do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(270));
+    SetTop(TControl.AdjustToDPI(45));
+    SetName('box_frags');
+    SetCaption('Fragments to mine');
+    SetToolTip('How many fragments to mine at start-up');
+    SetText(ToStr(RandomRange(195,235)));
+    SetFontColor($00FFFF);
+  end;
+
+  with cb_Frags do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(270));
+    SetTop(TControl.AdjustToDPI(100));
+    SetName('cb_frags');
+    SetCaption('Auto-fragments');
+    SetToolTip('Auto-mine frags until the first portal appears');
+    SetFontColor($00FFFF);
+    if Self.Config.Has('autofrags') then
+      SetChecked(Self.Config.GetBoolean('autofrags'))
+    else
+      SetChecked(True);
+  end;
+
+  with cb_Spell do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(270));
+    SetTop(TControl.AdjustToDPI(120));
+    SetName('cb_spell');
+    SetCaption('Cast NPC Contact');
+    SetFontColor($00FFFF);
+    if Self.Config.Has('castspell') then
+      SetChecked(Self.Config.GetBoolean('castspell'));
+  end;
+
+  with cb_Create do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(270));
+    SetTop(TControl.AdjustToDPI(140));
+    SetName('cb_create');
+    SetCaption('Create shields (prior to game start)');
+    SetFontColor($00FFFF);
+    if Self.Config.Has('createshields') then
+      SetChecked(Self.Config.GetBoolean('createshields'))
+    else
+      SetChecked(True);
+  end;
+
+  with cb_Repair do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(270));
+    SetTop(TControl.AdjustToDPI(160));
+    SetName('cb_repair');
+    SetCaption('Repair shields');
+    SetFontColor($00FFFF);
+    if Self.Config.Has('repairshields') then
+      SetChecked(Self.Config.GetBoolean('repairshields'))
+    else
+      SetChecked(True);
+  end;
+
+  with cb_Cat do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(270));
+    SetTop(TControl.AdjustToDPI(180));
+    SetName('cb_cat');
+    SetCaption('Catalytic only');
+    SetFontColor($00FFFF);
+    if Self.Config.Has('catalyticonly') then
+      SetChecked(Self.Config.GetBoolean('catalyticonly'));
+    Checkbox.SetOnChange(@Self.UpdateCat);
+  end;
+
+  with cb_Ele do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(270));
+    SetTop(TControl.AdjustToDPI(200));
+    SetName('cb_ele');
+    SetCaption('Elemental only');
+    SetFontColor($00FFFF);
+    if Self.Config.Has('elementalonly') then
+      SetChecked(Self.Config.GetBoolean('elementalonly'));
+    Checkbox.SetOnChange(@Self.UpdateEle);
+  end;
+
+  with cb_DR do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(270));
+    SetTop(TControl.AdjustToDPI(220));
+    SetName('cb_dr');
+    SetCaption('Detailed progress report');
+    SetFontColor($00FFFF);
+    if Self.Config.Has('detailedreport') then
+      SetChecked(Self.Config.GetBoolean('detailedreport'))
+    else
+      SetChecked(True);
+  end;
+
+{ Setup rune settings }
+  with lb_Rune do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(555));
+    SetTop(TControl.AdjustToDPI(10));
+    SetFontColor(2145591);
+    GetFont().SetSize(15);
+    SetCaption('Rune settings');
+  end;
+
+  with cb_CC do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(545));
+    SetTop(TControl.AdjustToDPI(45));
+    SetName('cb_cc');
+    SetCaption('Cosmic runes');
+    SetToolTip('Craft cosmic runes?');
+    SetFontColor($00FFFF);
+    if Self.Config.Has('craftcosmics') then
+      SetChecked(Self.Config.GetBoolean('craftcosmics'));
+  end;
+
+  with cb_CL do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(545));
+    SetTop(TControl.AdjustToDPI(65));
+    SetName('cb_cl');
+    SetCaption('Law runes');
+    SetToolTip('Craft law runes?');
+    SetFontColor($00FFFF);
+    if Self.Config.Has('craftlaws') then
+      SetChecked(Self.Config.GetBoolean('craftlaws'));
+  end;
+
+  with cb_CD do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(545));
+    SetTop(TControl.AdjustToDPI(85));
+    SetName('cb_cd');
+    SetCaption('Death runes');
+    SetToolTip('Craft death runes?');
+    SetFontColor($00FFFF);
+    if Self.Config.Has('craftdeaths') then
+      SetChecked(Self.Config.GetBoolean('craftdeaths'));
+  end;
+
+  with cb_CB do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(545));
+    SetTop(TControl.AdjustToDPI(105));
+    SetName('cb_cb');
+    SetCaption('Blood runes');
+    SetToolTip('Craft blood runes?');
+    SetFontColor($00FFFF);
+    if Self.Config.Has('craftbloods') then
+      SetChecked(Self.Config.GetBoolean('craftbloods'));
+  end;
+
+  with box_RDrop do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(545));
+    SetTop(TControl.AdjustToDPI(135));
+    SetName('box_rdrop');
+    SetCaption('Runes to drop');
+    if Self.Config.Has('droprunes') then
+      SetText(Self.Config.GetString('droprunes'))
+    else
+      SetText('Body');
+    SetFontColor($00FFFF);
+  end;
+
+  with box_CDrop do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(545));
+    SetTop(TControl.AdjustToDPI(180));
+    SetName('box_cdrop');
+    SetCaption('Cells to drop');
+    if Self.Config.Has('dropcells') then
+      SetText(Self.Config.GetString('dropcells'))
+    else
+      SetText('Weak');
+    SetFontColor($00FFFF);
+  end;
+
+  with box_TKeep do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(545));
+    SetTop(TControl.AdjustToDPI(225));
+    SetName('box_tkeep');
+    SetCaption('Talisman to keep');
+    if Self.Config.Has('keeptalismans') then
+      SetText(Self.Config.GetString('keeptalismans'))
+    else
+      SetText('Nature, Death, Blood');
+    SetFontColor($00FFFF);
+  end;
+end;
+
+procedure TGUI.Setup(caption: String = 'Script Form'; size: TPoint = [750, 500]; allowResize: Boolean = False); override;
+var
+  Img: TPicture;
+  BGImg: TImage;
+  SButton: TButton;
+begin
+  inherited;
+
+  Self.Config.Setup('aeroguardians');
+
+  Img.init();
+  Img.LoadFromFile('Resources\AeroMoonsGUIBG.png');
+
+  with BGImg do
+  begin
+    Init(Self.PageControl);
+    SetParent(Self.PageControl);
+    SetPicture(Img);
+    SetBounds(0,0,Self.Form.getWidth,Self.Form.getHeight);
+    SetStretch(True);
+    AdjustToDPI(GetScreenDPI);
+  end;
+
+  Self.Start.SetVisible(False);
+  with SButton do
+  begin
+    Create(Self.Form);
+    SetBounds(Self.Form.GetRight-190, Self.Form.GetBottom-70, 180, 60);
+    GetFont.SetName('Bahnschrift');
+    GetFont.SetSize(15);
+    SetCaption('Start!');
+    SetOnClick(@Self.StartScript);
+  end;
+
+  Self.AddTab(Self.CreateSettingsTab());
+  Self.CreateAccountManager();
+  Self.CreateAPISettings();
+end;
+
+function TRSInventory.IsOpen(): Boolean; override;
+begin
+  Result := (GameTabs.GetCurrentTab() = ERSGameTab.INVENTORY);
+  if (not Result) then Self.Open;
+  Result := (GameTabs.GetCurrentTab() = ERSGameTab.INVENTORY);
+end;
+
+function TRSEquipment.IsOpen(): Boolean; override;
+begin
+  Result := GameTabs.GetCurrentTab() = ERSGameTab.EQUIPMENT;
+  if (not Result) then Self.Open;
+  Result := (GameTabs.GetCurrentTab() = ERSGameTab.EQUIPMENT);
+end;
+
+function TRSInventory.IsFull(): Boolean; override;
+begin
+  Result := Self.Count() >= 28;
+end;
+
+function TRSInventory.ShiftDrop(slots: TIntegerArray): Boolean; override;
+var
+  boxes: TBoxArray;
+  box: TBox;
+  i, j, attempts: Int32;
+  selected: Int32;
+  circle: TCircle;
+begin
+  if (Length(slots) = 0) then
+    Exit(True);
+
+  IsKeyDown(16); // Clear cache
+  boxes := Self.GetSlotBoxes();
+
+  try
+    for attempts := 1 to 5 do
+    begin
+      i := 0;
+
+      while (i < Length(slots)) do
+      begin
+        box := boxes[slots[i]];
+        selected := Self.GetSelectedSlot();
+        if (selected > -1) then
+        begin
+          Self.SetSelectedSlot(-1);
+          Break;
+        end;
+
+        if Self.IsSlotUsed(box) then
+        begin
+          if not IsKeyDown(16) then
+          begin
+            KeyDown(16);
+            Wait(95,170,wdLeft); //Wait for SHIFT to be registered before the click (important).
+          end;
+
+          Mouse.Click(box, MOUSE_LEFT);
+
+          // Spam click a little
+          for j := 1 to SRL.TruncatedGauss(0, 3) do
+          begin
+            circle.X := Mouse.Position().X;
+            circle.Y := Mouse.Position().Y;
+            circle.Radius := 5;
+
+            Mouse.Click(circle, MOUSE_LEFT, True);
+          end;
+
+          Wait(0, 250, wdLeft);
+        end;
+
+        Inc(i);
+      end;
+
+      if (i = Length(slots)) then
+        Exit;
+    end;
+  finally
+    if IsKeyDown(16) then
+      KeyUp(16);
+  end;
+
+  Result := attempts <= 5;
+end;
+
+// Undo the bogged down version in WaspLib
+function TRSChooseOption.Select(Text: TStringArray; MouseAction: Int32 = MOUSE_LEFT; CaseSensitive: Boolean = True; CloseIfNotFound: Boolean = True): Boolean; override;
+var
+  Choices: TRSChooseOption_OptionArray;
+  I, J: Int32;
+begin
+  if Self.Open() then
+  begin
+    Wait(0, 750, wdLeft);
+
+    Choices := GetOptions();
+
+    for I := 0 to High(Choices) do
+      for J := 0 to High(Text) do
+        if (CaseSensitive and (Text[J] in Choices[I].Text)) or ((not CaseSensitive) and (Lowercase(Text[J]) in Lowercase(Choices[I].Text))) then
+        begin
+          Self.Select(Choices[I], MouseAction);
+          Exit(True);
+        end;
+
+    if CloseIfNotFound then
+    begin
+      WaitEx(400, 150);
+
+      Self.Close();
+    end;
+  end;
+end;
+
+function TRSMapObject.ToObjV2: TRSObjectV2;
+var i: Int32;
+begin
+  Result.Actions := Self.Actions;
+  Result.Category := Self.Category;
+  Result.Coordinates := Self.Coordinates;
+  Result.Filter := Self.Filter;
+  Result.Finder := Self.Finder;
+  Result.ID := Self.ID;
+  Result.Index := Self.Index;
+  Result.MapObjectType := ERSMapObjectType.OBJ;
+  Result.Name := Self.Name;
+  Result.ObjType := 10;
+  Result.Offset := Self.Offset;
+  for i:=0 to High(Self.Coordinates) do Result.Rotations += 0;
+  if Length(Result.Rotations) < 1 then Result.Rotations := [0];
+  Result.Size := Self.Size;
+  Result.TrackTarget := Self.TrackTarget;
+  Result.UpText := Self.UpText;
+  Result.Walker := Self.Walker;
+end;
+
+function TRSMinimap.SetZoomToPoint(p: TPoint; randomness: Int32 = 0): Boolean; override;
+begin
+  Result := Self.InZoomRange(p);
+  randomness := 0;
+end;
+
+// Get rid of camera rotating that bogs down *everything*
+function TRSMinimap.MakePointVisible(p: TPoint): Boolean; override;
+begin
+  Result := Self.SetZoomToPoint(p, Random(-5, 5));
+end;
+
+function TWebGraphV2.FindObjectPath(me: TPoint; out p: TPoint): TPointArray; override;
+var
+  i: Int32;
+  cluster, best: TPointArray;
+begin
+  if Self.UseCollisionData then
+  begin
+    for i := 0 to High(Self.WalkableClusters) do
+      if Self.WalkableClusters[i].Contains(me) then
+        cluster := Self.WalkableClusters[i];
+
+    if cluster = [] then
+      RaiseException(SRL.TimeStamp() + ':[WebGraph]:[Fatal]: Can''t find player cluster containg: ' + me.ToString());
+  end;
+
+  best := Self.FindNearestNodesEx(p, 12);
+  for i := 0 to High(best) do
+  begin
+    p := best[i];
+
+    if not Self.UseCollisionData or cluster.Contains(p) then
+    begin
+      try
+        Result := Self.PathBetweenEx(me, p, 0.2, 2);
+        if Result = [] then
+        begin
+          if me.InRange(p, 52) then Exit([p]);
+          RaiseException('Path empty');
+        end;
+      except
+        if me.InRange(p, 52) then Exit([p]);
+        Writeln(SRL.TimeStamp() + ':[WebGraph]:[Fatal]: Can''t find a walkable path to ' + p.ToString() + ' object.');
+        Exit;
+      end;
+      Break;
+    end;
+  end;
+end;
+
+// Get rid of camera rotating that bogs down *everything*
+function TRSWalkerV2._WalkPathHelper(out index: Int32; out angle: Double; playerPoint: TPoint; fails: Int32; debug: Boolean): Int32; override;
+begin
+  if debug then
+    Self.DebugPath(index, playerPoint);
+
+  Result := fails;
+
+  if Self._AdvancePath(index, playerPoint, angle) then Exit(0);
+
+  //Likely haven't moved far enough to advance to next point
+  if Inc(Result) < 5 then
+  begin
+    Wait(300);
+    Exit;
+  end;
+
+  //Screen walking struggles, so disable it
+  if Self.AdaptiveWalk and Self.ScreenWalk then
+  begin
+    Self.ScreenWalk := False;
+    Self._AdvancePath(index, playerPoint, angle);
+  end;
+
+  if (Result mod 2 = 0) then
+    Minimap.WaitFlag();
+end;
+
+// Get rid of camera rotating that bogs down *everything*
+function TRSMapObject._HoverHelper(attempts: Int32; trackTarget: Boolean): Boolean; override;
+var
+  shouldExit: Boolean;
+  attempt: Int32;
+  atpa: T2DPointArray;
+  tpa: TPointArray;
+begin
+  Result := Self._UpTextCheck(shouldExit);
+  if shouldExit then Exit;
+
+  for attempt := 0 to attempts do
+  begin
+    if Self.Find(atpa) then
+    begin
+      if attempt < 2 then
+        tpa := atpa[0] // 0 for the closest one.
+      else if Length(atpa) > (attempt - 2) then
+        tpa := atpa[attempt - 2]
+      else
+        tpa := atpa[Random(0, High(atpa))];
+
+      if trackTarget then
+        Mouse.OnMovingEx := @Self._UpdateTarget;
+      Mouse.Move(tpa[Random(0, High(tpa))]);
+
+      if not Self.Filter.UpText then Exit(True);
+    end;
+
+    if MainScreen.IsUpText(Self.UpText) then Exit(True);
+  end;
+end;
+
+// Get rid of camera rotating that bogs down *everything*
+function TRSMapObject._WalkHoverHelper(attempts: Int32; trackTarget: Boolean): Boolean; override;
+var
+  shouldExit: Boolean;
+  attempt: Int32;
+  atpa: T2DPointArray;
+  tpa, path: TPointArray;
+  me, closest: TPoint;
+  same: Boolean;
+begin
+  if not Self.Filter.Walker then
+    Exit(Self._HoverHelper(attempts, trackTarget));
+
+  Result := Self._WalkUpTextCheck(shouldExit);
+  if shouldExit then Exit;
+
+  for attempt := 0 to attempts do
+  begin
+    if Self.Find(atpa) then
+    begin
+      if attempt < 2 then
+        tpa := atpa[0]
+      else if Length(atpa) > (attempt - 2) then
+        tpa := atpa[attempt - 2]
+      else
+        tpa := atpa.RandomValue();
+
+      if trackTarget then
+        Mouse.OnMovingEx := @Self._UpdateTarget;
+      Mouse.Move(tpa.RandomValue());
+
+      if not Self.Filter.UpText then
+        Exit(True);
+    end;
+
+    if MainScreen.IsUpText(Self.UpText) then Exit(True);
+
+    me := Self.Walker^.Position();
+    closest := Self.Walker^.GetClosestPointEx(me, Self.Coordinates, path);
+
+    if path = [] then
+    begin
+      path := Self.Walker^.WebGraph^.FindObjectPath(me, closest);
+      if path = [] then
+      begin
+        writeln(SRL.TimeStamp() + ':[MapObject]:[Fatal]: Can''t path to object: ' + Self.Name);
+        exit;
+      end;
+      same := True;
+    end;
+
+    if not me.InRange(closest, 50) then
+    begin
+      Self.Walker^.WebWalkEx(me, closest, 30, 0.15);
+      Continue;
+    end;
+
+    if attempt = (attempts - 1) then
+    begin
+      if not me.InRange(closest, 25) then
+      begin
+        Self.Walker^.WebWalkEx(me, closest, 25, 0.15);
+        Continue;
+      end;
+    end;
+  end;
+end;
+
+function TRSMapObject.WalkHover(attempts: Int32 = 2): Boolean; override;
+var
+  p, me: TPoint;
+  path: TPointArray;
+  same: Boolean;
+begin
+  if ChooseOption.IsOpen() then
+  begin
+    if Self.Filter.UpText and ChooseOption.HasOption(Self.UpText) then
+      Exit(True);
+    ChooseOption.Close();
+  end;
+
+  if not Self.Filter.Walker then Exit;
+
+  if Self.Walker = nil then
+    TerminateScript(SRL.TimeStamp() + ':[TRSMapObject]:[Fatal]: "' + Self.Name + '" has no walker pointer set.');
+
+  if Self.Filter.UpText then Self.Walker^.TargetUpText := Copy(Self.UpText);
+
+  me :=  Self.Walker^.Position();
+
+  p := Self.Walker^.GetClosestPointEx(me, Self.Coordinates, path);
+
+  //if the point is not reachable with the webgraph (like a banker behind a booth) then pick nearest node as target
+  if path = [] then
+  begin
+    path := Self.Walker^.WebGraph^.FindObjectPath(me, p);
+    if path = [] then
+    begin
+      writeln(SRL.TimeStamp() + ':[MapObject]:[Fatal]: Can''t path to "' + Self.Name + '" from ' + me.ToString() + ' to ' + p.ToString());
+      Exit;
+    end;
+    same := True;
+  end;
+
+  // check if doors need to be passed to reach target
+  if same or Self.Walker^.WebGraph^.WalkableClusters.InSameTPA(me, p) then
+  begin
+    if not Self.Walker^.MakePointVisible(p) and not Self.Walker^.WebWalkEx(me, p, 30, 0.15) then
+      Exit;
+  end
+  else
+  if not Self.Walker^.WebWalk(p, 30, 0.15) then
+    Exit;
+
+  Result := Self._WalkHoverHelper(attempts, Self.TrackTarget);
+end;
+
+function TRSMapObject.WalkClick(leftClick: Boolean = True; attempts: Int32 = 2): Boolean; override;
+begin
+  Bot.WalkerObj := Self.ToObjV2;
+
+  if Self.Filter.Walker then
+  begin
+    if Self.Walker = nil then
+      TerminateScript(SRL.TimeStamp() + ':[TRSMapObject]:[Fatal]: ' + Self.Name + ' has no walker pointer set.');
+    Self.Walker^.TargetUpText := Copy(Self.UpText);
+  end;
+
+  Result := Self.WalkHover(attempts) and Self._ClickHelper(leftClick);
+  if (not Result) then Result := Self._ClickHelper(leftClick);
+  if Self.Filter.Walker then
+    Self.Walker^.TargetUpText := [];
+
+  Bot.WalkerObj := [];
+end;
+
+function BuildPathTo(From, Dest: TPoint): TPointArray;
+var
+  J   : Int32;
+  Line: TPointArray;
+begin
+  Line := TPAFromLine(From, Dest);
+
+  J := 0;
+  while J < High(Line) do
+  begin
+    Result += Line[J];
+    Inc(J, Random(8,15));
+  end;
+end;
+
+// by Rasta Magician, veteran SRL-er
+function ProgReport(
+                           ResultType:int32; ScriptName, ScriptAuthor, ScriptVersion: String;
+                           VarNames: TStringArray;
+                           VarValues: TVariantArray
+                          ): Variant;
+var
+  TSA        : TStringArray;
+  s,s2       : String;
+  s3         : String := '=';
+  s4         : String := ' ';
+  i, i2, L   : Int32;
+begin
+  if (ResultType = 2) then
+    Result := '';
+
+  if length(VarNames) <> Length(VarValues) then
+  begin
+    Writeln('VarNames and VarValues must be the same length');
+    exit;
+  end;
+  SetLength(TSA, 3 + Length(VarNames) + 4);
+  s2 := 'by '+ScriptAuthor;
+
+  TSA[0] := s3;
+  TSA[1] := ScriptName.Capitalize+' '+ScriptVersion;
+  TSA[2] := s2;
+  TSA[3] := s3;
+
+  i2 := 3 + Length(VarNames);
+
+  for i:= 4 to i2 do
+    L := Max(L, Length(VarNames[i-4]));
+
+  for i:= 4 to i2 do
+  begin
+    s := VarValues[i-4];
+    TSA[i] := Padr((VarNames[i-4]), L)+' : '+ s.Capitalize;
+  end;
+
+  TSA[i2+1] := s3;
+  TSA[i2+2] := ScriptName.Capitalize+' '+ScriptVersion;
+  TSA[i2+3] := s3;
+
+  i2 := 0;
+  for i:= 0 to High(TSA) do
+    i2 := Max(i2, Length(TSA[i]));
+
+  TSA[0]           := s3.Replicate(i2);
+  TSA[3]           := s3.Replicate(i2);
+  TSA[High(TSA)-2] := s3.Replicate(i2);
+  TSA[High(TSA)]   := s3.Replicate(i2);
+
+  TSA[2] := s4.Replicate(round((i2 - Length(TSA[2]))/2)) + TSA[2]; //centering by ScriptAuthor
+  TSA[High(TSA)-1] := s4.Replicate(round((i2 - Length(TSA[High(TSA)-1]))/2)) + TSA[High(TSA)-1];
+
+  for i:= 0 to High(TSA) do
+    if (TSA[i][1] = s3) then
+      case ResultType of
+        0 : writeln     ('[='+Padr(TSA[i], i2)+'=]');
+        1 : writeln     ('[='+Padr(TSA[i], i2)+'=]');
+        2 : Result := Result + '[='+Padr(TSA[i], i2)+'=]' + chr(13);
+        else begin Writeln('Invalid Result Type'); exit; end;
+      end
+    else
+      case ResultType of
+        0 : writeln     ('[ '+Padr(TSA[i], i2)+' ]');
+        1 : writeln     ('[ '+Padr(TSA[i], i2)+' ]');
+        2 : Result := Result + '[ '+Padr(TSA[i], i2)+' ]' + chr(13);
+        else begin Writeln('Invalid Result Type'); exit; end;
+      end;
+
+  if not ResultType = 2 then Result := true;
+end;
+
+{ End SRL-F import }
+
+procedure TScript.TakeScreenshot(Name: String);
+var
+  i: Int32;
+begin
+  CreateDirectory('Screenshots/ScriptEnding/');
+  i := Length(GetFiles('Screenshots/ScriptEnding/', 'png'));
+  SaveScreenshot('Screenshots/ScriptEnding/GotR_' + Name + '_' + IntToStr(i) + '.png');
+end;
+
+procedure TScript.Report();
+var
+  i,XpGained: Int32;
+  RunTime: Int64;
+  SArr: TStringArray;
+  VArr: TVariantArray;
+begin
+  XPBar.EarnedXP();
+  if not APIClient.IsSetup or APIClient.Timer.IsFinished() then
+    APIClient.SubmitStats(APIClient.GetUUID());
+
+  XpGained := XPBar.Read()-Self.StartXP;
+  RunTime  := Self.TrueRunTime.ElapsedTime();
+  Self.MadeShield := False;
+
+  if (not DEBUGMODE) then
+    ClearDebug();
+
+  SArr := ['Runtime','XP gained','Wins/Losses','Elemental points','Catalytic points'];
+  VArr := [SRL.MsToTime(GetTimeRunning, Time_Short),
+           ToStr(SRL.FormatNumber(XpGained, 2), '(', SRL.FormatNumber(XpGained / (RunTime / 1000 / 60 / 60), 2), ' / hr)'),
+           ToStr(Self.WinCount, ' / ', Self.LossCount),
+           ToStr(Self.EPoints, '(', Round(Self.EPoints / (RunTime / 1000 / 60 / 60)), ' / hr)'),
+           ToStr(Self.CPoints, '(', Round(Self.CPoints / (RunTime / 1000 / 60 / 60)), ' / hr)')];
+
+  if Self.DetailedReport then
+  begin
+    for i:=0 to High(Self.CraftedRunes) do
+      if Self.RunesCount[i] > 0 then
+      begin
+        SArr += Self.CraftedRunes[i]+'s';
+        VArr += ToStr(SRL.FormatNumber(Self.RunesCount[i],1), '(', SRL.FormatNumber(Round(Self.RunesCount[i] / (RunTime / 1000 / 60 / 60)),1), ' / hr)');
+      end;
+  end;
+
+  if Self.TakeBreaks then
+  begin
+    SArr += 'Until break';
+    VArr += Antiban.TimeUntilBreak(Antiban.Breaks[0]);
+  end;
+
+  if Self.TakeSleeps then
+  begin
+    SArr += 'Until sleep';
+    VArr += SRL.MsToTime(Max(0, Round(Antiban.Sleeps[0].NextAtTime - GetTimeRunning)), TIME_BARE);
+  end;
+
+  SArr += 'Shutdown';
+  VArr += ToStr(SRL.MsToTime(Self.ShutdownTime - GetTimeRunning, Time_Short));
+
+  ProgReport(1, 'AeroGuardians','Flight', Self.Version, SArr, VArr);
+end;
+
+procedure BreakPause(Task: PBreakTask);
+Var T: PBreakTask;
+begin
+  Bot.TrueRunTime.Pause;
+  Bot.ActionTimer.Pause;
+  T := Task;
+end;
+
+procedure BreakResume(Task: PBreakTask);
+Var T: PBreakTask;
+begin
+  if GetTimeRunning() > Bot.ShutdownTime then
+    TerminateScript('Time to shutdown');
+
+  Bot.TrueRunTime.Resume;
+  Bot.ActionTimer.Resume;
+  T := Task;
+end;
+
+procedure SleepPause(Task: PSleepTask);
+Var T: PSleepTask;
+begin
+  Bot.TrueRunTime.Pause;
+  Bot.ActionTimer.Pause;
+  T := Task;
+end;
+
+procedure SleepResume(Task: PSleepTask);
+Var T: PSleepTask;
+begin
+  if GetTimeRunning() > Bot.ShutdownTime then
+    TerminateScript('Time to shutdown');
+
+  Bot.TrueRunTime.Resume;
+  Bot.ActionTimer.Resume;
+  T := Task;
+end;
+
+procedure TAntiban.DoLoseFocus();
+Var T: Int32;
+begin
+  T := SRL.NormalRange(800,3500);
+  Self.DebugLn('Losing focus for '+SRL.MsToTime(T, Time_Short));
+  Self.LoseFocus(T);
+end;
+
+procedure TScript.SetupAntiban();
+begin
+  Antiban.Skills += ERSSKILL.RUNECRAFTING;
+  Antiban.Skills += ERSSKILL.MINING;
+  Antiban.Skills += ERSSKILL.CRAFTING;
+
+  Antiban.AddTask(ONE_MINUTE*2,   @Mouse.RandomMovement);
+  Antiban.AddTask(ONE_MINUTE*4,   @Antiban.SmallCameraRotation);
+  Antiban.AddTask(ONE_MINUTE*6,   @Antiban.HoverMSPlayers);
+  Antiban.AddTask(ONE_MINUTE*7,   @Antiban.DoLoseFocus);
+  Antiban.AddTask(ONE_MINUTE*7,   @Antiban.RandomRotate);
+  Antiban.AddTask(ONE_MINUTE*8,   @Antiban.HoverMSNPCs);
+  Antiban.AddTask(ONE_MINUTE*25,  @Antiban.HoverSkills);
+
+  if Self.TakeBreaks then
+  begin
+    Antiban.OnStartBreak  := @BreakPause;
+    Antiban.OnFinishBreak := @BreakResume;
+  end;
+
+  if Self.TakeSleeps then
+  begin
+    Antiban.OnStartSleep  := @SleepPause;
+    Antiban.OnFinishSleep := @SleepResume;
+  end;
+end;
+
+function TRSMinimap.SetZoomToPoint(p: TPoint; randomness: Int32 = 0): Boolean; override;
+begin
+  Result := Self.InZoomRange(p);
+  randomness := 0;
+end;
+
+procedure TObjArray._SetupMapObjects(Name: String);
+var i: Int32;
+begin
+  if Objects <> [] then
+  begin
+    Self.ObjectsCache := Objects.GetAll(Name);
+
+    for i := 0 to High(Self.ObjectsCache) do
+    begin
+      Self.ObjectsCache[i].Filter.Finder := False;
+      Self.MapObjects += @Self.ObjectsCache[i];
+    end;
+  end;
+
+  if Self.MapObjects = [] then
+    TerminateScript('No '+Name+' objects available in the loaded TRSMap');
+end;
+
+procedure TCoordsAngle.FilterCircle(circle: TCircle); override;
+var
+  i: Int32;
+begin
+  if Length(Self.Coordinates) <> Length(Self.Angles) then
+  begin
+    if Length(Self.Coordinates) > Length(Self.Angles) then
+      for i:=0 to High(Self.Coordinates) do Self.Angles += 0
+    else if Length(Self.Coordinates) < Length(Self.Angles) then
+    begin
+      Self.Angles := [];
+      for i:=0 to High(Self.Coordinates) do Self.Angles += 0
+    end;
+  end;
+
+  for i := High(Self.Coordinates) downto 0 do
+    if Self.Coordinates[i].DistanceTo(circle.Mean()) > circle.Radius then
+    begin
+      Delete(Self.Coordinates, i, 1);
+      Delete(Self.Angles, i, 1);
+    end;
+end;
+
+function TScript.FindHopperMsg(): Boolean;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+  Result := ('finish' in Chat.GetMessage(CHAT_INPUT_LINE - 1, [CHAT_COLOR_BLACK])) or
+            ('finish' in Chat.GetMessage(CHAT_INPUT_LINE - 2, [CHAT_COLOR_BLACK]));
+end;
+
+function TRSLogout.GetCurrentWorld: Int32;
+begin
+  if (not Self.IsWorldSwitcherOpen()) then
+  begin
+    Self.Open();
+    if Self.GetButton(ERSLogoutButton.WORLD_SWITCHER).Click then
+      WaitUntil(Self.IsWorldSwitcherOpen(), 500, 6000);
+  end;
+
+  Result := OCR.RecognizeNumber([Self.Bounds.X1+17,Self.Bounds.Y1,Self.Bounds.X1+150,Self.Bounds.Y1+20], TOCRColorFilter.Create([2070783]), RS_FONT_BOLD_12);
+end;
+
+function TRSLogout.SwitchWorlds(World:Int32): Boolean;
+var
+  B: TBox;
+  mmCP: TPoint;
+  T: TCountdown;
+  Found,Down: Boolean;
+  ListBox: TBox := [Self.Bounds.X1+17,Self.Bounds.Y1+36,Self.Bounds.X1+42,Self.Bounds.Y2-38];
+  VisibleWorld: Int32;
+  MMTiles: TPointArray;
+begin
+  if (Self.GetCurrentWorld = World) then Exit(True);
+
+  // Read the first visible members world from the world list
+  VisibleWorld := OCR.RecognizeNumber(ListBox, TOCRColorFilter.Create([61680,14737632]), RS_FONT_PLAIN_12);
+  Mouse.Move(Self.Bounds.Expand(-5,-36), True);
+
+  Down := SRL.Dice(50);
+
+  T.Init(15000);
+  While InRange(Self.GetScrollPosition, 1, 99) do
+  begin
+    if OCR.LocateText(ListBox, ToStr(World), RS_FONT_PLAIN_12,  TOCRColorFilter.Create([61680,14737632]), B) = 1 then
+    begin
+      Found := True;
+      Break;
+    end;
+
+    Mouse.Scroll(SRL.NormalRange(1,3), Down);
+
+    WaitEx(75, 15);
+    if T.TimeRemaining < 1 then break;
+  end;
+
+  if (not Found) then
+    if (not Down) then
+    begin
+      Mouse.Scroll(SRL.NormalRange(1,3), True);
+      T.Init(15000);
+      While Self.GetScrollPosition >= 1 do
+      begin
+        if OCR.LocateText(ListBox, ToStr(World), RS_FONT_PLAIN_12,  TOCRColorFilter.Create([61680,14737632]), B) = 1 then
+        begin
+          Found := True;
+          Break;
+        end;
+
+        Mouse.Scroll(SRL.NormalRange(1,3), True);
+        WaitEx(75, 15);
+        if T.TimeRemaining < 1 then
+        begin
+          Writeln('[SwitchWorlds]: Timeout [0]');
+          Exit;
+        end;
+      end;
+    end else if Down then
+    begin
+      Mouse.Scroll(SRL.NormalRange(1,3), False);
+      T.Init(15000);
+      While Self.GetScrollPosition <= 99 do
+      begin
+        if OCR.LocateText(ListBox, ToStr(World), RS_FONT_PLAIN_12,  TOCRColorFilter.Create([61680,14737632]), B) = 1 then
+        begin
+          Found := True;
+          Break;
+        end;
+
+        Mouse.Scroll(SRL.NormalRange(1,3), False);
+        WaitEx(75, 15);
+        if T.TimeRemaining < 1 then
+        begin
+          Writeln('[SwitchWorlds]: Timeout [1]');
+          Exit;
+        end;
+      end;
+    end;
+
+  if Found then
+  begin
+    for 1 to 2 do
+    begin
+      Mouse.Click(B, MOUSE_LEFT);
+      if WaitUntil(Bot.FindHopperMsg, 75, 3000) then
+      begin
+        mmCP    := Minimap.Center;
+        MMTiles := [[mmCP.X-4,mmCP.Y],[mmCP.X,mmCP.Y-4],[mmCP.X+4,mmCP.Y],[mmCP.X,mmCP.Y+4]];
+        Mouse.Move(Minimap.StaticToMsRect(MMTiles[Random(0,3)],0));
+        if (not Mainscreen.IsUpText('Walk here', 75)) then
+          ChooseOption.Select('Walk here')
+        else
+          Mouse.Click(MOUSE_LEFT);
+
+        WaitUntil(Minimap.IsPlayerMoving, 115, 2200);
+        While Minimap.IsPlayerMoving do
+          Wait(115);
+      end else
+        break;
+    end;
+
+    Result := True;
+  end;
+end;
+
+function TScript.HopWorlds(): Boolean;
+var
+  RandWorld: Int32;
+  MyWorld: Int32 := Logout.GetCurrentWorld;
+  WorldList: TIntegerArray := GameWorlds;
+begin
+  Self.HandleBarrier; // May need to be forwarded
+  Minimap.WaitPlayerMoving(300, SRL.NormalRange(4500,7000));
+
+  WorldList.Remove(MyWorld, True);
+  RandWorld := WorldList[Random(0, Length(WorldList)-1)];
+
+  Self.WriteMsg('Hopping to world '+ToStr(RandWorld));
+  Chat.ClickContinue();
+
+  Result := Logout.SwitchWorlds(RandWorld);
+  Self.LossStreak := 0;
+end;
+
+function TScript.IsInTemple(): Boolean;
+begin
+  Result := SRL.PointInPoly(Map.Position, TEMPLEBOUNDS);
+end;
+
+function TScript.IsInWestArea(): Boolean;
+begin
+  Result := WESTBOUNDS.Contains(Map.Position);
+end;
+
+function TScript.IsInEastArea(): Boolean;
+begin
+  Result := EASTBOUNDS.Contains(Map.Position);
+end;
+
+function TScript.IsInLobby(): Boolean;
+begin
+  Result := LOBBYBOUNDS.Contains(Map.Position);
+end;
+
+procedure TScript.SetUIBounds();
+var CP_X,CP_Y: Int32;
+begin
+  Self.UISet := True;
+  case RSClient.Mode of
+    ERSClientMode.FIXED:
+    begin
+      Self.GuardianPowerBox := [13,33,172,49];
+      Self.ECircle          := [51,79,15];
+      Self.CCircle          := [132,79,15];
+      Self.PCircle          := [213,109,15];
+      Self.EEnergyBox       := [49,119,89,134];
+      Self.CEnergyBox       := [134,119,169,134];
+      Self.PBox             := [187,132,241,144];
+      Self.TimeBox          := [80,75,105,90];
+    end;
+
+    ERSClientMode.RESIZABLE_CLASSIC,
+    ERSClientMode.RESIZABLE_MODERN:
+    begin
+      if FindDTM(Self.DTM_Corner, CP_X, CP_Y, Mainscreen.Bounds) then
+      begin
+        Self.GuardianPowerBox := [CP_X,CP_Y,CP_X+159,CP_Y+16];
+        Self.ECircle          := [CP_X+39,CP_Y+47,15];
+        Self.CCircle          := [CP_X+120,CP_Y+47,15];
+        Self.PCircle          := [CP_X+201,CP_Y+76,15]; // Portal
+        Self.EEnergyBox       := [CP_X+56,CP_Y+86,CP_X+93,CP_Y+100];
+        Self.CEnergyBox       := [CP_X+136,CP_Y+86,CP_X+176,CP_Y+100];
+        Self.PBox             := [CP_X+170,CP_Y+99,CP_X+228,CP_Y+111];
+        Self.TimeBox          := [CP_X+67,CP_Y+43,CP_X+95,CP_Y+56];
+      end else
+      begin
+        Self.GuardianPowerBox := [9,29,168,45];
+        Self.ECircle          := [47,75,15];
+        Self.CCircle          := [128,75,15];
+        Self.PCircle          := [209,105,15];
+        Self.EEnergyBox       := [45,115,85,130];
+        Self.CEnergyBox       := [135,115,165,130];
+        Self.PBox             := [183,128,237,140];
+        Self.TimeBox          := [70,70,105,85];
+      end;
+    end;
+  end;
+end;
+
+function TScript.GetPower(): Int32;
+begin
+  Result := -1;
+  Result := OCR.RecognizeNumber(Self.GuardianPowerBox, TOCRColorFilter.Create([0]), RS_FONT_PLAIN_11);
+end;
+
+function TScript.GetRemainingTime(): Int32;
+begin
+  Result := 0;
+  Result := OCR.RecognizeNumber(Self.TimeBox, TOCRColorFilter.Create([16777215]), RS_FONT_PLAIN_12);
+end;
+
+// TORWENT EDIT: now uses Self.ECircle as the circle.
+function TScript.GetETypeRune(): Int32;
+var
+  i: Int32;
+  Cols: TIntegerArray = [16777215,15226142,3826845,1904361];
+  Counts: TIntegerArray = [142,146,136,189];
+  TPA: TPointArray;
+begin
+  Result := INACTIVE;
+
+  if Self.KeepTalismans.Len > 0 then
+  begin
+    if ((Self.KeepTalismans.Find('Portal talisman (air)') >= 0)   and Inventory.ContainsItem('Portal talisman (air)'))   then Exit(0);
+    if ((Self.KeepTalismans.Find('Portal talisman (water)') >= 0) and Inventory.ContainsItem('Portal talisman (water)')) then Exit(1);
+    if ((Self.KeepTalismans.Find('Portal talisman (earth)') >= 0) and Inventory.ContainsItem('Portal talisman (earth)')) then Exit(2);
+    if ((Self.KeepTalismans.Find('Portal talisman (fire)') >= 0)  and Inventory.ContainsItem('Portal talisman (fire)'))  then Exit(3);
+  end;
+
+  for i:=Low(Cols) to High(Cols) do
+    if SRL.FindColors(TPA, CTS1(Cols[i], 10), Self.ECircle.Bounds) > 0 then
+    begin
+      TPA := TPA.FilterDist(0, Self.ECircle.Radius, Self.ECircle.X, Self.ECircle.Y);
+      if TPA.Len = Counts[i] then
+        Exit(i);
+    end;
+end;
+
+// TORWENT EDIT: Now uses Self.CCircle as the circle.
+function TScript.GetCTypeRune(): Int32;
+var
+  i: Int32;
+  Cols: TIntegerArray = [1341146,15226142,65535,1341146,2608702,15226142,16777215,3352254];
+  Counts: TIntegerArray = [82,82,116,144,150,172,186,146];
+  TPA: TPointArray;
+begin
+  Result := INACTIVE;
+
+  if Self.KeepTalismans.Len > 0 then
+  begin
+    if ((Self.KeepTalismans.Find('Portal talisman (cosmic)') >= 0) and Inventory.ContainsItem('Portal talisman (cosmic)')) then Exit(6);
+    if ((Self.KeepTalismans.Find('Portal talisman (chaos)') >= 0)  and Inventory.ContainsItem('Portal talisman (chaos)'))  then Exit(7);
+    if ((Self.KeepTalismans.Find('Portal talisman (nature)') >= 0) and Inventory.ContainsItem('Portal talisman (nature)')) then Exit(8);
+    if ((Self.KeepTalismans.Find('Portal talisman (law)') >= 0)    and Inventory.ContainsItem('Portal talisman (law)'))    then Exit(9);
+    if ((Self.KeepTalismans.Find('Portal talisman (death)') >= 0)  and Inventory.ContainsItem('Portal talisman (death)'))  then Exit(10);
+    if ((Self.KeepTalismans.Find('Portal talisman (blood)') >= 0)  and Inventory.ContainsItem('Portal talisman (blood)'))  then Exit(11);
+  end;
+
+  for i:=Low(Cols) to High(Cols) do
+    if SRL.FindColors(TPA, CTS1(Cols[i], 10), Self.CCircle.Bounds) > 0 then
+    begin
+      TPA := TPA.FilterDist(0, Self.CCircle.Radius, Self.CCircle.X, Self.CCircle.Y);
+      if TPA.Len = Counts[i] then
+       Exit(i+4);
+    end;
+end;
+
+function TScript.IsPortalActive(): Boolean;
+var
+  Col: TCTS2Color := CTS2(3785983, 17, 0.06, 0.01);
+  SArr: TStringArray := ['SW -','SE -','S -','E -'];
+  Tiles: TPointArray := [[10316,12458],[10412,12458],[10360,12482],[10412,12418]];
+  TPA: TPointArray;
+  Loc: String;
+  i: Int32;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+  if InRange(GetPower, NEAREND, 100) then Exit;
+  if SRL.FindColors(TPA, Col, Self.PCircle.Bounds) > 0 then // TORWENT EDIT: now uses Self.PCircle as the circle.
+  begin
+    TPA    := TPA.FilterDist(0, Self.PCircle.Radius, Self.PCircle.X, Self.PCircle.Y);
+    Result := TPA.Len = 267;
+  end;
+
+  if Result then
+  begin
+    Loc := OCR.Recognize(Self.PBox, TOCRColorFilter.Create([16777215, 5]), RS_FONT_PLAIN_12);
+    for i:=0 to 3 do
+      if (Pos(SArr[i], Loc) <> 0) then
+      begin
+        Self.Obj_Portal.Coordinates := [Tiles[i]];
+        break;
+      end;
+  end;
+end;
+
+function TScript.GetCosmicPlatform(): TPoint;
+var
+  WallCol: TCTS0Color  := CTS0(15986161, 20);
+  FloorCol: TCTS0Color := CTS0(6710892, 20);
+  TPA: TPointArray;
+begin
+  if SRL.FindColors(TPA, FloorCol, Minimap.Bounds) > 0 then
+  begin
+    TPA := TPA.FilterDist(40, Minimap.Bounds.Width/2, Minimap.Center.X, Minimap.Center.Y);
+    if TPA.Len > 0 then
+      Exit(TPA.Mean);
+  end;
+
+  if SRL.FindColors(TPA, WallCol, Minimap.Bounds) > 0 then
+  begin
+    TPA := TPA.FilterDist(40, Minimap.Bounds.Width/2, Minimap.Center.X, Minimap.Center.Y);
+    if TPA.Len > 0 then
+      Exit(TPA.Mean);
+  end;
+end;
+
+function TScript.GetCosmicWalkway(): TPoint;
+var
+  WalkCol: TCTS2Color := CTS2(11053224, 11, 1.58, 0.05);
+  TPA,DelTPA,ResTPA: TPointArray;
+begin
+  if SRL.FindColors(TPA, WalkCol, Mainscreen.Bounds) > 0 then
+  begin
+    DelTPA := TPA;
+    FilterPointsBox(DelTPA, 1, 1, Self.PBox.X2, Self.PBox.Y2);
+    ResTPA := ClearTPAFromTPA(TPA, DelTPA);
+    if Length(ResTPA) < 1 then Exit;
+    SortTPAFrom(ResTPA, Mainscreen.Center);
+    Exit(ResTPA[High(ResTPA)]);
+  end;
+end;
+
+function TScript.GetEEnergy(): Int32;
+begin
+  Result := 0;
+  Result := OCR.RecognizeNumber(Self.EEnergyBox, TOCRColorFilter.Create([16777215]), RS_FONT_PLAIN_12);
+end;
+
+function TScript.GetCEnergy(): Int32;
+begin
+  Result := 0;
+  Result := OCR.RecognizeNumber(Self.CEnergyBox, TOCRColorFilter.Create([16777215]), RS_FONT_PLAIN_12);
+end;
+
+function TScript.GetEnergyDiff(): Int32;
+begin
+  Result := Max(0, Self.GetEEnergy - Self.GetCEnergy);
+end;
+
+function TScript.GetAltarLoc(): Int32;
+var MyPos: TPoint := Map.Position;
+begin
+  Result := UNKNOWN;
+
+  if MyPos.InBox([7220,31038,7352,31154]) then Exit(TYPEAIR);
+  if MyPos.InBox([6724,31046,6836,31146]) then Exit(TYPEWATER);
+  if MyPos.InBox([6440,31014,6616,31162]) then Exit(TYPEEARTH);
+  if MyPos.InBox([6172,31006,6308,31142]) then Exit(TYPEFIRE);
+
+  if MyPos.InBox([6948,31006,7116,31154]) then Exit(TYPEMIND);
+  if MyPos.InBox([5928,31010,6060,31138]) then Exit(TYPEBODY);
+  if MyPos.InBox([4380,31002,4568,31190]) then Exit(TYPECOSMIC);
+  if MyPos.InBox([4908,30998,5080,31126]) then Exit(TYPECHAOS);
+  if MyPos.InBox([5456,31018,5548,31110]) then Exit(TYPENATURE);
+  if MyPos.InBox([5700,31042,5828,31174]) then Exit(TYPELAW);
+  if MyPos.InBox([4640,30990,4832,31166]) then Exit(TYPEDEATH);
+  if MyPos.InBox([8780,30994,8892,31158]) then Exit(TYPEBLOOD);
+
+  if Minimap.PercentBlack > 50 then Exit(TYPECOSMIC);
+end;
+
+function TScript.CheckMessages(): Boolean;
+var
+  i: Int32;
+  Msg,Nums,S,S1,S2: String;
+begin
+  Chat.ClickContinue;
+  if InRange(Chat.GetScrollPosition, 1, 99) then
+    Chat.SetScrollPosition(100);
+
+  if Self.GameOver then Exit;
+  if Self.MsgCooldown.TimeRemaining > 0 then Exit;
+
+  Result := Chat.FindMessage('closed', [811014]);
+
+  if Result then
+    for i := 0 to 7 do
+    begin
+      S := Chat.GetMessage(i, [CHAT_COLOR_BLACK]);
+      if S.ContainsAny(['energy attuned','gy attuned']) then
+      begin
+        Self.WriteMsg('Rewards points chat line located');
+        Msg  := Chat.GetMessage(i, [2101487,CHAT_COLOR_BLACK]);
+        Nums := ExtractFromStr(Msg, Numbers);
+        if Nums.Len > 0 then
+        begin
+          try
+            S1 := Nums[1];
+            S2 := Nums[2];
+            Inc(Self.EPoints, StrToInt(S1));
+            Inc(Self.CPoints, StrToInt(S2));
+          except
+            Self.WriteMsg('Issue reading chat text');
+            Chat.SetScrollPosition(100);
+          end;
+        end;
+      end;
+    end;
+
+  if Chat.FindMessage('defeated', [2101487]) then
+    if Self.MsgCooldown.TimeRemaining <= 0 then
+    begin
+      Self.MsgCooldown.Init(120000);
+      Inc(Self.LossCount);
+      Inc(Self.LossStreak);
+      Self.GameOver := True;
+      Exit(True);
+    end;
+
+  if Result then
+  begin
+    if Msg.Len < 2 then Self.WriteMsg('Issue reading the chatbox to obtain reward points');
+    Inc(Self.WinCount);
+    Self.LossStreak := 0;
+    Self.GameOver := True;
+    Self.MsgCooldown.Init(120000);
+  end;
+end;
+
+function TScript.IsGameOver(WaitTime:Int32=0): Boolean;
+var T: TCountdown;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+  Result := (Self.GetPower() = 0) or (Self.GetPower() = 100);
+  if (Self.GetPower() = 100) then Result := Self.GetRemainingTime < 2;
+  if (not Result) then
+  begin
+    if WaitTime < 1 then Exit((Self.GetETypeRune = INACTIVE) and (Self.GetCTypeRune = INACTIVE));
+    if (Self.GetETypeRune = INACTIVE) and (Self.GetCTypeRune = INACTIVE) then
+    begin
+      T.Init(WaitTime);
+      while T.TimeRemaining > 0 do
+      begin
+        if (not(Self.GetETypeRune = INACTIVE)) or (not(Self.GetCTypeRune = INACTIVE)) then
+          Exit(False);
+        WaitEx(115, 15);
+      end;
+    end;
+
+    Result := (Self.GetETypeRune = INACTIVE) and (Self.GetCTypeRune = INACTIVE);
+  end;
+end;
+
+function TScript.HasDegradedPouch(): Boolean;
+var Pouches: TRSItemArray = [5511,5513,5515,26786];
+begin
+  Result := Inventory.ContainsAny(Pouches);
+end;
+
+function TScript.HasGuardStones(): Boolean;
+var Stones: TRSItemArray = ['Elemental guardian stone','Catalytic guardian stone','Polyelemental guardian stone'];
+begin
+  Result := Inventory.ContainsAny(Stones);
+end;
+
+function TScript.HasChargedCell(): Boolean;
+var Cells: TRSItemArray = ['Weak cell','Medium cell','Strong cell','Overcharged cell'];
+begin
+  Result := Inventory.ContainsAny(Cells);
+end;
+
+function TScript.HasRunes(): Boolean;
+var i: Int32;
+begin
+  for i:=TYPEAIR to TYPEBLOOD do
+    if Inventory.ContainsItem(RuneNames[i]+' rune') then
+      Exit(True);
+end;
+
+function TScript.HasTalismans(Which: String='Catalytic'): Boolean;
+begin
+  if Length(Self.KeepTalismans) < 1 then Exit;
+
+  case Which of
+    'Catalytic': Result := Inventory.ContainsAny(['Portal talisman (cosmic)','Portal talisman (chaos)','Portal talisman (nature)',
+                                                  'Portal talisman (death)','Portal talisman (blood)']);
+    'Elemental': Result := Inventory.ContainsAny(['Portal talisman (air)','Portal talisman (water)',
+                                                  'Portal talisman (earth)','Portal talisman (fire)']);
+  end;
+end;
+
+function TScript.CanCraftRunes(RuneType: Int32): Boolean;
+begin
+  case RuneType of
+    TYPEAIR..TYPEBODY: Result := True;
+    TYPECOSMIC       : Result := Self.CraftC;
+    TYPECHAOS        : Result := Self.RCLvl >= 35;
+    TYPENATURE       : Result := Self.RCLvl >= 44;
+    TYPELAW          : Result := (Self.RCLvl >= 54) and (Self.CraftL);
+    TYPEDEATH        : Result := (Self.RCLvl >= 65) and (Self.CraftD);
+    TYPEBLOOD        : Result := (Self.RCLvl >= 77) and (Self.CraftB);
+  end;
+
+  if (not Result) then
+    case RuneType of
+      TYPECOSMIC       : if Self.KeepTalismans.Find('Portal talisman (cosmic)') >= 0 then Result := Inventory.ContainsItem('Portal talisman (cosmic)');
+      TYPECHAOS        : if Self.KeepTalismans.Find('Portal talisman (chaos)') >= 0  then Result := Inventory.ContainsItem('Portal talisman (chaos)');
+      TYPENATURE       : if Self.KeepTalismans.Find('Portal talisman (nature)') >= 0 then Result := Inventory.ContainsItem('Portal talisman (nature)');
+      TYPELAW          : if Self.KeepTalismans.Find('Portal talisman (law)') >= 0    then Result := Inventory.ContainsItem('Portal talisman (law)');
+      TYPEDEATH        : if Self.KeepTalismans.Find('Portal talisman (death)') >= 0  then Result := Inventory.ContainsItem('Portal talisman (death)');
+      TYPEBLOOD        : if Self.KeepTalismans.Find('Portal talisman (blood)') >= 0  then Result := Inventory.ContainsItem('Portal talisman (blood)');
+    end;
+end;
+
+function TScript.DropStuff(): Boolean;
+var
+  i: Int32;
+  DropRunes,DropCells,
+  TalismansIA: TRSItemArray;
+  Talismans: TStringArray = ['Portal talisman (air)','Portal talisman (water)','Portal talisman (earth)','Portal talisman (fire)',
+                             'Portal talisman (mind)','Portal talisman (body)','Portal talisman (cosmic)','Portal talisman (chaos)',
+                             'Portal talisman (nature)','Portal talisman (law)','Portal talisman (death)','Portal talisman (blood)'];
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+  if Self.DropTimer.TimeRemaining > 0 then Exit;
+
+  if Length(Self.DropRunes) > 0 then
+  begin
+    for i:=0 to High(Self.DropRunes) do
+      if AnsiCompareStr(Self.DropRunes[i], '') > 0 then
+        DropRunes += Self.DropRunes[i];
+  end;
+
+  if Length(Self.DropCells) > 0 then
+  begin
+    if Self.CreateShields then
+      if (not InRange(Self.GetPower, 1, 99)) then Exit;
+
+    for i:=0 to High(Self.DropCells) do
+      if AnsiCompareStr(Self.DropCells[i], '') > 0 then
+        DropCells += Self.DropCells[i];
+  end;
+
+  if Length(Self.KeepTalismans) > 0 then
+  begin
+    for i:=0 to High(Self.KeepTalismans) do
+      if Talismans.Find(Self.KeepTalismans[i]) > 0 then
+        Talismans.Remove(Self.KeepTalismans[i]);
+  end;
+
+  for i:=0 to High(Talismans) do
+    TalismansIA += Talismans[i];
+
+  if SRL.Dice(65) then
+  begin
+    if Inventory.ShiftDrop(DropCells, Inventory.RandomPattern) then
+    begin
+      Result := True;
+      WaitEx(650, 40);
+      WaitUntil(not Inventory.ContainsAny(DropCells), 125, 3500);
+    end;
+    if SRL.Dice(65) then
+    begin
+      Inventory.ShiftDrop(DropRunes, Inventory.RandomPattern);
+      Inventory.ShiftDrop(TalismansIA, Inventory.RandomPattern);
+    end else
+    begin
+      Inventory.ShiftDrop(TalismansIA, Inventory.RandomPattern);
+      Inventory.ShiftDrop(DropRunes, Inventory.RandomPattern);
+    end;
+  end else
+  begin
+    Inventory.ShiftDrop(TalismansIA, Inventory.RandomPattern);
+    if Inventory.ShiftDrop(DropCells, Inventory.RandomPattern) then
+    begin
+      Result := True;
+      WaitEx(650, 40);
+      WaitUntil(not Inventory.ContainsAny(DropCells), 125, 3500);
+    end;
+    Inventory.ShiftDrop(DropRunes, Inventory.RandomPattern);
+  end;
+
+  Self.DropTimer.Init(2500);
+end;
+
+function TScript.HandlePouches(GiantOnly: Boolean=False): Boolean;
+var
+  i: Int32 := 0;
+  Empty: Boolean;
+  Pouches: TRSItemArray = ['Small pouch','Medium pouch',5511,'Large pouch',
+                           5513];
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+
+  if (not Self.CanUsePouches) then
+  begin
+    Self.TempIte := 1;
+    Exit;
+  end else
+    Self.TempIte := Self.PouchIterations;
+
+  if SRL.Dice(25) then
+    Pouches.Reverse;
+
+  if Inventory.ContainsItem('Colossal pouch') then
+  begin
+    Pouches := [];
+    Pouches := ['Colossal pouch',26786];
+  end;
+  if GiantOnly then
+  begin
+    Pouches := [];
+    Pouches += ['Giant pouch',5515,'Colossal pouch',26786];
+  end;
+
+  Empty := InRange(Self.GetAltarLoc, TYPEAIR, TYPEBLOOD);
+
+  for i to High(Pouches) do
+  begin
+    if (Inventory.ContainsItem(Pouches[i]) and Inventory.MouseItem(Pouches[i])) then
+    begin
+      if Empty then
+        if Mainscreen.IsUpText('Empty', 150) then
+        begin
+          Mouse.Click(MOUSE_LEFT);
+          Result := True;
+        end;
+      if (not Empty) then
+        if (not Mainscreen.IsUpText('Empty', 150)) then
+        begin
+          Mouse.Click(MOUSE_LEFT);
+          Result := True;
+        end;
+    end;
+    Wait(115, 175);
+  end;
+end;
+
+procedure TScript.RepairPouches();
+var T: TCountdown;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+
+  if Self.CheckMessages then
+    Self.Report;
+
+  if DEBUGMODE then
+    Self.WriteMsg('Repairing rune pouches');
+
+  if Self.CastSpell then
+  begin
+    if Self.GetPower = 100 then
+    begin
+      if DEBUGMODE then
+        Self.WriteMsg('Waiting for the game to end before repairing');
+      while Self.GetPower = 100 do
+      begin
+        if (not RSClient.IsLoggedIn) then Exit;
+        Antiban.DoAntiban(False, False);
+        WaitEx(300, 40);
+      end;
+
+      if Self.CheckMessages then
+        Self.Report;
+    end;
+
+    for 1 to 3 do
+    begin
+      if Self.CheckMessages then
+        Self.Report;
+      if (not Inventory.ContainsAny(['Rune pouch','Divine rune pouch'])) then
+      begin
+        Logout.ClickLogout;
+        TerminateScript('Lacking rune pouch to cast the NPC Contact spell');
+      end;
+      if Magic.MouseSpell(ERSSpell.NPC_CONTACT) then
+      begin
+        if ChooseOption.Select('Dark Mage', MOUSE_LEFT, True, True) then
+        begin
+          if WaitUntil(Chat.ClickContinue, 150, 9000) then
+          begin
+            if Chat.ChatToOption('repair') then
+            begin
+              Chat.ClickOption('repair', False);
+              if WaitUntil(Chat.ClickContinue, 150, 5000) then
+              begin
+                if Chat.ChatToOption('Thanks.') then
+                  Chat.ClickOption('Thanks.', False);
+
+                while Chat.HasContinue do
+                begin
+                  Chat.ClickContinue(False);
+                  WaitEx(650, 50);
+                end;
+
+                if WaitUntil((not Self.HasDegradedPouch), 150, 3000) then
+                begin
+                  if Self.CheckMessages then
+                    Self.Report;
+                  Exit;
+                end;
+              end;
+            end;
+          end else
+          begin
+            if Chat.FindMessage('do not have enough', [CHAT_COLOR_BLACK]) then
+            begin
+              Logout.ClickLogout;
+              TerminateScript('Insufficient runes in pouch to cast the NPC Contact spell');
+            end;
+          end;
+        end else
+        begin
+          Mouse.Move(GameTabs.Boxes[ERSGameTab.MAGIC]);
+          if (not ChooseOption.Select('Enable')) then
+          begin
+            Logout.ClickLogout;
+            TerminateScript('Failed to set spell filtering');
+          end;
+        end;
+      end else
+      begin
+        Logout.ClickLogout;
+        TerminateScript('Not on lunar spell book or insufficient runes to cast NPC Contact');
+      end;
+      if Chat.FindMessage('do not have enough', [CHAT_COLOR_BLACK]) then
+      begin
+        Logout.ClickLogout;
+        TerminateScript('Insufficient runes in pouch to cast the NPC Contact spell');
+      end;
+    end;
+  end else
+  begin
+    if (not Inventory.ContainsItem('Abyssal pearls')) then
+    begin
+      if DEBUGMODE then
+        Self.WriteMsg('Out of abyssal pearls, disabling pouches');
+
+      Self.CanUsePouches := False;
+      Exit;
+    end;
+
+    if (not Self.IsInTemple) then
+    begin
+      if DEBUGMODE then
+        Self.WriteMsg('Not in the temple');
+      Exit;
+    end;
+
+    Map.Walker.WalkBlind([10372,12478]);
+    While Minimap.IsPlayerMoving(1000) do
+      WaitEx(125, 20);
+
+    if Self.GetPower = 100 then
+    begin
+      if DEBUGMODE then
+        Self.WriteMsg('Waiting for the game to end before repairing');
+
+      if Self.RepairShields then
+        Self.TakeCells;
+
+      while Self.GetPower = 100 do
+      begin
+        if (not RSClient.IsLoggedIn) then Exit;
+        Antiban.DoAntiban(False, False);
+        WaitEx(300, 40);
+      end;
+    end;
+
+    T.Init(15000);
+    repeat
+      if Self.NPC_Cordelia.WalkHover(2) then break;
+
+      if Mainscreen.IsUpText(Self.NPC_Cordelia.UpText) then
+        break;
+      if SRL.Dice(35) then
+        Antiban.SmallCameraRotation;
+      WaitEx(100,15);
+    until(T.TimeRemaining < 1);
+
+    if Mainscreen.IsUpText(NPC_Cordelia.UpText) then
+    begin
+      ChooseOption.Select('Repair');
+      Minimap.WaitFlag;
+      if WaitUntil(Chat.ClickContinue, 150, 10000) then
+      begin
+        T.Init(17000);
+        while (not T.IsFinished) and (Chat.GetChatTitle <> '') do
+        begin
+          Chat.ClickContinue;
+          if (not Self.HasDegradedPouch) then
+          begin
+            Self.CanUsePouches := True;
+            if Self.CheckMessages then
+              Self.Report;
+            if Self.RepairShields then
+              Self.TakeCells;
+            Exit;
+          end;
+          WaitEx(125, 20);
+        end;
+      end;
+    end;
+
+    if DEBUGMODE then
+      Self.WriteMsg('Failed to repair essence pouches, disabling');
+
+    Self.CanUsePouches := False;
+  end;
+end;
+
+function TScript.PeekBarrier(): Boolean;
+var
+  i: Int32;
+  S: String;
+  T: TCountdown;
+  TSA: TStringArray := ['closed','finishing','calm','recovering','no threat'];
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+
+  if DEBUGMODE then
+    Self.WriteMsg('Peeking in the barrier');
+
+  if (not Self.Obj_Barrier.WalkSelectOption(['Peek'], 3)) then Exit;
+
+  Minimap.WaitFlag;
+  T.Init(SRL.NormalRange(3000,4500));
+  while (not T.IsFinished) do
+  begin
+    S := OCR.Recognize(Chat.Bounds, TOCRColorFilter.Create([128,$000000]), RS_FONT_QUILL_8);
+    for i:=0 to High(TSA) do
+      if TSA[i] in S then
+        Exit(True);
+    WaitEx(250, 50);
+  end;
+end;
+
+function TScript.HandleBarrier(Enter: Boolean=True): Boolean;
+var
+  T: TCountdown;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+
+  if Enter then
+  begin
+    if DEBUGMODE then
+      Self.WriteMsg('Attempting to enter the game');
+  end else
+  begin
+    if DEBUGMODE then
+      Self.WriteMsg('Exiting the game');
+  end;
+
+  if Enter then
+  begin
+    if Self.IsInTemple then Exit(True);
+
+    if Self.Obj_Barrier.Click(True, 2) then
+      if WaitUntil(Chat.FindOption('Click here to continue', [CHAT_COLOR_BLUE, CHAT_COLOR_WHITE]), 125, 3200) then
+        if (not Self.PeekBarrier) then
+        begin
+          if DEBUGMODE then
+            Self.WriteMsg('On-going game, waiting a little while');
+
+          T.Init(SRL.NormalRange(9000, 20000));
+          while (not T.IsFinished) do
+          begin
+            if (not RSClient.IsLoggedIn) then Exit;
+            if SRL.Dice(5) then
+              Chat.ClickContinue(False);
+            Antiban.DoAntiban(False, False);
+            WaitEx(250, 75);
+          end;
+
+          Exit;
+        end;
+
+    T.Init(120000);
+    while (not T.IsFinished) do
+    begin
+      if (not RSClient.IsLoggedIn) then Exit;
+      if Self.IsInTemple then Exit(True);
+      if Self.Obj_Barrier.Click(True, 2) then
+        if (not WaitUntil(Chat.FindOption('Click here to continue', [CHAT_COLOR_BLUE, CHAT_COLOR_WHITE]), 125, 3200)) then
+          break;
+      Antiban.DoAntiban(False, False);
+      WaitEx(150, 75);
+    end;
+
+    Minimap.WaitPlayerMoving;
+  end else
+  begin
+    Self.Obj_Barrier.Click(True, 2);
+    Minimap.WaitFlag;
+
+    if WaitUntil(Chat.ClickOption('Yes.'), 150, 4000) then
+      if WaitUntil(Minimap.IsPlayerMoving, 150, 3500) then
+        Minimap.WaitPlayerMoving;
+  end;
+
+  if Enter then
+    Result := Self.IsInTemple
+  else
+    Result := Self.IsInLobby;
+end;
+
+function TScript.ExitWestArea(): Boolean;
+var
+  Clicked,Ended: Boolean;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+
+  if DEBUGMODE then
+    Self.WriteMsg('Exiting the west mining area');
+
+  for 1 to 3 do
+  begin
+    if Self.Obj_WestPortal.IsVisible then
+      Clicked := Self.Obj_WestPortal.Click(True, 1)
+    else
+      Clicked := Self.Obj_WestPortal.WalkClick(True, 2);
+
+    if Clicked then break;
+    Antiban.SmallCameraRotation;
+  end;
+
+  if (not Clicked) then
+  begin
+    if DEBUGMODE then
+      Self.WriteMsg('Failed to interact with the portal (west mining area)');
+    Exit;
+  end;
+
+  Ended := (not InRange(Self.GetPower,1,100));
+  Minimap.WaitFlag(3);
+  While Minimap.IsPlayerMoving(1000) do
+    WaitEx(125, 20);
+
+  if WaitUntil(Self.IsInTemple, 150, 6000) then
+  begin
+    if (not Ended) then
+      WaitUntil((Self.GetETypeRune < INACTIVE), 150, 6000);
+  end;
+
+  Result := Self.IsInTemple;
+end;
+
+function TScript.ExitEastArea(): Boolean;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+
+  if DEBUGMODE then
+    Self.WriteMsg('Exiting the east mining area');
+
+  if (not Self.Obj_RubbleE.Click(True, 2)) then
+    if (not Self.Obj_RubbleE.WalkClick(True, 3)) then
+    begin
+      if DEBUGMODE then
+        Self.WriteMsg('Failed to interact with the rubble (bottom)');
+      Exit;
+    end;
+
+  Minimap.WaitFlag(5);
+  While Minimap.IsPlayerMoving(1000) do
+    WaitEx(125, 20);
+
+  Result := WaitUntil(Self.IsInTemple, 150, 7000);
+
+  if Result then
+    While Minimap.IsPlayerMoving(1000) do
+      WaitEx(125, 20);
+end;
+
+function TScript.ExitCurrentAltar(): Boolean;
+var
+  Loc: Int32 := Self.GetAltarLoc;
+  Portal: PRSMapObject;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+  if Self.IsInTemple then Exit;
+
+  if Self.IsInWestArea then
+    if (not Self.ExitWestArea) then
+    begin
+      Logout.ClickLogout;
+      TerminateScript('Failed to exit the west mining area');
+    end;
+
+  if (not InRange(Loc, TYPEAIR, TYPEBLOOD)) then
+  begin
+    if DEBUGMODE then
+      Self.WriteMsg('Unknown altar location, Pos: '+ToStr(Map.Position));
+    Exit;
+  end;
+
+  if DEBUGMODE then
+    Self.WriteMsg('Exiting the '+RuneNames[Loc]+' altar');
+
+  if Self.IsInTemple then Exit;
+  Portal := Self.ExitPortals.MapObjects.GetClosest();
+
+  try
+    for 1 to 3 do
+    begin
+      if Self.IsInTemple then Exit(True);
+      try
+        if Portal^.WalkClick(True, 2) then
+        begin
+          Minimap.WaitFlag(20);
+          if SRL.Dice(65) then
+            if (not Self.IsPortalActive) then
+              Mouse.Move(Map.GetTileMS([10364+RandomRange(-15,15),12470+RandomRange(-15,15)], [10364+RandomRange(-15,15),12442+RandomRange(-15,15)]));
+
+          if WaitUntil(Self.IsInTemple, 150, 9000) then Exit(True);
+        end else
+          Antiban.SmallCameraRotation;
+      except
+      end;
+    end;
+  except
+  end;
+end;
+
+function TScript.DepositRunes(): Boolean;
+var
+  i: Int32;
+  Clicked: Boolean;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+
+  if (not Self.IsInTemple) then Exit;
+
+  if DEBUGMODE then
+    Self.WriteMsg('Depositing runes');
+
+  Clicked := Self.Obj_Depositpool.WalkClick(True, 4);
+
+  if (not Clicked) then
+  begin
+    Minimap.WaitFlag(5);
+    if (not Self.Obj_Depositpool.WalkClick(True, 2)) then
+    begin
+      if DEBUGMODE then
+        Self.WriteMsg('Failed to interact with the deposit pool');
+      Exit;
+    end;
+  end else
+  begin
+    for i:=0 to High(Self.CraftedRunes) do
+      if Inventory.ContainsItem(Self.CraftedRunes[i]) then
+        Inc(Self.RunesCount[i], Inventory.CountItemStack(Self.CraftedRunes[i]));
+  end;
+
+  Minimap.WaitFlag(5);
+  Result := WaitUntil((not Self.HasRunes), 75, 5000);
+end;
+
+function TScript.ResetPosition(): Boolean;
+var Clicked: Boolean;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+
+  if DEBUGMODE then
+    Self.WriteMsg('Resetting to starting position');
+
+  if Self.CanMineEast then
+  begin
+    if (not Self.IsInEastArea) then
+    begin
+      Map.Walker.WalkBlind([10428,12422], SRL.NormalRange(11,17));
+      for 1 to 3 do
+      begin
+        if Self.Obj_RubbleW.Click(True, 2) then
+        begin
+          Clicked := True;
+          break;
+        end;
+        while Minimap.IsPlayerMoving(1000) do WaitEx(125, 20);
+      end;
+
+      if (not Clicked) then
+      begin
+        Self.WriteMsg('Issue clicking the rubble (top)');
+        Exit;
+      end;
+
+      Minimap.WaitFlag(3);
+      While Minimap.IsPlayerMoving(1000) do
+        WaitEx(125, 20);
+      if WaitUntil(Minimap.IsPlayerMoving(1000), 150, 4000) then
+        While Minimap.IsPlayerMoving(1000) do
+          WaitEx(125, 20);
+
+      if WaitUntil(Self.IsInEastArea, 75, 5000) then
+      begin
+        While Minimap.IsPlayerMoving(1000) do
+          WaitEx(125, 20);
+      end else
+      begin
+        if (Pos('56', Chat.GetChat) <> 0) then
+        begin
+          Self.WriteMsg('Player is < 56 Agility, adjusting location to mine fragments');
+          Self.CanMineEast := False;
+          Exit;
+        end;
+      end;
+    end;
+
+    Result := Self.IsInEastArea;
+
+    if (not Result) then
+    begin
+      Self.WriteMsg('Issue descending the rubble to the east area');
+      Exit;
+    end;
+
+    if SRL.Dice(75) then
+      Map.Walker.WalkBlind([10464,12430], RandomRange(7,12))
+    else
+      Map.Walker.WalkBlind([10460,12406], RandomRange(7,12));
+  end else
+    Result := Map.Walker.WalkBlind(SRL.RandomPoint(Box([10328,12474],15,15)), RandomRange(7,12));
+
+  if Self.HasDegradedPouch then
+    if Self.CastSpell then
+      Self.RepairPouches;
+
+  WaitEx(100, 25);
+end;
+
+function TScript.EnterPortal(): Boolean;
+var
+  Clicked: Boolean;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+  if Self.IsInWestArea then Exit;
+  if (not Self.IsInTemple) then Exit;
+  if InRange(Self.GetAltarLoc, TYPEAIR, TYPEBLOOD) then
+    Self.ExitCurrentAltar;
+
+  if DEBUGMODE then
+    Self.WriteMsg('Entering the portal');
+
+  Self.IsPortal := True;
+  try
+    for 1 to 4 do
+    begin
+      if (not Self.IsInTemple) then break;
+      if Self.Obj_Portal.WalkClick(True, 3) then
+      begin
+        Clicked := True;
+        break;
+      end;
+
+      if (not Self.IsPortalActive) or (not Self.IsInTemple) then
+      begin
+        if (not Self.IsPortalActive) then
+          if DEBUGMODE then
+            Self.WriteMsg('Missed the portal, exiting');
+        Exit;
+      end;
+
+      Antiban.SmallCameraRotation;
+    end;
+  finally
+    Self.IsPortal := False;
+  end;
+
+  Self.IsPortal := False;
+
+  if (not Clicked) then
+  begin
+    if DEBUGMODE then
+      Self.WriteMsg('Failed to interact with the portal');
+    Exit;
+  end;
+
+  while Minimap.IsPlayerMoving(1000) do
+    WaitEx(100, 15);
+
+  if WaitUntil(Self.IsInWestArea, 150, 3200) then
+    WaitUntil(InRange(Self.GetETypeRune, TYPEAIR, TYPEBLOOD), 150, 5000);
+
+  Result := Self.IsInWestArea;
+end;
+
+function TScript.Mine(Material: String; Limit: Int32 = -1): Boolean
+var
+  i,TempPI,Count: Int32;
+  SetTimer,Clicked,HP: Boolean;
+  T,PortalTimer: TCountdown;
+  Slots: TIntegerArray;
+  TempObj: PRSMapObject;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+
+  if Material = 'Essence' then
+  begin
+    if (not WaitUntil(Self.IsInWestArea, 75, 500)) then Exit;
+
+    if Inventory.IsFull then Exit;
+    if DEBUGMODE then
+      Self.WriteMsg('Mining essence');
+
+    if Self.IsGameOver(1500) then
+    begin
+      if DEBUGMODE then
+        Self.WriteMsg('Game over, exiting the west area [1]');
+      Exit;
+    end;
+
+    if SRL.Dice(35) then
+      Map.Walker.WalkBlind([10264,12406], SRL.NormalRange(7,13));
+
+    TempPI := Self.TempIte;
+
+    if InRange(Self.GetPower, NEAREND, 100) then
+      TempPI := Min(1, Self.TempIte);
+
+    for 1 to 3 do
+      if Self.Obj_HugeRemains.Click(True, 1) then
+      begin
+        Clicked := True;
+        break;
+      end;
+
+    if Clicked then
+    begin
+      Count := Inventory.Count;
+      Minimap.HasFlag(250);
+      if TempPI > 0 then
+        if SRL.Dice(75) then
+        begin
+          Minimap.WaitFlag(SRL.NormalRange(12,23));
+          if SRL.Dice(85) then
+          begin
+            if Inventory.Finditems(['Small pouch','Medium pouch',5511,'Large pouch',5513,'Colossal pouch',26786], Slots) then
+              Inventory.MouseSlot(SRL.TruncatedGauss(Slots[0],Slots[Length(Slots)-1]));
+          end else
+            Mouse.Move(Inventory.Bounds);
+        end;
+
+      for i:=0 to TempPI do
+      begin
+        T.Init(15000);
+        while (T.TimeRemaining > 0) do
+        begin
+          if (not RSClient.IsLoggedIn) then Exit;
+
+          if Self.IsGameOver(1500) then
+          begin
+            if DEBUGMODE then
+              Self.WriteMsg('Game over, exiting the west area [2]');
+            Exit;
+          end;
+
+          Antiban.DoAntiban(False, False);
+
+          if (Pos('pickaxe', Chat.GetChat) <> 0) then
+          begin
+            Self.WriteMsg('No pickaxe');
+            Logout.ClickLogout;
+            TerminateScript('Player does not have a pickaxe');
+          end;
+
+          if Inventory.IsFull then
+          begin
+            if InRange(Self.GetPower, NEAREND, 100) or (i = TempPI) then Exit(True);
+            break;
+          end;
+
+          WaitEx(250,50);
+        end;
+
+        if i = 1 then
+          HP := Self.HandlePouches(True) // Giant/colossal pouch only
+        else
+          HP := Self.HandlePouches;
+
+        if (not HP) then break;
+        if Self.Obj_HugeRemains.Click(True, 3) then
+          Chat.LeveledUp;
+
+        WaitEx(250, 50);
+      end;
+    end;
+    Result := WaitUntil(Inventory.IsFull, 120, 4000);
+    WaitEx(250,50);
+  end else if Material = 'Fragments' then
+  begin
+    if DEBUGMODE then
+      Self.WriteMsg('Mining fragments: '+ToStr(Limit));
+
+    if Self.IsInEastArea() then
+    begin
+      WaitUntil((Self.GetRemainingTime>0) or (Chat.FindMessage('The rift becomes active!',[2101487])), 150, 45000);
+      Self.WriteMsg('Mining fragments in the east mining area');
+
+      if (not Self.Obj_LargeRemains.WalkClick(True, 3)) then
+      begin
+        if DEBUGMODE then
+          Self.WriteMsg('Failed to interact with the large remains object');
+        Antiban.RandomRotate;
+        Exit;
+      end;
+
+      if SRL.Dice(65) then
+        Mouse.RandomMovement;
+
+      Minimap.WaitFlag(5);
+
+      Count := Inventory.CountItemStack('Guardian fragments');
+
+      T.Init(6000);
+      while (T.TimeRemaining > 0) do
+      begin
+        if (not RSClient.IsLoggedIn) then Exit;
+        Antiban.DoAntiban(False, False);
+
+        if Self.AutoFrags then
+        begin
+          if SetTimer then
+          begin
+            if PortalTimer.TimeRemaining < 1 then
+            begin
+              if DEBUGMODE then
+                Self.WriteMsg('Exiting the mining area to catch the first portal');
+              if Self.ExitEastArea then
+              begin
+                if Self.HasDegradedPouch and (not Self.CanUsePouches) then
+                  Self.RepairPouches;
+                Exit(True);
+              end;
+            end;
+          end;
+
+          if (Self.GetETypeRune < INACTIVE) or (Self.GetCTypeRune < INACTIVE) then
+          begin
+            if (not SetTimer) then
+            begin
+              if Self.HasDegradedPouch and (not Self.CanUsePouches) then
+                PortalTimer.Init(14000+RandomRange(-2000,2000))
+              else
+                PortalTimer.Init(21000+RandomRange(-2000,2000));
+
+              if DEBUGMODE then
+                Self.WriteMsg('Time until we exit the mining area: '+SRL.MsToTime(PortalTimer.TimeRemaining, Time_Short));
+
+              SetTimer := True;
+            end;
+          end;
+
+          if (Inventory.CountItemStack('Guardian fragments') >= 275) then
+          begin
+            if DEBUGMODE then
+              Self.WriteMsg('Exiting the mining area to catch the first portal');
+            if Self.ExitEastArea then
+            begin
+              if Self.HasDegradedPouch and (not Self.CanUsePouches) then
+                Self.RepairPouches;
+              Exit(True);
+            end;
+          end;
+        end;
+
+        if (Pos('pickaxe', Chat.GetChat) <> 0) then
+        begin
+          Self.WriteMsg('No pickaxe');
+          Logout.ClickLogout;
+          TerminateScript('Player does not have a pickaxe');
+        end;
+
+        if Chat.FindOption('Click here to continue', [CHAT_COLOR_BLUE, CHAT_COLOR_WHITE]) then
+          Self.Obj_LargeRemains.Click(True, 2);
+
+        if (not Self.AutoFrags) then
+          if (Inventory.CountItemStack('Guardian fragments') >= Limit) then
+          begin
+            Self.WriteMsg('Fragment limit reached');
+            Exit(True);
+          end;
+
+        if Count <> Inventory.CountItemStack('Guardian fragments') then
+        begin
+          T.Restart();
+          Count := Inventory.CountItemStack('Guardian fragments');
+        end;
+
+        if Self.IsPortalActive then
+        begin
+          if DEBUGMODE then
+            Self.WriteMsg('Portal active, exiting east mining area');
+          if Self.ExitEastArea then
+            Exit(True);
+        end;
+
+        WaitEx(250,50);
+      end;
+
+      Result := (Inventory.CountItemStack('Guardian fragments') >= Limit);
+      WaitEx(250,50);
+    end else
+    begin
+      if SRL.Dice(75) then
+        TempObj := Self.Remains.MapObjects.GetClosest()
+      else
+        TempObj := Self.Parts.MapObjects.GetClosest();
+
+      if (not TempObj^.WalkClick(True, 4)) then
+      begin
+        if DEBUGMODE then
+          Self.WriteMsg('Failed to interact with the remains object');
+        Exit;
+      end;
+
+      Minimap.WaitFlag(5);
+      Count := Inventory.CountItemStack('Guardian fragments');
+
+      T.Init(6000);
+      while (T.TimeRemaining > 0) do
+      begin
+        if (not RSClient.IsLoggedIn) then Exit;
+        if Inventory.Count < 27 then
+          if Self.IsPortalActive then
+          begin
+            if DEBUGMODE then
+              Self.WriteMsg('Stop mining to catch a portal');
+            Exit;
+          end;
+
+        Antiban.DoAntiban(False, False);
+
+        if (Pos('pickaxe', Chat.GetChat) <> 0) then
+        begin
+          Self.WriteMsg('No pickaxe');
+          Logout.ClickLogout;
+          TerminateScript('Player does not have a pickaxe');
+        end;
+
+        if Chat.FindOption('Click here to continue', [CHAT_COLOR_BLUE, CHAT_COLOR_WHITE]) then
+          if (not TempObj^.Click(True, 2)) then
+          begin
+            if DEBUGMODE then
+              Self.WriteMsg('Failed to interact with the remains object');
+            Exit;
+          end;
+
+        if Limit > -1 then
+        begin
+          if (not InRange(Self.GetPower,1,99)) then Exit;
+          if (Inventory.CountItemStack('Guardian fragments') >= Limit) then
+            break;
+
+          if InRange(Self.GetPower, NEAREND, 100) then // Nearing the end of a game
+            if Inventory.CountItemStack('Guardian fragments') >= 25 then
+            begin
+              Result := True;
+              waitEx(250,50);
+              Exit;
+            end;
+        end;
+
+        if Self.CatalyticOnly then
+        begin
+          Self.RIndex := Self.GetCTypeRune;
+          if Self.CanCraftRunes(Self.RIndex) then
+            if Inventory.Count >= 24 then
+              Exit;
+        end;
+
+        if Self.ElementalOnly then
+        begin
+          Self.RIndex := Self.GetETypeRune;
+          if Inventory.Count >= 24 then
+            Exit;
+        end;
+
+        if ((Self.ForceBal) and (Self.GetEnergyDiff >= 25)) then
+        begin
+          Self.RIndex := Self.GetCTypeRune;
+          if Self.CanCraftRunes(Self.RIndex) then
+            if Inventory.Count >= 24 then
+            begin
+              if DEBUGMODE then
+                Self.WriteMsg('Stop mining to craft catalytic runes');
+              Exit;
+            end;
+        end;
+
+        if Count <> Inventory.CountItemStack('Guardian fragments') then
+        begin
+          T.Restart();
+          Count := Inventory.CountItemStack('Guardian fragments');
+        end;
+
+        waitEx(250,50);
+      end;
+
+      if Limit > -1 then
+        Result := (Inventory.CountItemStack('Guardian fragments') >= Limit);
+      waitEx(250,50);
+    end;
+  end;
+end;
+
+function TScript.CraftEssence(): Boolean
+var
+  i,TempPI: Int32;
+  Clicked,HP: Boolean;
+  T: TCountdown;
+  Slots: TIntegerArray;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+  if Self.GetPower = 100 then Exit;
+
+  Self.MadeShield := False;
+
+  if Self.IsPortalActive then
+    if (not InRange(Self.GetPower, NEAREND, 100)) then
+      if (Inventory.Count < 24) then
+        Exit;
+
+  if Self.HasRunes then
+    Self.DepositRunes;
+
+  if DEBUGMODE then
+    Self.WriteMsg('Crafting essence');
+
+  try
+    for 1 to 2 do
+    begin
+      Clicked := Self.Obj_Workbench.WalkClick(True, 3);
+
+      if Clicked then break;
+      if Self.IsPortalActive then
+        if (Inventory.Count < 24) then
+          Exit;
+      if Clicked then break;
+    end;
+
+    TempPI := Self.TempIte;
+    if InRange(Self.GetPower, NEAREND, 100) then
+      TempPI := Min(1, Self.TempIte);
+
+    if Clicked then
+    begin
+      Minimap.HasFlag(250);
+      if TempPI > 0 then
+        if SRL.Dice(75) then
+        begin
+          Minimap.WaitFlag(SRL.NormalRange(12,23));
+          if SRL.Dice(85) then
+          begin
+            if Inventory.Finditems(['Small pouch','Medium pouch',5511,'Large pouch',5513,'Colossal pouch',26786], Slots) then
+              Inventory.MouseSlot(SRL.TruncatedGauss(Slots[0],Slots[Length(Slots)-1]));
+          end else
+            Mouse.Move(Inventory.Bounds);
+        end;
+
+      for i:=0 to TempPI do
+      begin
+        T.Init(20000);
+        while (T.TimeRemaining > 0) do
+        begin
+          if (not RSClient.IsLoggedIn) then Exit;
+          if Self.IsGameOver then break;
+
+          if Self.GetPower > RandomRange(96,99) then
+            if Inventory.CountItem('Guardian essence') > RandomRange(7,10) then Exit(True)
+
+          if (not HP) then
+            if Self.IsPortalActive then
+              if (i < TempPI) and (Inventory.Count < 24) then Exit;
+
+          if Chat.ClickContinue then Exit;
+          Antiban.DoAntiban(False, False);
+          if (Inventory.CountItemStack('Guardian fragments') < 1) then
+            break;
+          if Inventory.Count >= SRL.NormalRange(23, 28) then
+            if (i < TempPI) then
+              if SRL.Dice(85) then
+              begin
+                if Inventory.Finditems(['Small pouch','Medium pouch',5511,'Large pouch',5513,'Colossal pouch',26786], Slots) then
+                  Inventory.MouseSlot(SRL.TruncatedGauss(Slots[0],Slots[Length(Slots)-1]));
+              end else
+                Mouse.Move(Inventory.Bounds);
+
+          if Inventory.IsFull then
+            if i = TempPI then
+              Exit(True)
+            else
+              break;
+          WaitEx(200,60);
+        end;
+
+        if (Inventory.CountItemStack('Guardian fragments') < 1) then Exit;
+        if InRange(Self.GetPower, NEAREND, 100) then break;
+        if Self.IsGameOver then break;
+
+        if i = 1 then
+          HP := Self.HandlePouches(True) // Giant/colossal pouch only
+        else
+          HP := Self.HandlePouches;
+
+        if (not HP) then break;
+        if Self.Obj_Workbench.Click(True, 3) then
+          Chat.LeveledUp;
+      end;
+    end;
+  except
+  end;
+
+  WaitEx(250,50);
+
+  if Self.IsGameOver then
+  begin
+    if DEBUGMODE then
+      Self.WriteMsg('Game over while crafting essence');
+    if Self.CheckMessages then
+      Self.Report;
+    T.Init(20000);
+    while (T.TimeRemaining > 0) do
+    begin
+      if Self.GetETypeRune <> INACTIVE then break;
+      Antiban.DoAntiban(False, False);
+      WaitEx(200, 70);
+    end;
+  end;
+end;
+
+function TScript.EnterObelisk(): Boolean
+  function GetBestOption: Int32;
+  begin
+    if (not Self.ForceBal) then
+    begin
+      if Self.GetCEnergy > Self.GetEEnergy then
+        Exit(Self.GetETypeRune)
+      else
+        Exit(Self.GetCTypeRune);
+    end;
+    if (Self.GetEnergyDiff >= 25) then Exit(Self.GetCTypeRune);
+    if Self.GetCEnergy > Self.GetEEnergy then
+    begin
+      if (Self.GetCEnergy - Self.GetEEnergy) < 25 then Exit(Self.GetCTypeRune);
+      if (Self.GetCEnergy - Self.GetEEnergy) < 50 then
+        if ((not Self.CraftD) and (not Self.CraftB)) then Exit(Self.GetCTypeRune);
+    end else if (Self.GetEEnergy > Self.GetCEnergy) or (Self.GetCEnergy = Self.GetEEnergy) then Exit(Self.GetCTypeRune);
+    Result := Self.GetETypeRune;
+  end;
+var
+  T: TCountDown;
+  Clicked: Boolean;
+label
+  GetIndex;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+  if (not Self.IsInTemple) then Exit;
+
+  if Self.CatalyticOnly then
+  begin
+    Self.RIndex := Self.GetCTypeRune;
+    if (not Self.CanCraftRunes(Self.RIndex)) then
+      Exit;
+  end;
+
+  if Self.ElementalOnly then
+    Self.RIndex := Self.GetETypeRune;
+
+  if ((not Self.CatalyticOnly) and (not Self.ElementalOnly)) then
+  begin
+    GetIndex:
+    Self.RIndex := GetBestOption;
+    if (Self.RIndex >= INACTIVE) then Exit;
+    Self.WriteMsg('Best rune option determined: '+RuneNames[Self.RIndex]);
+    if (not Self.CanCraftRunes(Self.RIndex)) then
+      if ((Self.ForceBal) and (InRange((Self.GetCEnergy-Self.GetEEnergy), 0, 25)))  then
+      begin
+        if Self.GetRemainingTime > 7 then
+          Self.RIndex := Self.GetETypeRune
+        else
+        begin
+          if DEBUGMODE then
+            Self.WriteMsg('Waiting for an available catalytic obelisk to open');
+          T.Init(12000);
+          while Self.GetRemainingTime < 7 do
+          begin
+            if (not RSClient.IsLoggedIn) then Exit;
+            if Self.IsGameOver(1500) then Exit;
+
+            Self.RIndex := GetBestOption;
+            if (Self.RIndex >= INACTIVE) then Exit;
+            if Self.CanCraftRunes(Self.RIndex) then
+            begin
+              Self.WriteMsg('Best rune option determined: '+RuneNames[Self.RIndex]);
+              break;
+            end;
+
+            Antiban.DoAntiban(False, False);
+            WaitEx(250, 50);
+          end;
+        end;
+      end else
+        Self.RIndex := Self.GetETypeRune;
+  end;
+
+  if (not InRange(Self.RIndex, TYPEAIR, TYPEBLOOD)) then Exit;
+
+  if Self.GetRemainingTime < 7 then
+    if Distance(Map.Position, Self.Obj_Obelisks[Self.RIndex].Coordinates[0]) > 25 then
+    begin
+      if DEBUGMODE then
+        Self.WriteMsg('Waiting for the obelisk change');
+
+      while Self.GetRemainingTime < 7 do
+      begin
+        if (not RSClient.IsLoggedIn) then Exit;
+        if Self.IsGameOver(1500) then
+          Exit;
+
+        Antiban.DoAntiban(False, False);
+
+        WaitEx(250, 50);
+      end;
+      Exit;
+    end;
+
+  if DEBUGMODE then
+    Self.WriteMsg('Entering the '+RuneNames[Self.RIndex]+' obelisk');
+
+  Self.IsObelisk := True;
+
+  for 1 to 3 do
+  begin
+    if (Self.RIndex <> Self.GetETypeRune) and (Self.RIndex <> Self.GetCTypeRune) then
+    begin
+      Self.WriteMsg('Obelisk changed, canceling action');
+      Self.IsObelisk := False;
+      Exit;
+    end;
+
+    Clicked := Self.Obj_Obelisks[Self.RIndex].WalkClick(True, 3);
+
+    if Clicked then Break;
+  end;
+
+  Self.IsObelisk := False;
+
+  if (not Clicked) then
+  begin
+    if DEBUGMODE then
+      Self.WriteMsg('Failed to interact with the '+RuneNames[Self.RIndex]+' obelisk');
+    Exit;
+  end;
+
+  Minimap.WaitFlag(5);
+  T.Init(7500);
+  while T.TimeRemaining > 0 do
+  begin
+    if Chat.FindOption('Click here to continue', [CHAT_COLOR_BLUE, CHAT_COLOR_WHITE]) then
+      Exit;
+    if (not Self.IsInTemple) then break;
+    WaitEx(150,50);
+  end;
+
+  Result := (not Self.IsInTemple);
+
+  if (not Result) then
+    if Self.IsGameOver(1500) then
+      if DEBUGMODE then
+        Self.WriteMsg('Game ended after entering the '+RuneNames[Self.RIndex]+' obelisk');
+
+  WaitEx(75, 10);
+end;
+
+function TScript.CraftRunes(): Boolean
+var
+  B: TBox;
+  MSPnt: TPoint;
+  i,Loc,TempPI: Int32;
+  HP,Clicked,SkipPortal: Boolean;
+  Slots: TIntegerArray;
+  Altar: PRSMapObject;
+  CosPath: TPointArray;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+  if Self.IsInTemple then Exit;
+
+  Loc := Self.GetAltarLoc;
+
+  if (not InRange(Loc, TYPEAIR, TYPEBLOOD)) then
+  begin
+    if DEBUGMODE then
+      Self.WriteMsg('Unknown altar location. Pos: '+ToStr(Map.Position));
+    Exit;
+  end;
+
+  if DEBUGMODE then
+    Self.WriteMsg('Crafting '+RuneNames[Loc]+' runes');
+
+  if WaitUntil(InRange(Self.GetPower, 1, 100), 75, 3000) then
+    if InRange(Self.GetPower, NEAREND, 100) then
+      TempPI := Min(1, Self.TempIte);
+
+  if (RuneNames[Loc] = 'cosmic') then
+  begin
+    if DEBUGMODE then
+      Self.WriteMsg('Walking to cosmic altar');
+    if WaitUntil(Self.GetCosmicPlatform.X > 5, 75, 3000) then
+    begin
+      CosPath := TPAFromLine(Minimap.Center, Self.GetCosmicPlatform);
+      for i:=High(CosPath) downto 0 do  // SPS FTW
+      begin
+        B := Minimap.PointToMSRect(CosPath[i], Minimap.GetCompassAngle(False)).Bounds;
+        B.LimitTo(Mainscreen.Bounds);
+
+        if MainScreen.IsVisible(B.Middle) then
+        begin
+          for 1 to 5 do
+          begin
+            Mouse.Move(SRL.RandomPoint(B));
+            if MainScreen.IsUpText('Walk here', 100) then
+            begin
+              Mouse.Click(MOUSE_LEFT);
+              if Minimap.HasFlag(500) then break;
+            end;
+          end;
+
+          if Minimap.HasFlag(150) then break;
+        end;
+      end;
+    end else
+    begin
+      if DEBUGMODE then
+        Self.WriteMsg('Failed to get the cosmic altar center');
+
+      if WaitUntil(Self.GetCosmicWalkway.X > 5, 75, 1200) then
+      begin
+        if DEBUGMODE then
+          Self.WriteMsg('Walking via the cosmic walkway');
+        for 1 to 3 do
+        begin
+          Mouse.Click(Self.GetCosmicWalkway, MOUSE_LEFT);
+          if Minimap.HasFlag(500) then
+          begin
+            Minimap.WaitFlag();
+            break;
+          end;
+        end;
+
+        if WaitUntil(Self.GetCosmicPlatform.X > 5, 75, 3000) then
+        begin
+          CosPath := TPAFromLine(Minimap.Center, Self.GetCosmicPlatform);
+          for i:=High(CosPath) downto 0 do  // SPS FTW
+          begin
+            B := Minimap.PointToMSRect(CosPath[i], Minimap.GetCompassAngle(False)).Bounds;
+            if MainScreen.IsVisible(B.Middle) then
+            begin
+              MSPnt := SRL.RandomPoint(B);
+              break;
+            end;
+          end;
+        end else
+        begin
+          if DEBUGMODE then
+            Self.WriteMsg('Failed to find the cosmic altar platform, exiting');
+
+          Self.ExitCurrentAltar;
+          Exit;
+        end;
+      end else
+      begin
+        if DEBUGMODE then
+          Self.WriteMsg('Failed to get the cosmic altar walkway');
+
+        Self.ExitCurrentAltar;
+        Exit;
+      end;
+    end;
+
+    Minimap.WaitFlag();
+  end;
+
+  Altar := Self.Altars.MapObjects.GetClosest;
+  TempPI := Self.TempIte;
+
+  if (RuneNames[Loc] = 'fire') then
+    Map.Walker.WalkBlind(Altar^.ToObjV2.Coordinates[0], RandomRange(15,25));
+
+  Clicked := Altar^.WalkClick(True, 3);
+
+  if (not Clicked) then
+  begin
+    Map.Walker.WalkBlind(Altar^.Coordinates[0], RandomRange(15,23));
+    for 1 to 3 do
+      if Altar^.Click(True, 1) then
+      begin
+        Clicked := True;
+        break;
+      end;
+  end;
+
+  if Clicked then
+  begin
+    if TempPI > 0 then
+      if SRL.Dice(75) then
+      begin
+        if SRL.Dice(85) then
+        begin
+          if Inventory.Finditems(['Small pouch','Medium pouch',5511,'Large pouch',5513,'Colossal pouch',26786], Slots) then
+            Inventory.MouseSlot(SRL.TruncatedGauss(Slots[0],Slots[Length(Slots)-1]));
+        end else
+          Mouse.Move(Inventory.Bounds);
+      end;
+
+    WaitUntil((not Inventory.ContainsItem('Guardian essence')), 150, 7500);
+
+    if TempPI > 0 then
+    begin
+      for i:=1 to TempPI do
+      begin
+        if i = 2 then
+          HP := Self.HandlePouches(True) // Giant/colossal pouch only
+        else
+          HP := Self.HandlePouches;
+
+        if HP then
+        begin
+          for 1 to 3 do
+            if Altar^.Click(True, 1) then
+            begin
+              Chat.LeveledUp;
+              break;
+            end;
+
+          if (not FASTMODE) then
+          begin
+            WaitUntil((not Inventory.ContainsItem('Guardian essence')), 150, 4000);
+            Wait(SRL.NormalRange(750, 1000));
+          end else
+            WaitEx(250, 50);
+        end else
+          break;
+      end;
+    end;
+
+    if (not FASTMODE) then
+      Result := WaitUntil((not Inventory.ContainsItem('Guardian essence')), 150, 4000)
+    else
+      Result := True;
+  end;
+
+  if (not Result) then
+    if DEBUGMODE then
+      Self.WriteMsg('Failed to craft '+RuneNames[Loc]+' runes[2], pos: '+ToStr(Map.Position));
+
+  Self.DropStuff;
+  SkipPortal := InRange(GetPower, NEAREND, 100);
+  Self.ExitCurrentAltar;
+  if SkipPortal then WaitUntil(InRange(GetPower, NEAREND, 100), 75, 1200);
+end;
+
+function TScript.TakeCells(): Boolean;
+var
+  Clicked: Boolean;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+  if Inventory.CountItemStack('Uncharged cell') > 8 then Exit;
+
+  if DEBUGMODE then
+    Self.WriteMsg('Grabbing some uncharged cells');
+
+  if (not Self.Obj_UnchargedCells.WalkHover(3)) then Exit;
+
+  if Mainscreen.IsUpText('Take-10', 150) then
+  begin
+    Mouse.Click(MOUSE_LEFT);
+    Clicked := Mainscreen.DidRedClick;
+  end else
+    Clicked := ChooseOption.Select('Take-10', MOUSE_LEFT, False, True);
+
+  if (not Clicked) then
+  begin
+    if WaitUntil(Minimap.IsPlayerMoving(1000), 125, 2300) then
+      While Minimap.IsPlayerMoving(1000) do WaitEx(125, 20);
+
+    if (not Self.Obj_UnchargedCells.WalkHover(3)) then Exit;
+
+    if Mainscreen.IsUpText('Take-10', 150) then
+    begin
+      Mouse.Click(MOUSE_LEFT);
+      Clicked := Mainscreen.DidRedClick;
+    end else
+      Clicked := ChooseOption.Select('Take-10', MOUSE_LEFT, False, True);
+  end;
+
+  if (not Clicked) then Exit;
+
+  if WaitUntil(Minimap.IsPlayerMoving(1000), 125, 2300) then
+    While Minimap.IsPlayerMoving(1000) do WaitEx(125, 20);
+
+  Result := True;
+end;
+
+function TScript.TakeWeakCell(): Boolean;
+var
+  i: Int32;
+  Slots: TIntegerArray;
+  Cells: TRSItemArray = ['Medium cell','Strong cell','Overcharged cell'];
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+  if Inventory.ContainsAny(Cells) then
+  begin
+    if FASTMODE then
+      Result := Inventory.ShiftDrop(Cells, Inventory.RandomPattern)
+    else
+      for i:=0 to High(Cells) do
+      begin
+        Result := Inventory.ClickItem(Cells[i], 'Drop');
+        Wait(115, 175);
+      end;
+  end;
+
+  if Inventory.ContainsItem('Weak cell') then Exit(True);
+  if Inventory.IsFull then
+    if Inventory.FindItem('Guardian essence', Slots) then
+    begin
+      Inventory.ClickSlot(Slots[Random(0,High(Slots)-1)], 'Drop');
+      WaitUntil((not Inventory.IsFull), 125, 4000);
+    end;
+  if DEBUGMODE then
+    Self.WriteMsg('Grabbing a weak cell');
+
+  if (not Self.Obj_WeakCells.WalkClick(True, 2)) then Exit;
+
+  if WaitUntil(Minimap.IsPlayerMoving(1000), 125, 2300) then
+    While Minimap.IsPlayerMoving(1000) do WaitEx(125, 20);
+
+  Result := True;
+end;
+
+function TScript.RepairShield(): Boolean;
+var
+  Clicked: Boolean;
+  Shield: TRSObjectV2;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+
+  if (not Self.IsInTemple) then Exit;
+  if Self.DropStuff then
+    WaitUntil((not Self.HasChargedCell), 125, 3100);
+
+  if DEBUGMODE then
+    Self.WriteMsg('Repairing the shield');
+
+  if SRL.Dice(65) then
+    Shield := Self.Obj_ShieldN
+  else
+  begin
+    if SRL.Dice(50) then
+      Shield := Self.Obj_ShieldNW
+    else
+      Shield := Self.Obj_ShieldNE;
+  end;
+
+  for 1 to 3 do
+  begin
+    if Shield.WalkClick(True, 3) then
+    begin
+      Clicked := True;
+      break;
+    end else
+      Antiban.RandomRotate;
+  end;
+
+  if (not Clicked) then
+  begin
+    if DEBUGMODE then
+      Self.WriteMsg('Failed to repair the shield');
+    Exit;
+  end;
+
+  if SRL.Dice(65) then
+    Mouse.RandomMovement;
+
+  Minimap.WaitFlag(5);
+  Result := WaitUntil((not Self.HasChargedCell), 75, 5000);
+  WaitEx(100, 20);
+end;
+
+function TScript.CreateShield(): Boolean;
+var
+  Clicked: Boolean;
+  Shield: TRSObjectV2;
+  Path: TPointArray;
+  AllShields: Array of TRSObjectV2 := [Self.Obj_ShieldN,Self.Obj_ShieldNW,Self.Obj_ShieldNE];
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+
+  if (not Self.IsInTemple) then Exit;
+
+  if SRL.Dice(65) then
+    Shield := Self.Obj_ShieldN
+  else
+  begin
+    if SRL.Dice(50) then
+      Shield := Self.Obj_ShieldNW
+    else
+      Shield := Self.Obj_ShieldNE;
+  end;
+
+  if Distance(Map.Position, Shield.Coordinates[0]) > 20 then
+  begin
+    if DEBUGMODE then
+      Self.WriteMsg('Walking to the shields');
+
+    Path := BuildPathTo(Map.Position, Shield.Coordinates[0]);
+    Path.Sort(Map.Position);
+    if Path.Len > 1 then
+      Map.Walker.WalkBlind(Path[High(Path)-1]);
+  end;
+
+  while Minimap.IsPlayerMoving(1000) do
+    WaitEx(125, 20);
+
+  if DEBUGMODE then
+    Self.WriteMsg('Setting shield');
+
+  if (not MainScreen.IsUpText('Inactive', 75)) then
+    Shield.Hover(1);
+
+  if MainScreen.IsUpText('Inactive', 75) then
+  begin
+    Clicked := True;
+    Mouse.Click(MOUSE_LEFT);
+  end;
+
+  Shield := [];
+
+  if (not Clicked) then
+    for Shield in AllShields do
+    begin
+      if Shield.Click(True, 2) then
+      begin
+        Clicked := True;
+        Mouse.Click(MOUSE_LEFT);
+        break;
+      end;
+    end;
+
+  if Clicked then
+  begin
+    Minimap.WaitFlag(5);
+    Result := WaitUntil((not Self.HasChargedCell), 75, 3500);
+    if (not Result) then
+    begin
+      Clicked := False;
+      for Shield in AllShields do
+        if Shield.Click(True, 2) then
+        begin
+          Clicked := True;
+          break;
+        end;
+    end;
+  end;
+
+  if (not Clicked) then
+  begin
+    if DEBUGMODE then
+      Self.WriteMsg('Failed to set a shield');
+    Self.DropStuff;
+    Exit;
+  end;
+
+  if SRL.Dice(65) then
+    Mouse.RandomMovement;
+
+  Minimap.WaitFlag(5);
+  Result := WaitUntil((not Self.HasChargedCell), 75, 3500);
+
+  Self.MadeShield := True;
+  WaitEx(100, 20);
+end;
+
+function TScript.PowerupGuardian(): Boolean;
+var
+  eEner: Int32 := Self.GetEEnergy();
+  cEner: Int32 := Self.GetCEnergy();
+  Clicked: Boolean;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+
+  if (not Self.IsInTemple) then Exit;
+  if (Self.GetETypeRune = INACTIVE) and (Self.GetCTypeRune = INACTIVE) then Exit;
+
+  if Self.IsPortalActive then
+    if Self.EnterPortal then Exit;
+
+  if DEBUGMODE then
+    Self.WriteMsg('Powering up the Great Guardian');
+
+  Clicked := Self.Obj_GreatGuardian.WalkClick(True, 3);
+
+  if (not Clicked) then
+  begin
+    if DEBUGMODE then
+      Self.WriteMsg('Failed to interact with the Great Guardian');
+    Exit;
+  end;
+
+  if SRL.Dice(65) then
+    Mouse.RandomMovement;
+
+  Minimap.WaitFlag(5);
+  Result := WaitUntil((not Self.HasGuardStones), 75, 5000);
+
+  Self.DropStuff;
+
+  if Result then WaitUntil((Self.GetEEnergy > eEner) or (Self.GetCEnergy > cEner), 100, 3200);
+  WaitEx(100, 20);
+
+  if (not Self.IsPortalActive) then
+    if Self.HasChargedCell then
+      Self.RepairShield;
+end;
+
+procedure TScript.WaitForStart();
+var T: TCountDown;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+  if InRange(Self.GetPower, 1, 99) then
+    if InRange(Self.GetAltarLoc, TYPEAIR, TYPEBLOOD) then Exit;
+
+  if Self.CheckMessages then
+    Self.Report;
+
+  if Self.HasDegradedPouch then
+    if (not Self.CastSpell) then
+    begin
+      Self.RepairPouches;
+      if Self.CheckMessages then
+        Self.Report;
+    end;
+
+  if (not Self.IsRunning) then
+  begin
+    Self.WriteMsg('Exiting the game to shut down');
+    Exit;
+  end;
+
+  if Self.RepairShields then
+    Self.TakeCells;
+
+  if Self.CreateShields then
+  begin
+    if Self.MadeShield then Exit;
+    if Self.TakeWeakCell then
+      for 1 to 3 do
+        if Self.CreateShield then break;
+    Self.MadeShield := True;
+  end;
+
+  for 1 to 3 do
+    if Self.ResetPosition then
+      break;
+
+  if WaitUntil((Self.GetPower <> 100), 150, 10000) then
+    if Self.CheckMessages then
+      Self.Report;
+
+  if DEBUGMODE then
+    Self.WriteMsg('Waiting for game to begin');
+
+  if Self.HasDegradedPouch then
+    if Self.CastSpell then
+      Self.RepairPouches;
+
+  T.Init(85000);
+  while T.TimeRemaining > 0 do
+  begin
+    if (not RSClient.IsLoggedIn) then Exit;
+    Chat.ClickContinue(False);
+    Antiban.DoAntiban(False, False);
+
+    if (Chat.FindMessage('The rift becomes active!', [2101487]) or (Chat.FindMessage('2...', [CHAT_COLOR_BLACK]))) then
+    begin
+      Self.GameOver := False;
+      Exit;
+    end;
+
+    if Self.CheckMessages then
+      Self.Report;
+
+    if Self.GetPower > 0 then
+      if (Self.GetETypeRune <> INACTIVE) then
+      begin
+        Self.ExitEastArea;
+        Exit;
+      end;
+
+    WaitEx(115,25);
+  end;
+end;
+
+procedure OnWalkEvent(Sender: PRSWalkerV2; Position: TPoint; Destination: TPoint);
+var atpa: T2DPointArray;
+begin
+  Sender^.ScreenWalk := SRL.Dice(40);
+
+  if Bot.WalkerObj <> [] then
+    if Bot.WalkerObj.Find(atpa) then
+    begin
+      atpa.SortFrom(Mainscreen.Center);
+      Mouse.Move(atpa[0].Bounds, False, MOUSE_DISTRIBUTION_ROWP);
+
+      if ((not Bot.WalkerObj.Filter.UpText) or (MainScreen.IsUpText(Bot.WalkerObj.UpText)))then
+      begin
+        Sender^.Walking := False;
+        Exit;
+      end;
+    end;
+
+  if Bot.IsPortalActive then
+    if ((Bot.IsInTemple) and (not Bot.IsPortal)) then
+    begin
+      if (Inventory.Count < 24) then
+      begin
+        Sender^.Walking := False;
+        WaitEx(115, 15);
+        Exit;
+      end;
+    end;
+
+  if SRL.Dice(2) then
+    if SRL.Dice(20) then Antiban.SmallRandomMouse;
+  if SRL.Dice(1) then
+    if SRL.Dice(15) then Antiban.SmallCameraRotation;
+
+  Position    := [];
+  Destination := [];
+end;
+
+procedure OnWalkingEvent(Sender: PRSWalkerV2; Position: TPoint; Destination: TPoint);
+var atpa: T2DPointArray;
+begin
+  if Bot.IsPortalActive then
+    if ((Bot.IsInTemple) and (not Bot.IsPortal)) then
+    begin
+      if (Inventory.Count < 24) then
+      begin
+        Sender^.Walking := False;
+        WaitEx(115, 15);
+        Exit;
+      end;
+    end;
+
+  if Bot.IsObelisk then
+  begin
+    if (Bot.RIndex <> Bot.GetETypeRune) and (Bot.RIndex <> Bot.GetCTypeRune) then
+    begin
+      Sender^.Walking := False;
+      WaitEx(115, 15);
+      Exit;
+    end;
+  end;
+
+  if Bot.WalkerObj <> [] then
+    if Bot.WalkerObj.Find(atpa) then
+    begin
+      atpa.SortFrom(Mainscreen.Center);
+      Mouse.Move(atpa[0].Bounds, False, MOUSE_DISTRIBUTION_ROWP);
+
+      if ((not Bot.WalkerObj.Filter.UpText) or (MainScreen.IsUpText(Bot.WalkerObj.UpText)))then
+      begin
+        Sender^.Walking := False;
+        Exit;
+      end;
+    end;
+
+  Bot.DropStuff;
+
+  Position    := [];
+  Destination := [];
+end;
+
+function TScript.GetState(): EState;
+begin
+  if (not RSClient.IsLoggedIn) then Exit;
+  Mouse.Speed := Random(20,30);
+
+  if Self.IsInTemple then
+  begin
+    if Self.HasGuardStones then
+    begin
+      if InRange(Self.GetPower, 95, 100) then
+        Exit(POWERUP);
+      if Inventory.Count < 24 then
+        if Self.IsPortalActive then
+          Exit(GATHER_ESSENCE);
+
+      if (not WaitUntil(InRange(Self.GetPower, 1, 100), 75, 2300)) then
+      begin
+        if Self.LossStreak >= 3 then
+          Exit(CHANGE_WORLDS)
+        else
+        begin
+          if Chat.FindMessage('defeated', [2101487]) then
+            if DEBUGMODE then
+              Self.WriteMsg('Great Guardian defeated while in the temple [0]');
+
+          Exit(NEW_GAME);
+        end;
+      end;
+
+      Exit(POWERUP);
+    end;
+
+    if (not WaitUntil(InRange(Self.GetPower, 1, 99), 75, 2300)) then
+    begin
+      if Self.LossStreak >= 3 then
+        Exit(CHANGE_WORLDS)
+      else
+      begin
+        if Self.CreateShields then
+          if Self.MadeShield then
+            Exit(GATHER_FRAGMENTS);
+
+        Exit(NEW_GAME);
+      end;
+    end;
+
+    if Inventory.Count < 24 then
+    begin
+      if Self.IsPortalActive then
+        if (Self.GetPower < 95) then
+          Exit(GATHER_ESSENCE);
+    end else if Inventory.Count >= 24 then
+    begin
+      if Self.KeepTalismans.Len > 0 then
+      begin
+        if (Self.CatalyticOnly and Self.HasTalismans) then
+          Exit(CRAFT_RUNES);
+
+        if (Self.ElementalOnly  and Self.HasTalismans('Elemental')) then
+          Exit(CRAFT_RUNES);
+
+        if ((Self.ForceBal) and (Self.GetEnergyDiff >= 25)) then
+        begin
+          Self.RIndex := Self.GetCTypeRune;
+          if Self.CanCraftRunes(Self.RIndex) then
+            Exit(CRAFT_RUNES)
+          else
+            if InRange(Self.RIndex, TYPEMIND, TYPEBLOOD) then
+              if DEBUGMODE then
+                Self.WriteMsg('Cannot craft '+RuneNames[Self.RIndex]);
+
+          if Self.HasTalismans then
+            Exit(CRAFT_RUNES);
+
+          Exit(GATHER_FRAGMENTS);
+        end;
+      end;
+
+      if Self.CatalyticOnly then
+      begin
+        Self.RIndex := Self.GetCTypeRune;
+
+        if Self.CanCraftRunes(Self.RIndex) then
+          Exit(CRAFT_RUNES)
+        else
+          Exit(GATHER_FRAGMENTS);
+      end;
+
+      if Self.ElementalOnly then
+      begin
+        Self.RIndex := Self.GetETypeRune;
+        Exit(CRAFT_RUNES);
+      end;
+
+      if ((Self.ForceBal) and (Self.GetEnergyDiff >= 25)) then
+      begin
+        Self.RIndex := Self.GetCTypeRune;
+        if Self.CanCraftRunes(Self.RIndex) then
+          Exit(CRAFT_RUNES)
+        else
+        begin
+          if DEBUGMODE then
+            Self.WriteMsg('Cannot craft '+RuneNames[Self.RIndex]+' runes');
+          Exit(GATHER_FRAGMENTS);
+        end;
+      end;
+
+      Exit(CRAFT_RUNES);
+    end;
+
+    if InRange(Self.GetPower, NEAREND, 100) then // Nearing the end of a game
+    begin
+      if Inventory.ContainsItem('Guardian essence') then
+        Exit(CRAFT_RUNES);
+      if (Inventory.CountItemStack('Guardian fragments') >= 25) then
+        Exit(CRAFT_ESSENCE);
+    end;
+
+    if (Inventory.CountItemStack('Guardian fragments') >= Self.EssLimit) then
+      Exit(CRAFT_ESSENCE)
+    else
+    begin
+      if (Self.GetETypeRune = INACTIVE) then
+        if Self.GameOver then
+          Exit(NEW_GAME);
+
+      Exit(GATHER_FRAGMENTS);
+    end;
+  end;
+
+  if Self.IsInWestArea then
+  begin
+    if (not WaitUntil(InRange(Self.GetPower, 1, 100), 125, 2700)) then
+      if Self.LossStreak >= 3 then
+        Exit(CHANGE_WORLDS)
+      else
+      begin
+        if Chat.FindMessage('defeated', [2101487]) then
+          if DEBUGMODE then
+            Self.WriteMsg('Great Guardian defeated while in the west mining area');
+        Exit(NEW_GAME);
+      end;
+
+    Exit(GATHER_ESSENCE);
+  end;
+
+  if Self.IsInEastArea then
+    Exit(GATHER_FRAGMENTS);
+
+  if Self.IsInLobby then
+    Exit(ENTER_GAME);
+
+  if InRange(Self.GetAltarLoc, TYPEAIR, TYPEBLOOD) then
+  begin
+    if Inventory.ContainsItem('Guardian essence') then
+      Exit(CRAFT_RUNES)
+    else
+      Exit(EXIT_ALTAR);
+  end;
+
+  Self.WriteMsg('Unknown state. Power: '+ToStr(Self.GetPower)+', Time: '+ToStr(Self.GetRemainingTime)+', Loc: '+ToStr(Map.Position));
+end;
+
+procedure TScript.Run();
+var
+  CurState: EState;
+  EarlyBreak: Boolean;
+  LastXP: Int64;
+begin
+  While Self.IsRunning do
+  begin
+    if (not RSClient.IsLoggedIn) then
+    begin
+      if Login.GetPlayer.User <> '' then
+      begin
+        Login.LoginPlayer;
+        Self.ActionTimer.Reset;
+      end else
+      begin
+        Logout.ClickLogout();
+        TerminateScript('No player credentials');
+      end;
+    end;
+
+    if (XPBar.Read <> LastXP) then
+    begin
+      Self.ActionTimer.Reset;
+      LastXP := XPBar.Read;
+    end;
+
+    if Self.ActionTimer.ElapsedTime > 450000 then
+    begin
+      Logout.ClickLogout;
+      TerminateScript('Script timed out');
+    end;
+
+    if ((Self.GetETypeRune < INACTIVE) or InRange(Self.GetPower, 1, 100)) then
+      Self.GameTimer.Init(5000);
+
+    ChatButtons.Open(ERSChatButton.GAME_CHAT);
+
+    if (not Self.UISet) then
+      Self.SetUIBounds;
+
+    CurState := Self.GetState;
+    if DEBUGMODE then
+      writeln('[State]: ',CurState);
+
+    case CurState of
+      ENTER_GAME: Self.HandleBarrier;
+      NEW_GAME:
+      begin
+        if Self.CheckMessages then
+          Self.Report;
+
+        if Self.IsInWestArea then
+        begin
+          Self.ExitWestArea;
+          if Self.CheckMessages then
+            Self.Report;
+        end;
+
+        if ((Self.GetPower() = 100) and (Self.GetRemainingTime > 5)) then
+          if Self.HasGuardStones then
+            Self.PowerupGuardian;
+
+        if Self.IsInTemple then
+        begin
+          if Self.HasRunes then
+          begin
+            Self.DepositRunes;
+            if Self.CheckMessages then
+              Self.Report;
+          end;
+        end else
+          Self.ExitCurrentAltar;
+
+        while Self.GetPower = 100 do
+        begin
+          if (not RSClient.IsLoggedIn) then Exit;
+          Antiban.DoAntiban(False, False);
+          WaitEx(300, 40);
+        end;
+
+        Self.IsRunning := GetTimeRunning() < Self.ShutdownTime;
+
+        if Self.TakeBreaks or Self.TakeSleeps then
+        begin
+          if Self.TakeBreaks then
+            EarlyBreak := ((Antiban.Breaks[0].NextAtTime - GetTimeRunning()) < 600000); // < 10 mins until the next break
+          if Self.TakeSleeps then
+            if (not EarlyBreak) then
+              EarlyBreak := ((Antiban.Sleeps[0].NextAtTime - GetTimeRunning()) < 600000); // < 10 mins until the next sleep
+
+          if EarlyBreak then
+          begin
+            if Self.HasDegradedPouch then
+              if (not Self.CastSpell) then
+              begin
+                Self.RepairPouches;
+                if Self.CheckMessages then
+                  Self.Report;
+              end;
+
+            if DEBUGMODE then
+              Self.WriteMsg('Taking a break before the next game begins');
+
+            if (Self.GetPower <> 100) then
+              if Self.CheckMessages then
+                Self.Report;
+
+            if Self.IsInEastArea then
+              Self.ExitEastArea;
+
+            if (Self.GetPower = 100) then
+            begin
+              WaitUntil((Self.GetPower <> 100), 250, 15000);
+              if Self.CheckMessages then
+                Self.Report;
+            end;
+
+            Self.HandleBarrier(False);
+
+            if Self.TakeBreaks then
+              if (Antiban.Breaks[0].NextAtTime - GetTimeRunning()) < 600000 then
+                Antiban.Breaks[0].NextAtTime := GetTimeRunning();
+            if Self.TakeSleeps then
+              if (Antiban.Sleeps[0].NextAtTime - GetTimeRunning()) < 600000 then
+                Antiban.Sleeps[0].NextAtTime := GetTimeRunning();
+
+            WaitEx(2500, 150);
+            Antiban.DoAntiban;
+          end;
+        end;
+
+        if Self.IsRunning then
+          Self.WaitForStart;
+      end;
+      GATHER_FRAGMENTS:
+      begin
+        if Self.IsInEastArea then
+        begin
+          if Self.AutoFrags then
+            Self.Mine('Fragments')
+          else
+          begin
+            if Inventory.CountItemStack('Guardian fragments') >= Self.FragsToMine then
+              Self.ExitEastArea
+            else
+              Self.Mine('Fragments', Self.FragsToMine);
+          end;
+        end else
+        begin
+          if Self.HasRunes then
+            Self.DepositRunes;
+
+          if (Self.GetETypeRune = INACTIVE) and (Self.GetCTypeRune = INACTIVE) then
+          begin
+            if Self.AutoFrags then
+              Self.Mine('Fragments')
+            else
+              Self.Mine('Fragments', Self.FragsToMine);
+          end else
+          begin
+            if (Self.CatalyticOnly or ((Self.ForceBal) and (Self.GetEnergyDiff >= 25))) then
+            begin
+              if Inventory.Count >= 24 then
+                Self.Mine('Fragments', -1)
+              else
+                Self.Mine('Fragments', Self.EssLimit+SRL.NormalRange(4, 10));
+            end else
+            begin
+              if InRange(Self.GetPower, NEAREND, 100) then // Nearing the end of a game
+              begin
+                if (Self.CatalyticOnly or ((Self.ForceBal) and (Self.GetEnergyDiff >= 25))) then
+                begin
+                  Self.RIndex := Self.GetCTypeRune;
+                  if (not Self.CanCraftRunes(Self.RIndex)) then
+                    Self.Mine('Fragments', -1);
+                end else
+                  Self.Mine('Fragments', 25+SRL.NormalRange(4, 10));
+              end else
+                Self.Mine('Fragments', Self.EssLimit+SRL.NormalRange(4, 10));
+            end;
+          end;
+        end;
+      end;
+      GATHER_ESSENCE:
+      begin
+        if (not Self.IsInWestArea) then
+          if Self.IsPortalActive then
+            if (not Self.EnterPortal) then
+              Continue;
+
+        if Self.IsInWestArea then
+        begin
+          if Inventory.IsFull then
+            Self.ExitWestArea
+          else
+            Self.Mine('Essence');
+        end;
+      end;
+      CRAFT_ESSENCE: Self.CraftEssence;
+      POWERUP: Self.PowerupGuardian;
+      CRAFT_RUNES:
+      begin
+        if Self.IsInTemple then
+        begin
+          if Self.HasChargedCell then
+            Self.RepairShield;
+          for 1 to 3 do
+            if Self.EnterObelisk then break;
+        end;
+
+        Self.CraftRunes;
+      end;
+      EXIT_ALTAR: Self.ExitCurrentAltar;
+      CHANGE_WORLDS:
+      begin
+        Self.HandleBarrier(False);
+        Self.HopWorlds;
+        Self.LossStreak := 0;
+      end;
+    end;
+
+    WaitEx(250, 50);
+  end;
+
+  if (Self.GetPower <> 100) then
+    if Self.CheckMessages then
+      Self.Report;
+
+  Self.HandleBarrier(False);
+
+  Logout.ClickLogout();
+  TerminateScript('Time to shutdown');
+end;
+
+procedure TScript.Free();
+begin
+  FreeDTM(Self.DTM_Corner);
+  {$IFDEF SRL_USE_REMOTEINPUT}
+    if DISABLEINPUT then
+      RSClient.RemoteInput.EnableRealInput;
+  {$ENDIF}
+  Self.WriteMsg('Thanks for using Flight'#39's AeroGuardians!');
+end;
+
+procedure TScript.Init();
+var
+  i: Int32;
+  ColFinder: TRSObjectFinder;
+begin
+  Self.Version            := 'Rev '+{$MACRO SCRIPT_REVISION};
+  Mouse.Speed             := Random(20,30);
+  Mouse.CanIdle           := False;
+  Mouse.MissChance        := 13;
+  Mouse.Distribution      := MOUSE_DISTRIBUTION_GAUSS;
+
+  APIClient.TimeStamp := GetTickCount();
+
+  if (not RSClient.IsLoggedIn) then
+    if Login.GetPlayer.User <> '' then
+      Login.LoginPlayer
+    else
+    begin
+      Self.WriteMsg('No player credentials');
+      Exit;
+    end;
+
+  if SRL.Dice(65) then
+  begin
+    if SRL.Dice(65) then
+    begin
+      Options.Open;
+      if Options.GetBrightnessLevel < 100 then
+        Options.SetMaxBrightness;
+      if (not InRange(Options.GetZoomLevel, 10, 40)) then
+        Options.SetZoomLevel(SRL.TruncatedGauss(10,40));
+      MM2MS.ZoomLevel := Options.GetZoomLevel();
+
+      if Self.CastSpell then
+      begin
+        Mouse.Move(GameTabs.Boxes[ERSGameTab.MAGIC]);
+        ChooseOption.Select('Enable');
+      end;
+    end else
+    begin
+      if Self.CastSpell then
+      begin
+        Mouse.Move(GameTabs.Boxes[ERSGameTab.MAGIC]);
+        ChooseOption.Select('Enable');
+      end;
+
+      Options.Open;
+      if Options.GetBrightnessLevel < 100 then
+        Options.SetMaxBrightness;
+      if (not InRange(Options.GetZoomLevel, 10, 40)) then
+        Options.SetZoomLevel(SRL.TruncatedGauss(10,40));
+      MM2MS.ZoomLevel := Options.GetZoomLevel();
+    end;
+
+    for 1 to 3 do
+    begin
+      Self.RCLvl       := Stats.GetLevel(ERSSkill.RUNECRAFTING);
+      Self.CanMineEast := Stats.GetLevel(ERSSkill.AGILITY) >= 56;
+      if Self.RCLvl > 25 then
+        break;
+      Stats.Open;
+      WaitEx(120,30);
+    end;
+  end else
+  begin
+    for 1 to 3 do
+    begin
+      Self.RCLvl       := Stats.GetLevel(ERSSkill.RUNECRAFTING);
+      Self.CanMineEast := Stats.GetLevel(ERSSkill.AGILITY) >= 56;
+      if Self.RCLvl > 25 then
+        break;
+      Stats.Open;
+      WaitEx(120,30);
+    end;
+
+    if SRL.Dice(65) then
+    begin
+      Options.Open;
+      if Options.GetBrightnessLevel < 100 then
+        Options.SetMaxBrightness;
+      if (not InRange(Options.GetZoomLevel, 10, 40)) then
+        Options.SetZoomLevel(SRL.TruncatedGauss(10,40));
+      MM2MS.ZoomLevel := Options.GetZoomLevel();
+
+      if Self.CastSpell then
+      begin
+        Mouse.Move(GameTabs.Boxes[ERSGameTab.MAGIC]);
+        ChooseOption.Select('Enable');
+      end;
+    end else
+    begin
+      if Self.CastSpell then
+      begin
+        Mouse.Move(GameTabs.Boxes[ERSGameTab.MAGIC]);
+        ChooseOption.Select('Enable');
+      end;
+
+      Options.Open;
+      if Options.GetBrightnessLevel < 100 then
+        Options.SetMaxBrightness;
+      if (not InRange(Options.GetZoomLevel, 10, 40)) then
+        Options.SetZoomLevel(SRL.TruncatedGauss(10,40));
+      MM2MS.ZoomLevel := Options.GetZoomLevel();
+    end;
+  end;
+
+  GENERATED_GRAPH.Spacing := 12;
+  GENERATED_GRAPH.MinimumTiles := 4;
+  GENERATED_GRAPH.NodeRadius := 30;
+  GENERATED_GRAPH.MaxConnections := 6;
+
+  Map.SetupChunks([GotR_Chunk,Altars_Chunk,Blood_Chunk], 5);
+  Objects.Setup(Map.Objects(), @Map.Walker);
+
+  Map.Walker.OnWalkEvent       := @OnWalkEvent;
+  Map.Walker.OnWaitMovingEvent := @OnWalkingEvent;
+  Map.Walker.ScreenWalk        := True;
+  Map.Walker.MinEnergy         := 30;
+  Map.Sample.Amount            := 4;
+  Map.DisableHeightmap         := False;
+
+  Self.SetupAntiban();
+
+  with Self do
+  begin
+    MSpeed             := Mouse.Speed;
+    IsRunning          := True;
+    PouchIterations    := 1;
+    Inventory.Open;
+    EssLimit           := (28-Inventory.Count);
+
+    if WaitUntil(XPBar.Read > 0, 75, 500) then StartXP := XPBar.Read();
+
+    if StartXP < 1 then
+      Self.WriteMsg('Issue reading the XP bar');
+
+    ForceBal := FORCEBALANCE;
+    if ElementalOnly then
+      ForceBal := False;
+
+    DTM_Corner := DTMFromString('mAAEAAHic42FgYOAFYkEgFgNiKSgfhPmAWBiIZYA4GIilgVgWiJXRsDoQ6wGxMRIOBeI8IC4G4oyVyxgIgf///4MxmA3EjAQwFxQzEjQZAphxiAMAK2YMvQ==');
+    SetDTMName(DTM_Corner, 'UI bounds DTM');
+
+    SetUIBounds();
+    ChatButtons.ChangeState(ERSChatButton.GAME_CHAT, ERSChatButtonState.FILTERED);
+    ChatButtons.Open(ERSChatButton.GAME_CHAT); //TORWENT EDIT
+
+    CraftedRunes := ['Air rune','Water rune','Earth rune','Fire rune','Mind rune',
+                     'Body rune','Cosmic rune','Chaos rune','Nature rune','Law rune',
+                     'Death rune','Blood rune'];
+
+    SetLength(RunesCount, Length(CraftedRunes));
+
+    if Inventory.ContainsItem('Small pouch') then
+      EssLimit += 3;
+    if Inventory.ContainsAny(['Medium pouch',5511]) then
+      EssLimit += 6;
+    if Inventory.ContainsAny(['Large pouch',5513]) then
+      EssLimit += 9;
+    if Inventory.ContainsAny(['Giant pouch',5515]) then
+    begin
+      EssLimit += 12;
+      PouchIterations += 1;
+    end;
+    if Inventory.ContainsAny(['Colossal pouch',26786]) then
+    begin
+      EssLimit += 40;
+      PouchIterations += 1;
+    end;
+
+    if AutoFrags then
+      FragsToMine := EssLimit;
+
+    TempIte := PouchIterations;
+    CanUsePouches := True;
+
+  { Misc. in-game objects }
+    Obj_Barrier := Objects.Get('Barrier');
+    with Obj_Barrier do
+    begin
+      Walker      := @Map.Walker;
+      Filter      := [True, False, False, True];
+    end;
+    Obj_Workbench := Objects.Get('Workbench');
+    with Obj_Workbench do
+    begin
+      Walker      := @Map.Walker;
+      Filter      := [True, False, False, True];
+    end;
+    Obj_DepositPool := Objects.Get('Deposit Pool');
+    with Obj_DepositPool do
+    begin
+      Walker      := @Map.Walker;
+      Filter      := [True, False, False, True];
+    end;
+
+    with Obj_Greatguardian do
+    begin
+      Name        := 'Great guardian';
+      UpText      := ['Power-up','The Great'];
+      Coordinates := [[10363,12419]];
+      Size        := [3, 3, 7];
+      Walker      := @Map.Walker;
+      TrackTarget := True;
+      Filter      := [True, False, False, True];
+    end;
+
+    ColFinder.Colors := [CTS2(10200193, 12, 0.11, 0.40)];
+    Obj_RubbleW := Objects.Get(43724);
+    with Obj_RubbleW do
+    begin
+      Walker      := @Map.Walker;
+      Finder      := ColFinder;
+      Filter      := [True, False, True, True];
+    end;
+
+    ColFinder.Colors := [CTS2(6973484, 4, 0.06, 0.34)];
+    Obj_RubbleE := Objects.Get(43726);
+    with Obj_RubbleE do
+    begin
+      Walker      := @Map.Walker;
+      Finder      := ColFinder;
+      Filter      := [True, False, True, True];
+    end;
+
+    ColFinder.Colors := [CTS2(8249292, 13, 0.58, 2.56)];
+    with Obj_WestPortal do
+    begin
+      Name        := 'West portal';
+      UpText      := ['Enter','Portal','ortal'];
+      Coordinates := [[10275,12418]];
+      Size        := [2, 2, 4];
+      Finder      := ColFinder;
+      Walker      := @Map.Walker;
+      Filter      := [True, False, True, True];
+    end;
+
+    Obj_HugeRemains := Objects.Get('Huge guardian remains');
+    with Obj_HugeRemains do
+    begin
+      Uptext      := ['Mine Hu','Huge','guardian','remains'];
+      Walker      := @Map.Walker;
+      Filter      := [True, False, False, True];
+    end;
+
+    Obj_LargeRemains := Objects.Get('Large guardian remains');
+    with Obj_LargeRemains do
+    begin
+      Uptext      := ['Mine'];
+      Walker      := @Map.Walker;
+      Filter      := [True, False, False, True];
+    end;
+
+    Obj_UnchargedCells := Objects.Get('Uncharged cells');
+    with Obj_UnchargedCells do
+    begin
+      Walker      := @Map.Walker;
+      Filter      := [True, False, False, True];
+    end;
+
+    Obj_WeakCells := Objects.Get('Weak cells');
+    with Obj_WeakCells do
+    begin
+      Walker      := @Map.Walker;
+      Filter      := [True, False, False, True];
+    end;
+
+    with NPC_Cordelia do
+    begin
+      SetupUpText(['Cordelia','ordel','to Cor']);
+      SetupCoordinates([25], [[10372,12466]]);
+      DotType     := ERSMinimapDot.NPC;
+      Size        := [1,1,4];
+      Walker      := @Map.Walker;
+      Filter      := [True, True, False, True];
+    end;
+
+    ColFinder.Colors := [CTS2(8249292, 13, 0.58, 2.56)];
+    with Obj_Portal do
+    begin
+      Name        := 'Portal';
+      UpText      := ['Enter Po','er Po','Portal'];
+      Coordinates := [[10360,12482]];
+      Size        := [2, 2, 5];
+      Finder      := ColFinder;
+      TrackTarget := True;
+      Walker      := @Map.Walker;
+      Filter      := [True, False, True, True];
+    end;
+
+    ColFinder.Colors := [CTS2(5989848,10,0.03,1.12),CTS2(9159065,6,0.27,2.01),CTS2(13470852,8,0.07,1.13),CTS2(12632520,6,0.52,0.29),CTS2(8884871,12,0.12,0.20)];
+    with Obj_ShieldN do
+    begin
+      Name        := 'North shield';
+      UpText      := ['Inactive','Place-cell'];
+      Coordinates := [[10363,12390]];
+      Size        := [2, 2, 3];
+      Finder      := ColFinder;
+      Walker      := @Map.Walker;
+      Filter      := [True, False, True, True];
+    end;
+
+    with Obj_ShieldNW do
+    begin
+      Name        := 'Northwest shield';
+      UpText      := ['Inactive','Place-cell'];
+      Coordinates := [[10348,12394]];
+      Size        := [2, 2, 3];
+      Finder      := ColFinder;
+      Walker      := @Map.Walker;
+      Filter      := [True, False, True, True];
+    end;
+
+    with Obj_ShieldNE do
+    begin
+      Name        := 'Northeast shield';
+      UpText      := ['Inactive','Place-cell'];
+      Coordinates := [[10380,12394]];
+      Size        := [2, 2, 3];
+      Finder      := ColFinder;
+      Walker      := @Map.Walker;
+      Filter      := [True, False, True, True];
+    end;
+
+    for i:=TYPEAIR to TYPEBLOOD do
+    begin
+      Obj_Obelisks[i] := Objects.Get(OBELISKIDS[i]);
+      Obj_Obelisks[i].UpText := [Capitalize(RuneNames[i])];
+      Obj_Obelisks[i].TrackTarget := True;
+    end;
+
+    Altars._SetupMapObjects('Altar');
+    for i := 0 to High(Altars.ObjectsCache) do
+      Altars.ObjectsCache[i].Filter := [True, False, False, True];
+
+    ExitPortals._SetupMapObjects('Portal');
+    for i := 0 to High(ExitPortals.ObjectsCache) do
+    begin
+      ExitPortals.ObjectsCache[i].UpText := ['Use Portal','Portal','Exit','xit','orta'];
+      ExitPortals.ObjectsCache[i].TrackTarget := True;
+      ExitPortals.ObjectsCache[i].Filter := [True, False, False, True];
+    end;
+
+    Remains._SetupMapObjects('Guardian remains');
+    for i := 0 to High(Remains.ObjectsCache) do
+    begin
+      Remains.ObjectsCache[i].Uptext := ['Mine'];
+      Remains.ObjectsCache[i].Filter := [True, False, False, True];
+    end;
+
+    Parts._SetupMapObjects('Guardian parts');
+    for i := 0 to High(Parts.ObjectsCache) do
+    begin
+      Parts.ObjectsCache[i].Uptext := ['Mine'];
+      Parts.ObjectsCache[i].Filter := [True, False, False, True];
+    end;
+  end;
+
+  Self.TrueRunTime.Start();
+  ActionTimer.Start();
+  AddOnTerminate(@Self.Free);
+end;
+
+begin
+  ClearDebug();
+
+  if (not DirectoryExists(AppPath+'\Resources\')) then
+    CreateDirectory(AppPath+'\Resources');
+
+  if (not FileExists(AppPath+'\Resources\AeroMoonsGUIBG.png')) then
+    DownloadToFile('https://i.imgur.com/mlmCdn5.png', AppPath+'\Resources\AeroMoonsGUIBG.png');
+
+  GUI.Setup('AeroGuardians', [755,500]);
+  GUI.PageControl.SetAllChildsFontColor($00FFFF);
+  GUI.Run;
+
+  {$IFDEF SRL_USE_REMOTEINPUT}
+    if DISABLEINPUT then
+      RSClient.RemoteInput.DisableRealInput;
+  {$ENDIF}
+
+  Bot.Init();
+  Bot.Run;
+end.

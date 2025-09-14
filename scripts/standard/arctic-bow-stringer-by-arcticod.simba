@@ -1,0 +1,397 @@
+{$DEFINE SCRIPT_ID := '8262c9b2-d111-4ff3-a747-339145161408'}
+{$DEFINE SCRIPT_REVISION := '14'}
+{$I SRL-T/osr.simba}
+{$I WaspLib/osr.simba}
+
+(*
+Now only works in Varrock & Faldor, but more efficiently
+Reworked banking again!
+Added a bunch of banks thanks to TazE
+*)
+
+//Creating GUI
+type
+  TFletchConfig = record(TScriptForm)
+    FletchingSelector: TLabeledCombobox;
+  end;
+
+// Global variables
+var
+  Fletching, ProductCost, Product, CurrentProfit, CurrentLvl, Count: Integer;
+  Script: TBaseScript;
+  MakeStr, selected: string;
+  Knife, Logs, BowString, Select: TRSBankItem;
+  FletchConfig: TFletchConfig;
+  CurrentBank: EBankChunk;
+
+// Count how many items were produced from the current inventory
+function CountItem(): Int32;
+begin
+  // If the output is unstrung bows, count them normally
+  if not Inventory.ItemIsStackable(MakeStr) then
+    Result := Inventory.CountItem(MakeStr)
+  else
+    // If crafting arrow shafts, divide the total count by 15 to get logs used
+    Result := Inventory.CountItemStack('Arrow shaft') div 15;
+end;
+
+// Calculate current and total profit
+procedure CalculateProfit();
+begin
+  // Cost includes the selected log and bow string
+  ProductCost := (
+    ItemData.GetAverage(selected) +
+    ItemData.GetAverage('Bow string')
+  );
+  // Market value of the finished product
+  Product := ItemData.GetAverage(MakeStr);
+
+  // Calculate and track profit
+  Script.ActionProfit := (Product - ProductCost);
+  CurrentProfit := Script.ActionProfit * CountItem();
+  Script.TotalProfit += CurrentProfit;
+end;
+
+// Setup bank items to be withdrawn later
+procedure Start();
+begin
+  Knife := TRSBankItem.Setup('Knife', 1, False);
+  Logs := TRSBankItem.Setup('Logs', 27, False);
+  BowString := TRSBankItem.Setup('Bow string', 14, False);
+  Select := TRSBankItem.Setup(selected, 14, False);
+end;
+
+// Initialize script, client, stats, and map
+procedure Init();
+begin
+  if not RSClient.IsLoggedIn() then
+    Login.LoginPlayer();
+  Stats.Setup();
+  Script.Init(0, 14 * One_Day);
+  Script.PrintTimer.Init(1 * ONE_MINUTE);
+
+  Map.SetupChunk(CurrentBank.Get);
+  //Map.SetupChunk(ERSChunk.VARROCK); // Sets up Varrock
+  Objects.Setup(Map.Objects(), @Map.Walker);
+  NPCs.Setup(Map.NPCs(), @Map.Walker);
+
+  Options.GetZoomLevel();
+  Options.SetZoomLevel(50);
+
+  Itemfinder.Similarity := 0.9999;
+end;
+
+// Configure antiban behavior
+procedure TAntiban.Setup(); override;
+begin
+  Self.Skills := [ERSSkill.FLETCHING, ERSSkill.TOTAL];
+  Self.MinZoom := 40;
+  Self.MaxZoom := 60;
+  inherited;
+end;
+
+// Wiggle wiggle back
+procedure OpenBank();
+begin
+  if not RSClient.IsLoggedIn() then
+    Login.LoginPlayer();
+  Script.SetAction("Hovering Bank!");
+  Banks.Hover();
+  Script.SetAction("Opening Bank!");
+  Banks.Open();
+  if not Bank.IsOpen() then
+  WaitUntil(Bank.IsOpen(), 100, 2500);
+  if not Bank.isOpen() then
+  begin
+    Script.SetAction('Looking for bank angle');
+    Minimap.SetCompassAngle(0);
+    Options.SetZoomLevel(RandomRange(40, 60));
+    Banks.WalkOpen();
+    WaitUntil(Bank.IsOpen(), 100, 2500);
+    if not Bank.isOpen() then
+    begin
+      Script.SetAction('Looking for bank anglev2');
+      Minimap.SetCompassAngle(90);
+      Options.SetZoomLevel(RandomRange(40, 60));
+      Banks.WalkOpen();
+      WaitUntil(Bank.IsOpen(), 100, 2500);
+      if not Bank.isOpen() then
+      begin
+        Script.SetAction('Looking for bank anglev3');
+        Minimap.SetCompassAngle(180);
+        Options.SetZoomLevel(RandomRange(40, 60));
+        Banks.WalkOpen();
+        WaitUntil(Bank.IsOpen(), 100, 2500);
+        if not Bank.isOpen() then
+        begin
+          Script.SetAction('Looking for bank anglev4');
+          Minimap.SetCompassAngle(270);
+          Options.SetZoomLevel(RandomRange(40, 60));
+          OpenBank();
+        end;
+      end;
+    end;
+  end;
+end;
+
+// Withdraw the necessary items for fletching
+procedure Withdraw();
+begin
+  if not RSClient.IsLoggedIn() then
+    Login.LoginPlayer();
+
+  // For level < 5, only withdraw knife and logs
+  if ((selected = "Logs") and Bank.IsOpen()) then
+  begin
+    Script.SetAction("Withdrawing Knife & Logs for first 5 levels!");
+    if not Inventory.ContainsItem("Knife") then
+    begin
+      Wait(RandomRange(250, 350));
+      Bank.WithdrawItem(Knife, False);
+    end;
+    Wait(RandomRange(250, 350));
+    Bank.WithdrawItem(Logs, True);
+    Wait(RandomRange(250, 350));
+    Bank.Close(False);
+    Wait(RandomRange(250, 350));
+  end
+
+  // Otherwise withdraw logs and bow strings
+  else if Bank.IsOpen() then
+  begin
+    Script.SetAction("Withdrawing Items");
+    Wait(RandomRange(250, 350));
+    Bank.DepositAll(); // Clear inventory
+    Wait(RandomRange(250, 350));
+    Bank.WithdrawItem(BowString, True);
+    Wait(RandomRange(250, 350));
+    Bank.WithdrawItem(Select, True);
+    Wait(RandomRange(250, 350));
+    Bank.Close(False);
+    Wait(RandomRange(250, 350));
+  end;
+end;
+
+// Select bow type based on current Fletching level
+procedure Bowtype();
+begin
+  if not RSClient.IsLoggedIn() then
+      Login.LoginPlayer();
+  Count:= 0;
+  repeat
+    Fletching := Stats.GetLevel((ERSSkill.FLETCHING), False);
+    Script.SetAction("Fletching level is: " + ToStr(Fletching));
+    Count+= 1;
+    Wait(RandomRange(250, 300));
+    if Count > 1 then
+      Antiban.ToggleTab();
+      Antiban.HoverSkill(ERSSkill.FLETCHING, 100, False);
+    if Count = 5 then
+      break;
+  until (CurrentLvl <> -1);
+
+
+  // Determine the best item to fletch based on Fletching level
+  if Fletching = -1 then
+    begin
+      Script.SetAction('Fletching Failsafe');
+      WriteLn('This should never happen, let me know & rerun ONLY if terminated');
+    end
+  else if Fletching < 5 then
+    selected := 'Logs'
+  else if Fletching < 10 then
+    selected := 'Shortbow (u)'
+  else if Fletching < 20 then
+    selected := 'Longbow (u)'
+  else if Fletching < 25 then
+    selected := 'Oak shortbow (u)'
+  else if Fletching < 35 then
+    selected := 'Oak longbow (u)'
+  else if Fletching < 40 then
+    selected := 'Willow shortbow (u)'
+  else if Fletching < 50 then
+    selected := 'Willow longbow (u)'
+  else if Fletching < 55 then
+    selected := 'Maple shortbow (u)'
+  else if Fletching < 65 then
+    selected := 'Maple longbow (u)'
+  else if Fletching < 70 then
+    selected := 'Yew shortbow (u)'
+  else if Fletching < 80 then
+    selected := 'Yew longbow (u)'
+  else if Fletching < 85 then
+    selected := 'Magic Shortbow (u)'
+  else
+    selected := 'Magic longbow (u)';
+
+  Script.SetAction(selected);
+  MakeStr := Replace(selected, ' (u)', '', [rfReplaceAll]);
+  Select := TRSBankItem.Setup(selected, 14, False);
+  Wait(RandomRange(250, 300));
+end;
+
+// Perform the fletching action
+procedure Fletch();
+begin
+  if not RSClient.IsLoggedIn() then
+    Login.LoginPlayer();
+
+  Script.SetAction("Fletching");
+  WaitUntil(not Bank.IsOpen(), 250 , 500);
+
+  // Arrow shafts method for levels < 5
+  if selected = "Logs" then
+  begin
+    Script.SetAction("Crafting arrow shafts!");
+    Wait(RandomRange(250, 300));
+    repeat
+      if not (Inventory.ContainsItem('Knife')) or
+         not (Inventory.ContainsItem('Logs')) then
+         break;
+      Inventory.Use('Knife', 'Logs');
+      Wait(RandomRange(750, 1000));
+    until Make.IsOpen();
+
+    Script.SetAction("Making Shafts!");
+
+    if Make.IsOpen() then
+    begin
+      Make.Select("15 arrow shafts", -1, False);
+      WaitUntil(Inventory.CountEmptySlots() = 26, 150, 45000);
+      Script.TotalActions += 27;
+    end;
+  end
+
+  // Otherwise use bowstring + unstrung bow
+  else
+  begin
+    Script.SetAction("Fletching Started");
+    Wait(RandomRange(250, 300));
+    repeat
+      if not (Inventory.ContainsItem(selected)) or
+         not (Inventory.ContainsItem('Bow String')) then
+         break;
+      Inventory.Use('Bow string', selected);
+      Wait(RandomRange(750, 1000));
+    until Make.IsOpen();
+
+    Script.SetAction("Making Bows!");
+
+    if Make.IsOpen() then
+      begin
+        Make.Select(MakeStr, -1, False);
+        Wait(RandomRange(1500, 3000));
+        Antiban.DoAntiban();
+        WaitUntil(Inventory.CountEmptySlots() = 14, 150, 20000);
+        Script.TotalActions += 14;
+      end
+  end;
+end;
+
+procedure LvlCheck();
+begin
+  if not RSClient.IsLoggedIn() then
+      Login.LoginPlayer();
+  // If level changed, re-evaluate the bow type
+  Count:= 0;
+  repeat
+    CurrentLvl:= Stats.GetLevel((ERSSkill.FLETCHING), False);
+    if CurrentLvl <> Fletching then
+    begin
+    Count += 1;
+    Wait(RandomRange(250, 300));
+    if Count > 1 then
+      Antiban.ToggleTab();
+      Antiban.HoverSkill(ERSSkill.FLETCHING, 100, False);
+    if Count = 5 then
+    begin
+      Script.SetAction("Current level is: " + ToStr(CurrentLvl));
+      break;
+    end;
+    end;
+  until (CurrentLvl <> -1);
+
+  if CurrentLvl <> Fletching then
+    Bowtype();
+
+  // Track profit
+  Banks.Hover();
+  CalculateProfit();
+end;
+
+procedure OutOfItems();
+begin
+    if not XPBar.EarnedXP() then
+      begin
+        Script.SetAction("No Exp Gained, Checking Supplies");
+        Bowtype();
+        OpenBank();
+        Withdraw();
+        if not (Inventory.ContainsItem(selected)) or
+           not (Inventory.ContainsItem('Bow String')) and
+          (not (Inventory.ContainsItem('Knife')) or
+           not (Inventory.ContainsItem('Logs'))) then
+           TerminateScript();
+      end;
+end;
+
+// Main loop of the script
+procedure DoWork();
+begin
+  Init();
+  Bowtype();
+  Start();
+  repeat
+    OpenBank();
+    Withdraw();
+    Fletch();
+    LvlCheck();
+    OutOfItems();
+  until Fletching = 99;
+end;
+
+procedure TFletchConfig.StartScript(sender: TObject); override;
+begin
+  inherited;
+  CurrentBank := EBankChunk(WLSettings.GetInt('bank_map'));
+end;
+
+procedure TFletchConfig.Run(); override;
+var
+  tab: TTabSheet;
+begin
+  Self.Setup('ArcticFletcher Settings');
+  Self.Start.SetOnClick(@Self.StartScript);
+
+  Self.AddTab('Settings');
+  tab := Self.Tabs[High(Self.Tabs)];
+
+  // Create the FletchingSelector combobox
+  with Self.FletchingSelector do
+  begin
+    Create(Tab);
+    SetCaption('Welcome to ArcticFletching. Feel free to make a post in ' +
+    'ArcticFletcher for any requests or bugs you encounter, enjoy!');
+    SetLeft(30);
+    SetTop(200);
+    SetWidth(650);
+    AddItemArray(['99 Fletching!']);
+    SetItemIndex(0); // Default selection
+  end;
+
+  Self.CreateAccountManager(tab);
+  Self.CreateAntibanManager();
+  Self.CreateBankSettingsV2(tab, Point(TControl.AdjustToDPI(30), Self.FletchingSelector.GetBottom() + TControl.AdjustToDPI(10)), []);
+  Self.CreateWaspLibSettings();
+  Self.CreateAPISettings();
+
+  inherited;
+
+  DoWork(); // Start main logic
+end;
+
+// Start script execution
+begin
+  FletchConfig.Run();
+end.
+

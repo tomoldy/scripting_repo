@@ -1,0 +1,70 @@
+name: Build
+
+on: 
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+
+env:
+  FPC_VER: release_3_2_2
+  LAZ_VER: lazarus_2_2_4
+      
+jobs:
+  build:
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:            
+          - name: Windows 64
+            os: windows-latest
+            build-mode: WIN64
+            binary: libtpaex64.dll
+            
+          - name: Windows 32
+            os: windows-latest
+            build-mode: WIN32
+            binary: libtpaex32.dll
+
+          - name: Linux 64
+            os: ubuntu-latest
+            build-mode: LINUX64
+            binary: libtpaex64.so
+          
+          - name: Linux AArch64  
+            os: ubuntu-latest
+            build-mode: LINUX-AARCH64
+            binary: libtpaex64.so.aarch64
+            
+          - name: MacOS 64
+            os: macos-latest
+            build-mode: MACOS
+            binary: libtpaex64.dylib
+
+          - name: MacOS AArch64
+            os: macos-latest
+            build-mode: MACOS-AARCH64
+            binary: libtpaex64.dylib.aarch64
+         
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Lazarus
+        uses: ollydev/setup-lazarus-fpcup@v3.3
+        with:
+          laz: ${{ env.LAZ_VER }}
+          fpc: ${{ env.FPC_VER }}
+          
+      - name: Build Library tpaex
+        run: |
+          lazbuild --build-mode=${{ matrix.config.build-mode }} tpaex.lpi
+
+      - name: Upload Binary 
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.config.binary }}
+          path: ${{ matrix.config.binary }}

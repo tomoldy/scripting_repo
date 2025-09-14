@@ -1,0 +1,3813 @@
+{$DEFINE SCRIPT_ID := 'f8daec32-1d6f-4465-9634-ff12604b60ad'}
+{$DEFINE SCRIPT_REVISION := '4'}
+{$IFDEF WINDOWS}{$DEFINE SCRIPT_GUI}{$ENDIF}
+{$I SRL-T/osr.simba}
+{$I WaspLib/osr.simba}
+{$I WaspLib/optional/handlers/discord.simba}
+
+var
+  WEBHOOKURL: String                     = '';
+  ENABLEWEBHOOKS: Boolean                = True; 
+  ENABLEWORLDHOPPING: Boolean            = True;
+  WORLDHOPINTERVAL: Integer              = 45;
+  SENDSESSIONSUMMARYMSG: Boolean         = True;
+  SENDHOURLYREPORTMSG: Boolean           = True;
+  ABLOSEFOCUS: Boolean                   = True;
+  USEBOOSTS: Boolean                     = False;
+  REPOTINTERVAL: Integer                 = 5;
+  USEDHAROKS: Boolean                    = False;
+  DHAROKSTARGETHPS: Integer              = 1;
+  ENABLEPRAYERFLICK: Boolean             = False;
+  STOPONDEGRADE: Boolean                 = False;
+  OVERRIDEBREAKS: Boolean                = False;
+  CUSTOMBREAKINTERVAL: Integer           = 60;
+  CUSTOMBREAKDURATION: Integer           = 5;
+  DEBUGMODE: Boolean                     = False;
+
+type
+  GemStoneCrabSlayer = record(TBaseBankScript)
+    InCombat: Boolean;
+    IsAttacking: Boolean;
+    LastHealthCheck: UInt64;
+    
+    StartXP: Int32;
+    CurrentXP: Integer;
+    PrevXP: Integer;
+    XPGained: Integer;
+    LastHourlyReportTime: Int64;
+    GainedXP: Integer;
+    CurrentHP: Integer;
+
+    GemStoneCrabNorth: TRSNPCV2;
+    GemStoneCrabEast: TRSNPCV2;
+    GemStoneCrabSouth: TRSNPCV2;
+
+    CaveNorth: TRSObjectV2;
+    CaveEast: TRSObjectV2;
+    CaveSouth: TRSObjectV2;
+    
+    ConsecutiveFailedAttacks: Int32;
+    LastFailedAttackTime: UInt64;
+    LastSuccessfulClick: Boolean;
+    
+    LastCaveExitTime: UInt64;
+    
+    ConsecutiveBlockedCaveAttempts: Int32;
+    
+    NextRepotTime: UInt64;
+    LastRepotTime: UInt64;
+    
+    RunningTime: TStopWatch;
+    ActiveTimer: TStopWatch;
+    
+    LastAPIUpdate: UInt64;
+    ApiUpdateInterval: UInt64;
+    
+    NextWorldHopTime: UInt64;
+    WorldHopsCompleted: Int32;
+    LastWorldHopTime: Int64;
+    
+    LastReportTime: UInt64;
+    LastImageClear: UInt64;
+    LastSystemUpdateCheck: UInt64;
+    SystemUpdateWarningShown: Boolean;
+
+    ConsumableHandler: TConsumableHandler;
+    
+    UseFallbackMode: Boolean;
+    
+    LastHPReduction: UInt64;
+    DharoksInitialized: Boolean;
+    
+    UseDragonBattleaxe: Boolean;
+    DragonBattleaxeSlot: Int32;
+    LastDragonBattleaxeUse: UInt64;
+    NextDragonBattleaxeUse: UInt64;
+    
+    PrayFlickTimer: TCountDown;
+    PrayFlickEnabled: Boolean;
+    
+    LogFile: String;
+    
+    InventoryLoadout: TRSBankItemArray;
+    HasSupplies: Boolean;
+    BankingDisabled: Boolean;
+    OutOfPotions: Boolean;
+    
+    ConsecutiveXPFailures: Int32;
+  end;
+
+var
+  GemStoneCrabBot: GemStoneCrabSlayer;
+  Discord: TDiscordClient;
+
+procedure GemStoneCrabSlayer.SetupObjects();
+begin
+  writeln('Setting up objects...');
+
+  with GemStoneCrabNorth do
+  begin
+    GemStoneCrabNorth.Finder.Colors := [CTS2(3635624, 36, 0.28, 1.25)];
+    GemStoneCrabNorth.Walker := @Map.Walker;
+    GemStoneCrabNorth.SetupEx([5], [2, 2, 5], [[996, 37738]]);
+    GemStoneCrabNorth.SetupUpText('Attack');
+    GemStoneCrabNorth.Filter.Minimap := True;
+    GemStoneCrabNorth.DotType := ERSMinimapDot.NPC; 
+  end;
+
+  with GemStoneCrabEast do
+  begin 
+    GemStoneCrabEast.Finder.Colors := [CTS2(3635624, 36, 0.28, 1.25)];
+    GemStoneCrabEast.Walker := @Map.Walker;
+    GemStoneCrabEast.SetupEx([5], [2, 2, 5], [[1316, 37982]]);
+    GemStoneCrabEast.SetupUpText('Attack');
+    GemStoneCrabEast.Filter.Minimap := True;
+    GemStoneCrabEast.DotType := ERSMinimapDot.NPC; 
+  end;
+
+  with GemStoneCrabSouth do 
+  begin
+    GemStoneCrabSouth.Finder.Colors := [CTS2(3635624, 36, 0.28, 1.25)];
+    GemStoneCrabSouth.Walker := @Map.Walker;
+    GemStoneCrabSouth.SetupEx([5], [2, 2, 5], [[860, 38258]]);
+    GemStoneCrabSouth.SetupUpText('Attack');
+    GemStoneCrabSouth.Filter.Minimap := True;
+    GemStoneCrabSouth.DotType := ERSMinimapDot.NPC; 
+  end;
+
+  with CaveNorth do
+  begin
+    CaveNorth.Walker := @Map.Walker;
+    CaveNorth.Finder.Colors := [CTS2(5992046, 7, 0.13, 0.13)];
+    CaveNorth.SetupEx([2, 2, 6], [[1020, 37758]]);
+    CaveNorth.SetupUpText('Cave');
+  end;
+
+  with CaveEast do
+  begin
+    CaveEast.Walker := @Map.Walker;
+    CaveEast.Finder.Colors := [CTS2(5992046, 7, 0.13, 0.13)];
+    CaveEast.SetupEx([2, 2, 6], [[1312, 37934]]);
+    CaveEast.SetupUpText('Cave');
+  end;
+
+  with CaveSouth do
+  begin
+    CaveSouth.Walker := @Map.Walker;
+    CaveSouth.Finder.Colors := [CTS2(5992046, 7, 0.13, 0.13)];
+    CaveSouth.SetupEx([2, 2, 6], [[892, 38286]]);
+    CaveSouth.SetupUpText('Cave');
+  end;
+
+  writeln('Objects setup complete');
+end;
+
+// Bootie overrides to fix broken shit becuase wasp are cry babies
+function TRSLogin.LoginPlayer(): Boolean; override;
+var
+  attempts, world: Int32;
+  timeout: UInt64;
+  player: TRSLoginPlayer;
+  isLauncher: Boolean;
+begin
+  WriteLn('Logging in player');
+
+  timeout := GetTickCount() + 40000;
+
+  while not Self.IsReady() do
+  begin
+    if Self.FindText('CLICK HERE TO PLAY') then
+      Exit(Self.EnterGame());
+
+    if Self.HandleDialogs() then
+      Wait(500);
+
+    if GetTickCount() > timeout then
+    begin
+      WriteLn('Timed out waiting for the loginscreen to be ready.');
+      Exit;
+    end;
+  end;
+
+  player := Self.GetPlayer();
+  isLauncher := Self.UsingLauncher();
+
+  if isLauncher then
+    WriteLn('Jagex Launcher login detected.')
+  else
+  begin
+    WriteLn('Legacy login detected.');
+    if (player.User = '') or (player.Password = '') then
+      Self.Fatal('Player has no username or password');
+  end;
+
+  while Self.IsOpen() and (attempts < 10) do
+  begin
+    WriteLn('Attempt ' + ToString(attempts + 1));
+
+    if player.Worlds <> [] then
+      if not (Self.GetCurrentWorld() in player.Worlds) or SRL.Dice(30) then
+      begin
+        world := Player.Worlds[Random(Length(Player.Worlds))];
+        if (not Self.SwitchToWorld(world)) then
+        begin
+          Self.CloseWorldSwitcher();
+          Exit;
+        end;
+      end;
+
+    if Self.HandleDialogs() then
+      Wait(500);
+
+    if Self.DoLogin(player, isLauncher) and not Self.WaitLoginMessage() then
+      Exit;
+
+    Inc(attempts);
+  end;
+  Result := Self.EnterGame();
+end;
+// love you bootie
+
+// More overrides so walker just doesn't crash tf
+function TWebGraphV2.FindObjectPath(me: TPoint; out p: TPoint): TPointArray; override;
+var
+  i: Int32;
+  cluster, best: TPointArray;
+begin
+  if Self.UseCollisionData then
+  begin
+    for i := 0 to High(Self.WalkableClusters) do
+      if Self.WalkableClusters[i].Contains(me) then
+        cluster := Self.WalkableClusters[i];
+
+    if cluster = [] then
+      RaiseException(SRL.TimeStamp() + ':[WebGraph]:[Fatal]: Can''t find player cluster containg: ' + me.ToString());
+  end;
+
+  best := Self.FindNearestNodesEx(p, 12);
+  for i := 0 to High(best) do
+  begin
+    p := best[i];
+
+    if not Self.UseCollisionData or cluster.Contains(p) then
+    begin
+      try
+        Result := Self.PathBetweenEx(me, p, 0.2, 2);
+        if Result = [] then
+        begin
+          if me.InRange(p, 52) then Exit([p]);
+          exit;
+          //RaiseException('Path empty');
+        end;
+      except
+        if me.InRange(p, 52) then Exit([p]);
+        exit;
+        //RaiseException(SRL.TimeStamp() + ':[WebGraph]:[Fatal]: Can''t find a walkable path to ' + p.ToString() + ' object.');
+      end;
+      Break;
+    end;
+  end;
+end;       
+
+// Override to remove logout chance when in combat
+procedure TAntiban.TakeBreak(var task: TBreakTask); override;
+var
+  countdown: TCountDown;
+  i: Int32;
+  activeTasks: PAntibanTaskArray;
+begin
+  activeTasks := Self.GetActiveTasks();
+  for i := 0 to High(activeTasks) do
+    activeTasks[i]^.countdown.Pause();
+
+  countdown.Init(Abs(Round(SRL.GaussRand(task.Length, task.Length * task.StdVar))));
+
+  WriteLn('Taking a break for ' + SRL.MsToTime(countdown.TimeRemaining(), TIME_FORMAL));
+
+  if (@Self.OnStartBreak <> nil) then
+    Self.OnStartBreak(@task);
+
+  if not (GemStoneCrabBot.InCombat or GemStoneCrabBot.IsAttacking) then
+  begin
+    if Random() < task.LogoutChance then
+    begin
+      WriteLn('Logging out');
+      Logout.ClickLogout();
+    end;
+  end
+  else
+  begin
+    WriteLn('In combat - skipping logout chance');
+  end;
+
+  if Random() < 0.50 then
+    Self.LoseFocus();
+
+  i := 0;
+  while not countdown.IsFinished() do
+  begin
+    if (Inc(i) mod 12 = 0) then
+      WriteLn('Break time remaining: ' + ToString(countdown.TimeRemaining() div 60000) + ' minutes');
+
+    if (@Self.OnBreaking <> nil) then
+      Self.OnBreaking(@task, countdown);
+
+    Wait(Min(countdown.TimeRemaining(), 5 * ONE_SECOND));
+  end;
+
+  WriteLn('Break finished');
+
+  if (@Self.OnFinishBreak <> nil) then
+    Self.OnFinishBreak(@task);
+
+  // Offset all tasks & breaks
+  for i := 0 to High(Self.Breaks) do
+    Self.Breaks[i].NextAtTime += GetTickCount() - (countdown.Timeout - countdown.Length);
+
+  for I := 0 to High(activeTasks) do
+    activeTasks[i]^.countdown.Resume();
+
+  // Setup next time this break happens
+  task.NextAtTime := GetTimeRunning() + Abs(SRL.GaussRand(task.Interval, task.Interval * task.StdVar));
+end;   
+
+// Override DoAntiban to support my custom breaks if built-in breaks are disabled
+function TBaseScript.DoAntiban(checkBreaks: Boolean = True; checkSleeps: Boolean = True): Boolean; override;
+begin
+  Antiban.DismissRandom();
+  Self.TimeRunning.Pause();
+  Self.OnAntiban := True;
+
+  checkBreaks := checkBreaks and (WLSettings.GetObject('antiban').getBoolean('breaks') or OVERRIDEBREAKS);
+  checkSleeps := checkSleeps and WLSettings.GetObject('antiban').getJSONObject('sleep').getBoolean('enabled');
+
+  if WLSettings.GetObject('antiban').getJSONObject('tasks').getBoolean('enabled') or checkBreaks or checkSleeps then
+    Result := Antiban.DoAntiban(checkBreaks, checkSleeps);
+
+  Self.TimeRunning.Resume();
+  Self.OnAntiban := False;
+
+  if not RSClient.IsLoggedIn() then
+    Login.LoginPlayer();
+end;
+
+// Some camera angles cause XP Bar read to fail and terminate, override to remove terminations etc
+function TRSXPBar.Read(): Int64; override;
+var
+  xpStr: String;
+begin
+  if not Self.IsSetup then
+    Self._Setup();
+
+  if not Self.IsSetup or not Self.Enable() then
+    Exit;
+
+  xpStr := OCR.Recognize(Self.Bounds, TOCRColorFilter.Create([$FFFFFF]), Self.Font);
+  Result := xpStr.ExtractInteger(0);
+
+  Self.Tracker.IsSetup := (Result > 0) and (Result >= Self.Tracker.Current);
+
+  if not Self.Tracker.IsSetup and (Self.Tracker.Current = 0) and RSInterface.IsOpen() then
+    if RSInterface.Close() then
+    begin
+      Self.IsSetup := False;
+      Exit(Self.Read());
+    end;
+
+  if Self.Tracker.IsSetup then
+  begin
+    if Self.Tracker.Start = 0 then
+      Self.Tracker.Start := Result;
+
+    if (Self.Tracker.Current = 0) or (Result > Self.Tracker.Current) then
+      Self.Tracker.Current := Result;
+
+    Exit;
+  end;
+end;           
+
+function GemStoneCrabSlayer.IsOutOfAmmo(): Boolean;
+var
+  Messages: String;
+  I: Int32;
+begin
+  Result := False;
+  
+  for I := 0 to CHAT_INPUT_LINE - 1 do
+    Messages += Chat.GetMessage(I, [CHAT_COLOR_BLACK]);
+  
+  // Check for message
+  Result := Messages.ContainsAny([
+    'out of ammo',        // General ammo message
+    'no charges',         // Magic weapons/trident
+    'cast this',          // Magic spells
+    'last one',            // Darts/throwing weapons
+    'degraded'            // Dharoks armour
+  ]);
+  
+  if Result then
+    WriteLn('Out of ammo detected in chat messages');
+end;
+
+function GemStoneCrabSlayer.CheckForDegradation(): Boolean;
+var
+  Messages: String;
+  I: Int32;
+begin
+  Result := False;
+  
+  if not USEDHAROKS or not STOPONDEGRADE then
+    Exit;
+  
+  for I := 0 to CHAT_INPUT_LINE - 1 do
+    Messages += Chat.GetMessage(I, [CHAT_COLOR_BLACK]);
+  
+  // Replace with actual words when we find out
+  if Messages.ContainsAny(['Degrade', 'degrade', 'DEGRADE']) then
+  begin
+    WriteLn('Dharoks armour degradation detected!');
+    
+    if ENABLEWEBHOOKS then
+    begin
+      try
+        Discord.Webhook.Content := '**DHAROKS ARMOUR DEGRADED** :warning: Your Dharoks armour has degraded and the script will terminate.';
+        Discord.SendScreenshot(False);
+      except
+        WriteLn('[Discord] Failed to send degradation notification');
+      end;
+    end;
+    
+    if STOPONDEGRADE then
+    begin
+      WriteLn('Stop on degrade enabled - terminating script');
+      Self.TakeScreenshot('_DharoksDegraded');
+      Logout.ClickLogout();
+      TerminateScript('Dharoks armour degraded');
+    end;
+    
+    Result := True;
+  end;
+end;
+
+function GemStoneCrabSlayer.GetCurrentHP(): Int32;
+begin
+  Result := Minimap.GetHPLevel();
+end;
+
+function GemStoneCrabSlayer.ShouldReduceHP(): Boolean;
+var
+  CurrentHP: Int32;
+  TimeSinceLastReduction: UInt64;
+  TargetHP: Int32;
+  RandomThreshold: Int32;
+begin
+  Result := False;
+  
+  if not USEDHAROKS then
+    Exit;
+    
+  CurrentHP := Self.GetCurrentHP();
+  TimeSinceLastReduction := GetTickCount() - Self.LastHPReduction;
+  TargetHP := DHAROKSTARGETHPS;
+  
+  if Self.LastHPReduction = 0 then
+  begin
+    if CurrentHP > TargetHP then
+    begin
+      if (TimeSinceLastReduction > 3000) and (Random(100) < 70) then
+        Result := True;
+    end;
+  end
+  else
+  begin
+    RandomThreshold := TargetHP + Random(3, 5);
+    
+    if CurrentHP > RandomThreshold then
+    begin
+      if (TimeSinceLastReduction > 3000) and (Random(100) < 70) then
+      begin
+        WriteLn('Dharoks: HP at ', CurrentHP, ' is above threshold ', RandomThreshold, ' - reducing to target ', TargetHP);
+        Result := True;
+      end;
+    end;
+  end;
+end;
+
+function GemStoneCrabSlayer.TryReduceHP(): Boolean;
+var
+  Slot: Int32;
+  CurrentHP: Int32;
+  AttemptsLeft: Int32;
+  ExpectedDamage: Int32;
+  TargetHP: Int32;
+begin
+  Result := False;
+  
+  if not USEDHAROKS then
+    Exit;
+    
+  CurrentHP := Self.GetCurrentHP();
+  TargetHP := DHAROKSTARGETHPS;
+  
+  if CurrentHP <= TargetHP then
+  begin
+    WriteLn('Already at or below target HP (', CurrentHP, ' <= ', TargetHP, ')');
+    Exit(True);
+  end;
+  
+  WriteLn('Dharoks: Reducing HP from ', CurrentHP, ' to target ', TargetHP, ' or lower...');
+  
+  if not Inventory.IsOpen() then
+    Inventory.Open();
+  
+  AttemptsLeft := 40;
+  
+  while (Self.GetCurrentHP() > TargetHP) and (AttemptsLeft > 0) do
+  begin
+    CurrentHP := Self.GetCurrentHP();
+    
+    // Try Locator orb
+    if Inventory.FindItem('Locator orb', Slot) then
+    begin
+      WriteLn('Using Locator orb to reduce HP (10 damage per click)');
+      if Inventory.ClickSlot(Slot) then
+      begin
+        Wait(800, 1200);
+        Self.LastHPReduction := GetTickCount();
+        Dec(AttemptsLeft);
+        Continue;
+      end;
+    end
+    // Try Dwarven rock cake
+    else if Inventory.FindItem('Dwarven rock cake', Slot) then
+    begin
+      ExpectedDamage := Ceil(CurrentHP * 0.1); // 10% of current HP, rounded up according to wiki
+      if ExpectedDamage < 1 then ExpectedDamage := 1;
+      
+      // When HP = 2, we need to use "Guzzle" to get 1 damage
+      if (ExpectedDamage = 1) and (CurrentHP > 2) then
+      begin
+        WriteLn('Using Dwarven rock cake (Eat)');
+        if Inventory.ClickSlot(Slot, 'Eat') then
+        begin
+          Wait(800, 1200);
+          Self.LastHPReduction := GetTickCount();
+          Dec(AttemptsLeft);
+          Continue;
+        end;
+      end
+      else
+      begin
+        WriteLn('Using Dwarven rock cake (Guzzle) to reduce HP (', ExpectedDamage, ' damage expected)');
+        if Inventory.ClickSlot(Slot, 'Guzzle') then
+        begin
+          Wait(800, 1200);
+          Self.LastHPReduction := GetTickCount();
+          Dec(AttemptsLeft);
+          Continue;
+        end
+        else
+        begin
+          WriteLn('Guzzle failed, trying Eat option (1 damage per click)');
+          if Inventory.ClickSlot(Slot, 'Eat') then
+          begin
+            Wait(800, 1200);
+            Self.LastHPReduction := GetTickCount();
+            Dec(AttemptsLeft);
+            Continue;
+          end;
+        end;
+      end;
+    end
+    else
+    begin
+      WriteLn('ERROR: No HP reduction items found in inventory!');
+      WriteLn('Please ensure you have either a "Locator orb" or "Dwarven rock cake" in your inventory.');
+      USEDHAROKS := False;
+      Exit(False);
+    end;
+    
+    WriteLn('Failed to click HP reduction item, retrying...');
+    Dec(AttemptsLeft);
+  end;
+  
+  if Self.GetCurrentHP() <= TargetHP then
+  begin
+    WriteLn('Successfully reduced HP to ', Self.GetCurrentHP(), ' (at or below target ', TargetHP, ')');
+    Self.IsAttacking := False;
+    Self.InCombat := False;
+    Result := True;
+  end
+  else
+  begin
+    WriteLn('Failed to reduce HP to target, current HP: ', Self.GetCurrentHP());
+    if AttemptsLeft <= 0 then
+      WriteLn('Stopped due to safety limit');
+  end;
+end;
+
+function GemStoneCrabSlayer.InitializeDharoks(): Boolean;
+begin
+  Result := False;
+  
+  if not USEDHAROKS then
+    Exit(True);
+    
+  if Self.DharoksInitialized then
+    Exit(True);
+    
+  WriteLn('Initializing Dharoks setup...');
+  
+  // Check if we have the required items
+  if not Inventory.IsOpen() then
+    Inventory.Open();
+    
+  if not (Inventory.ContainsItem('Locator orb') or Inventory.ContainsItem('Dwarven rock cake')) then
+  begin
+    WriteLn('ERROR: Dharoks mode enabled but no HP reduction items found!');
+    WriteLn('Please add either a "Locator orb" (10 dmg/click) or "Dwarven rock cake" (Guzzle: 10% HP/click) to your inventory.');
+    USEDHAROKS := False;
+    Exit(False);
+  end;
+  
+  // Reduce HP to target range initially
+  if Self.TryReduceHP() then
+  begin
+    Self.DharoksInitialized := True;
+    WriteLn('Dharoks setup complete - ready for combat at target HP ', DHAROKSTARGETHPS, ' or lower!');
+    Result := True;
+  end
+  else
+  begin
+    WriteLn('Failed to initialize Dharoks setup');
+    USEDHAROKS := False;
+  end;
+end;
+
+function GemStoneCrabSlayer.GetRandomWorldHopTime(): UInt64;
+var
+  BaseInterval: UInt64;
+  RandomVariation: Integer;
+begin
+  BaseInterval := WORLDHOPINTERVAL * 60000;
+  
+  // 10% random variation to the interval eitherside
+  RandomVariation := Random(-10, 10);
+  Result := BaseInterval + Round(BaseInterval * (RandomVariation / 100.0));
+    
+  WriteLn('Next world hop scheduled in: ' + SRL.MsToTime(Result, Time_Short) + 
+          ' (Base: ' + IntToStr(WORLDHOPINTERVAL) + 'min, Variation: ' + IntToStr(RandomVariation) + '%)');
+end;
+
+procedure GemStoneCrabSlayer.SetupWorldHopping();
+begin
+  WriteLn('Setting up world hopping...');
+  
+  if not ENABLEWORLDHOPPING then
+  begin
+    WriteLn('World hopping is disabled.');
+    Exit;
+  end;
+
+  if Length(Login.GetPlayer().Worlds) < 2 then
+  begin
+    WriteLn('ERROR: World hopping is enabled but you have less than 2 worlds configured!');
+    WriteLn('Please configure at least 2 worlds in your player setup or disable world hopping.');
+    Logout.ClickLogout();
+    TerminateScript();
+  end;
+
+  Self.NextWorldHopTime := GetTickCount() + Self.GetRandomWorldHopTime();
+  WriteLn('World hopping enabled. Next hop in: ' + SRL.MsToTime(Self.NextWorldHopTime - GetTickCount(), Time_Short));
+end;
+
+function GemStoneCrabSlayer.ShouldHopWorld(): Boolean;
+var
+  TimeSinceLastCombat: UInt64;
+  RequiredCombatCooldown: UInt64;
+  TimeToWait: UInt64;
+begin
+  if not ENABLEWORLDHOPPING then
+    Exit(False);
+    
+  // Don't try to hop if we're currently in combat
+  if Self.InCombat or Self.IsAttacking then
+    Exit(False);
+  
+  // Check if it's time to hop
+  if GetTickCount() < Self.NextWorldHopTime then
+    Exit(False);
+  
+  TimeSinceLastCombat := GetTickCount() - Self.LastHealthCheck;
+  
+  // Require 20-30 seconds out of combat before allowing world hop for combat drop
+  RequiredCombatCooldown := Random(20000, 30000); // 20-30 seconds
+  
+  if TimeSinceLastCombat < RequiredCombatCooldown then
+  begin
+    TimeToWait := RequiredCombatCooldown - TimeSinceLastCombat;
+    WriteLn('Waiting ' + IntToStr(TimeToWait div 1000) + ' seconds out of combat before hopping...');
+    Wait(TimeToWait);
+  end;
+    
+  Result := True;
+end;
+
+procedure GemStoneCrabSlayer.DoWorldHop();
+var
+  currentWorld: Int32;
+  playerWorlds: TIntegerArray;
+  targetWorld: Int32;
+  availableWorlds: TIntegerArray;
+  i: Int32;
+begin
+  if not ENABLEWORLDHOPPING then
+    Exit;
+
+  if Self.InCombat or Self.IsAttacking then
+  begin
+    WriteLn('Skipping world hop - currently in combat');
+    Exit;
+  end;
+
+  Self.CheckSystemUpdate();
+
+  WriteLn('Time to hop worlds!');
+  
+  playerWorlds := Login.GetPlayer().Worlds;
+  
+  if not Logout.Open() then
+  begin
+    WriteLn('Failed to open logout menu');
+    Self.NextWorldHopTime := GetTickCount() + 120000;
+    Exit;
+  end;
+
+  if not Logout.IsWorldSwitcherOpen() then
+    Logout.GetButton(ERSLogoutButton.WORLD_SWITCHER).Click(MOUSE_LEFT);
+  WaitUntil((currentWorld := WorldHopper.GetCurrentWorld()) <> 0, 65, 20000);
+  
+  WriteLn('Current world: ' + ToStr(currentWorld));
+  WriteLn('Available worlds: ' + ToStr(playerWorlds));
+
+  availableWorlds := [];
+  for i := 0 to High(playerWorlds) do
+  begin
+    if playerWorlds[i] <> currentWorld then
+      availableWorlds += playerWorlds[i];
+  end;
+  
+  if Length(availableWorlds) = 0 then
+  begin
+    WriteLn('No other worlds available to hop to, disabling world hopping!');
+    ENABLEWORLDHOPPING := False;
+    Exit;
+  end;
+  
+  targetWorld := availableWorlds[Random(Length(availableWorlds))];
+  WriteLn('Randomly selected target world: ' + ToStr(targetWorld));
+
+  if WorldHopper.Hop([targetWorld]) then
+  begin
+    WriteLn('Successfully hopped to world ' + ToStr(targetWorld) + '!');
+    
+    Inc(Self.WorldHopsCompleted);
+    Self.LastWorldHopTime := GetTickCount();
+
+    Self.NextWorldHopTime := GetTickCount() + Self.GetRandomWorldHopTime();
+    WriteLn('Next world hop in: ' + SRL.MsToTime(Self.NextWorldHopTime - GetTickCount(), Time_Short));
+  end
+  else
+  begin
+    WriteLn('World hop to ' + ToStr(targetWorld) + ' failed, trying again in 2 minutes');
+    Self.NextWorldHopTime := GetTickCount() + 120000;
+  end;
+end;
+
+// Thanks Bootie
+function TRSChat.CheckSystemUpdate(minuteTreshold: Integer): Boolean;
+var
+  b: TBox;
+  s: String;
+  numbers: TExtendedArray;
+begin
+  b := Chat.Bounds;
+  b.X1 += 4;
+  b.Y1 -= 16;
+  b.Y2 := Chat.Bounds.Y1 -1;
+  b.X2 := b.X1 + 140;
+
+  s := OCR.Recognize(
+      b,
+      TOCRColorFilter.Create([65535]),
+      RS_FONT_PLAIN_12
+    );
+
+  if s.Contains('System update') then
+  begin
+    s := s.After(': ');
+    numbers := s.ExtractNumbers();
+    if (length(numbers) > 0) and (numbers[0] <= minuteTreshold) then
+      Result := True;
+  end;
+end; 
+
+procedure OnBreakStart(Task: PBreakTask);
+begin
+  GemStoneCrabBot.ActiveTimer.Pause(); 
+  WL.Activity.Pause();
+end;
+
+procedure OnBreakFinish(Task: PBreakTask);
+begin
+  GemStoneCrabBot.ActiveTimer.Resume();
+  WL.Activity.Resume();
+end;
+
+procedure OnSleepStart(Task: PSleepTask);
+begin
+  GemStoneCrabBot.ActiveTimer.Pause();
+  WL.Activity.Pause();
+end;
+
+procedure OnSleepFinish(Task: PSleepTask);
+begin
+  GemStoneCrabBot.ActiveTimer.Resume();
+  WL.Activity.Resume();
+end;
+
+procedure TAntiban.AdjustZoom(); override;
+var
+  zoom, newZoom: Int32;
+  attempts: Int32;
+begin
+
+  if (Self.MaxZoom = 0) then
+  begin
+    WriteLn('No maximum zoom set, using default value of 100');
+    Self.MaxZoom := 15;
+  end;
+
+  if RSInterface.IsOpen() then
+    Exit;
+
+  zoom := EnsureRange(MM2MS.GetZoomLevel(), Self.MinZoom, Self.MaxZoom);
+
+  repeat
+    Inc(attempts);
+    if attempts > 100 then
+      Exit;
+
+    newZoom := EnsureRange(SRL.SkewedRand(zoom, Self.MinZoom, Self.MaxZoom), Self.MinZoom, Self.MaxZoom);
+  until Abs(zoom - newZoom) > Min(15, (Self.MinZoom - Self.MaxZoom) div 2);
+
+  WriteLn('Adjust zoom: ' + ToString(newZoom));
+  RSMouseZoom.SetZoomLevel(newZoom);
+end;
+
+// Disablechat antiban becaUse of chatbot and like who does this
+procedure TAntiban.RandomChatTask(); override;
+begin
+  Exit;
+end;
+
+procedure TAntiban.Setup(); override;
+begin
+  Self.Skills := [ERSSkill.TOTAL, ERSSkill.ATTACK, ERSSkill.STRENGTH, ERSSkill.DEFENCE, ERSSkill.HITPOINTS];
+  Self.MinZoom := 0;
+  Self.MaxZoom := 15;
+  
+  Antiban.OnStartBreak := @OnBreakStart;
+  Antiban.OnFinishBreak := @OnBreakFinish;
+  Antiban.OnStartSleep := @OnSleepStart;
+  Antiban.OnFinishSleep := @OnSleepFinish;
+
+  inherited;
+  
+  if OVERRIDEBREAKS then
+  begin
+    WriteLn('Custom break override enabled:');
+    WriteLn('  - Break Interval: ', CUSTOMBREAKINTERVAL, ' minutes');
+    WriteLn('  - Break Duration: ', CUSTOMBREAKDURATION, ' minutes');
+    
+    // Clear the default breaks so we can use our own
+    Self.Breaks := [];
+    
+    // now we add our custom tbreaks
+    Self.AddBreak(CUSTOMBREAKINTERVAL * ONE_MINUTE, CUSTOMBREAKDURATION * ONE_MINUTE, 0.33, 0.15);
+    
+    WriteLn('Custom breaks initialized successfully');
+  end
+  else
+  begin
+    WriteLn('Using WaspLib break system');
+  end;
+end;
+
+{$IFDEF SCRIPT_GUI}
+type
+  TConfig = record(TScriptForm)
+    WebhookLabel: TLabel;
+    WebHookInput: TLabeledEdit;
+    WorldHopIntervalInput: TLabeledEdit;
+    RepotIntervalInput: TLabeledEdit;
+    DharoksTargetHPInput: TLabeledEdit;
+    EnableWebhooksCheckBox,
+    HourlyReportsCheckBox, SessionSummaryCheckBox, 
+    LoseFocusCheckBox, EnableWorldHoppingCheckBox, UseBoostsCheckBox, UseDharoksCheckBox, EnablePrayerFlickCheckBox, StopOnDegradeCheckBox: TLabeledCheckBox;
+    WebhookInfo: TLabel;
+    TestButton: TButton;
+    SavedWebhookURL: String;
+    DiscordPanel: TLabeledPanel;
+    ScriptSettingsPanel: TLabeledPanel;
+    Username: String;
+    
+    OverrideBreaksCheckBox: TLabeledCheckBox;
+    CustomBreakIntervalInput: TLabeledEdit;
+    CustomBreakDurationInput: TLabeledEdit;
+    DebugModeCheckBox: TLabeledCheckBox;
+  end;
+
+procedure TConfig.UpdateAccountValues(sender: TObject);
+var
+  selector: TComboBox;
+  user, pass, pin: TEdit;
+  worlds: TMemo;
+  idx: Int32;
+  worldsStr: String;
+  i: Int32;
+begin
+  selector := TComboBox(Self.Form.GetChild('am_selector_combobox'));
+  idx := selector.GetItemIndex();
+
+  if (idx < 0) or (idx > High(Login.Players)) then Exit;
+  
+  Self.SaveUserSettings();
+
+  Login.PlayerIndex := idx;
+
+  user := TEdit(Self.Form.GetChild('am_user_edit'));
+  pass := TEdit(Self.Form.GetChild('am_pass_edit'));
+  pin := TEdit(Self.Form.GetChild('am_pin_edit'));
+  worlds := TMemo(Self.Form.GetChild('am_worlds_memo'));
+
+  user.SetText(Login.Players[idx].User);
+  pass.SetText(Login.Players[idx].Password);
+  pin.SetText(Login.Players[idx].Pin);
+
+  worldsStr := '';
+  for i := 0 to High(Login.Players[idx].Worlds) do
+  begin
+    worldsStr += ToStr(Login.Players[idx].Worlds[i]);
+    if i < High(Login.Players[idx].Worlds) then
+      worldsStr += ', ';
+  end;
+  worlds.SetText(worldsStr);
+
+  Self.LoadUserSettings();
+end;
+
+procedure TConfig.InitializeAccountManager;
+var
+  selector: TComboBox;
+begin
+  selector := TComboBox(Self.Form.GetChild('am_selector_combobox'));
+  selector.SetOnChange(@UpdateAccountValues);
+end;
+  
+procedure TConfig.LoadUserSettings();
+var
+  SavedWebhookURL: String;
+  SavedEnableWebhooks: Boolean;
+  SavedHourlyReports, SavedSessionSummary, SavedLoseFocus, SavedEnableWorldHopping, SavedUseBoosts, SavedUseDharoks, SavedEnablePrayerFlick, SavedStopOnDegrade: Boolean;
+  SavedWorldHopInterval, SavedRepotInterval: Integer;
+  Username: String;
+  SavedOverrideBreaks: Boolean;
+  SavedCustomBreakInterval, SavedCustomBreakDuration: Integer;
+  SavedDharoksTargetHP: Integer;
+  SavedDebugMode: Boolean;
+begin
+ if (Login.PlayerIndex < 0) or (Login.PlayerIndex > High(Login.Players)) then
+    Username := 'NoUserNameSelected'
+  else
+    Username := Login.Players[Login.PlayerIndex].User;
+
+  if Username = '' then Exit;
+
+  SavedHourlyReports := StrToBoolDef(ReadINI(Username + ' Webhook Settings', 'HourlyReports', 'Configs/BASettings.ini'), True);
+  SavedSessionSummary := StrToBoolDef(ReadINI(Username + ' Webhook Settings', 'SessionSummary', 'Configs/BASettings.ini'), True);
+  SavedLoseFocus := StrToBoolDef(ReadINI(Username + ' Antiban Manager', 'LoseFocus', 'Configs/BASettings.ini'), True);
+  SavedWebhookURL := ReadINI(Username + ' Webhook Settings', 'WebhookURL', 'Configs/BASettings.ini');
+  SavedEnableWebhooks := StrToBoolDef(ReadINI(Username + ' Webhook Settings', 'EnableWebhooks', 'Configs/BASettings.ini'), False);
+  SavedEnableWorldHopping := StrToBoolDef(ReadINI(Username + ' Gemstone Crab Settings', 'EnableWorldHopping', 'Configs/BASettings.ini'), False);
+  SavedWorldHopInterval := StrToIntDef(ReadINI(Username + ' Gemstone Crab Settings', 'WorldHopInterval', 'Configs/BASettings.ini'), 45);
+  SavedUseBoosts := StrToBoolDef(ReadINI(Username + ' Gemstone Crab Settings', 'UseBoosts', 'Configs/BASettings.ini'), False);
+  SavedRepotInterval := StrToIntDef(ReadINI(Username + ' Gemstone Crab Settings', 'RepotInterval', 'Configs/BASettings.ini'), 5);
+  SavedUseDharoks := StrToBoolDef(ReadINI(Username + ' Gemstone Crab Settings', 'UseDharoks', 'Configs/BASettings.ini'), False);
+  SavedDharoksTargetHP := StrToIntDef(ReadINI(Username + ' Gemstone Crab Settings', 'DharoksTargetHP', 'Configs/BASettings.ini'), 1);
+  SavedEnablePrayerFlick := StrToBoolDef(ReadINI(Username + ' Gemstone Crab Settings', 'EnablePrayerFlick', 'Configs/BASettings.ini'), False);
+  SavedStopOnDegrade := StrToBoolDef(ReadINI(Username + ' Gemstone Crab Settings', 'StopOnDegrade', 'Configs/BASettings.ini'), False);
+  SavedDebugMode := StrToBoolDef(ReadINI(Username + ' Gemstone Crab Settings', 'DebugMode', 'Configs/BASettings.ini'), False);
+
+  if SavedDharoksTargetHP < 1 then
+    SavedDharoksTargetHP := 1
+  else if SavedDharoksTargetHP > 99 then
+    SavedDharoksTargetHP := 99;
+
+  // Load custom break override settings
+  SavedOverrideBreaks := StrToBoolDef(ReadINI(Username + 'Gemstone Crab Antiban Manager', 'OverrideBreaks', 'Configs/BASettings.ini'), False);
+  SavedCustomBreakInterval := StrToIntDef(ReadINI(Username + 'Gemstone Crab Antiban Manager', 'CustomBreakInterval', 'Configs/BASettings.ini'), 60);
+  SavedCustomBreakDuration := StrToIntDef(ReadINI(Username + 'Gemstone Crab Antiban Manager', 'CustomBreakDuration', 'Configs/BASettings.ini'), 5);
+
+  if Assigned(Self.HourlyReportsCheckBox) then
+    Self.HourlyReportsCheckBox.SetChecked(SavedHourlyReports);
+
+  if Assigned(Self.SessionSummaryCheckBox) then
+    Self.SessionSummaryCheckBox.SetChecked(SavedSessionSummary);
+
+  if Assigned(Self.LoseFocusCheckBox) then
+    Self.LoseFocusCheckBox.SetChecked(SavedLoseFocus);
+
+  if Assigned(Self.EnableWebhooksCheckBox) then
+  begin
+    Self.EnableWebhooksCheckBox.SetChecked(SavedEnableWebhooks);
+    Self.WebhooksCheckboxChanged(Self.EnableWebhooksCheckBox.CheckBox);
+  end;
+
+  if Assigned(Self.EnableWorldHoppingCheckBox) then
+    Self.EnableWorldHoppingCheckBox.SetChecked(SavedEnableWorldHopping);
+
+  if Assigned(Self.UseBoostsCheckBox) then
+    USEBOOSTS := Self.UseBoostsCheckBox.IsChecked();
+
+  if Assigned(Self.UseDharoksCheckBox) then
+    USEDHAROKS := Self.UseDharoksCheckBox.IsChecked();
+
+  if Assigned(Self.WorldHopIntervalInput) then
+    Self.WorldHopIntervalInput.SetText(IntToStr(SavedWorldHopInterval));
+
+  if Assigned(Self.RepotIntervalInput) then
+    Self.RepotIntervalInput.SetText(IntToStr(SavedRepotInterval));
+
+  if Assigned(Self.WebHookInput) then
+    Self.WebHookInput.SetText(SavedWebhookURL);
+
+  if Assigned(Self.OverrideBreaksCheckBox) then
+    Self.OverrideBreaksCheckBox.SetChecked(SavedOverrideBreaks);
+
+  if Assigned(Self.CustomBreakIntervalInput) then
+    Self.CustomBreakIntervalInput.SetText(IntToStr(SavedCustomBreakInterval));
+
+  if Assigned(Self.CustomBreakDurationInput) then
+    Self.CustomBreakDurationInput.SetText(IntToStr(SavedCustomBreakDuration));
+
+  if Assigned(Self.UseDharoksCheckBox) then
+    USEDHAROKS := Self.UseDharoksCheckBox.IsChecked();
+
+  if Assigned(Self.EnablePrayerFlickCheckBox) then
+    ENABLEPRAYERFLICK := Self.EnablePrayerFlickCheckBox.IsChecked();
+
+  if Assigned(Self.DharoksTargetHPInput) then
+    DHAROKSTARGETHPS := StrToIntDef(Self.DharoksTargetHPInput.GetText(), 1);
+
+  if Assigned(Self.DebugModeCheckBox) then
+    Self.DebugModeCheckBox.SetChecked(SavedDebugMode);
+
+  if Assigned(Self.StopOnDegradeCheckBox) then
+    Self.StopOnDegradeCheckBox.SetChecked(SavedStopOnDegrade);
+
+  // Validate Dharoks target HP range
+  if DHAROKSTARGETHPS < 1 then
+    DHAROKSTARGETHPS := 1
+  else if DHAROKSTARGETHPS > 99 then
+    DHAROKSTARGETHPS := 99;
+end;
+
+procedure TConfig.SaveUserSettings();
+var
+  Username: String;
+begin
+ if (Login.PlayerIndex < 0) or (Login.PlayerIndex > High(Login.Players)) then
+    Username := 'NoUserNameSelected'
+  else
+    Username := Login.Players[Login.PlayerIndex].User;
+    
+  if Username = '' then Exit;
+
+  if Assigned(Self.HourlyReportsCheckBox) then
+    SENDHOURLYREPORTMSG := Self.HourlyReportsCheckBox.IsChecked();
+
+  if Assigned(Self.SessionSummaryCheckBox) then
+    SENDSESSIONSUMMARYMSG := Self.SessionSummaryCheckBox.IsChecked();
+
+  if Assigned(Self.LoseFocusCheckBox) then
+    ABLOSEFOCUS := Self.LoseFocusCheckBox.IsChecked();
+
+  if Assigned(Self.EnableWebhooksCheckBox) then
+    ENABLEWEBHOOKS := Self.EnableWebhooksCheckBox.IsChecked();
+
+  if Assigned(Self.EnableWorldHoppingCheckBox) then
+    ENABLEWORLDHOPPING := Self.EnableWorldHoppingCheckBox.IsChecked();
+
+  if Assigned(Self.UseBoostsCheckBox) then
+    USEBOOSTS := Self.UseBoostsCheckBox.IsChecked();
+
+  if Assigned(Self.WorldHopIntervalInput) then
+    WORLDHOPINTERVAL := StrToIntDef(Self.WorldHopIntervalInput.GetText(), 45);
+
+  if Assigned(Self.RepotIntervalInput) then
+    REPOTINTERVAL := StrToIntDef(Self.RepotIntervalInput.GetText(), 5);
+
+  if Assigned(Self.WebHookInput) then
+    WEBHOOKURL := Self.WebHookInput.GetText();
+
+  if Assigned(Self.OverrideBreaksCheckBox) then
+    OVERRIDEBREAKS := Self.OverrideBreaksCheckBox.IsChecked();
+
+  if Assigned(Self.CustomBreakIntervalInput) then
+    CUSTOMBREAKINTERVAL := StrToIntDef(Self.CustomBreakIntervalInput.GetText(), 60);
+
+  if Assigned(Self.CustomBreakDurationInput) then
+    CUSTOMBREAKDURATION := StrToIntDef(Self.CustomBreakDurationInput.GetText(), 5);
+
+  if Assigned(Self.UseDharoksCheckBox) then
+    USEDHAROKS := Self.UseDharoksCheckBox.IsChecked();
+  
+  if Assigned(Self.EnablePrayerFlickCheckBox) then
+    ENABLEPRAYERFLICK := Self.EnablePrayerFlickCheckBox.IsChecked();
+  
+  if Assigned(Self.DharoksTargetHPInput) then
+    DHAROKSTARGETHPS := StrToIntDef(Self.DharoksTargetHPInput.GetText(), 1);
+
+  if Assigned(Self.DebugModeCheckBox) then
+    DEBUGMODE := Self.DebugModeCheckBox.IsChecked();
+
+  if Assigned(Self.StopOnDegradeCheckBox) then
+    STOPONDEGRADE := Self.StopOnDegradeCheckBox.IsChecked();
+
+  WriteINI(Username + ' Webhook Settings', 'WebhookURL', WEBHOOKURL, 'Configs/BASettings.ini');
+  WriteINI(Username + ' Webhook Settings', 'EnableWebhooks', BoolToStr(ENABLEWEBHOOKS, 'true', 'false'), 'Configs/BASettings.ini');
+  WriteINI(Username + ' Webhook Settings', 'HourlyReports', BoolToStr(SENDHOURLYREPORTMSG, 'true', 'false'), 'Configs/BASettings.ini');
+  WriteINI(Username + ' Webhook Settings', 'SessionSummary', BoolToStr(SENDSESSIONSUMMARYMSG, 'true', 'false'), 'Configs/BASettings.ini');
+  WriteINI(Username + ' Antiban Manager', 'LoseFocus', BoolToStr(ABLOSEFOCUS, 'true', 'false'), 'Configs/BASettings.ini');
+  WriteINI(Username + ' Gemstone Crab Settings', 'EnableWorldHopping', BoolToStr(ENABLEWORLDHOPPING, 'true', 'false'), 'Configs/BASettings.ini');
+  WriteINI(Username + ' Gemstone Crab Settings', 'WorldHopInterval', IntToStr(WORLDHOPINTERVAL), 'Configs/BASettings.ini');
+  WriteINI(Username + ' Gemstone Crab Settings', 'UseBoosts', BoolToStr(USEBOOSTS, 'true', 'false'), 'Configs/BASettings.ini');
+  WriteINI(Username + ' Gemstone Crab Settings', 'RepotInterval', IntToStr(REPOTINTERVAL), 'Configs/BASettings.ini');
+  WriteINI(Username + ' Gemstone Crab Settings', 'UseDharoks', BoolToStr(USEDHAROKS, 'true', 'false'), 'Configs/BASettings.ini');
+  WriteINI(Username + ' Gemstone Crab Settings', 'DharoksTargetHP', IntToStr(DHAROKSTARGETHPS), 'Configs/BASettings.ini');
+  WriteINI(Username + ' Gemstone Crab Settings', 'EnablePrayerFlick', BoolToStr(ENABLEPRAYERFLICK, 'true', 'false'), 'Configs/BASettings.ini');
+  WriteINI(Username + ' Gemstone Crab Settings', 'StopOnDegrade', BoolToStr(STOPONDEGRADE, 'true', 'false'), 'Configs/BASettings.ini');
+  WriteINI(Username + ' Gemstone Crab Settings', 'DebugMode', BoolToStr(DEBUGMODE, 'true', 'false'), 'Configs/BASettings.ini');
+
+  WriteINI(Username + 'Gemstone Crab Antiban Manager', 'OverrideBreaks', BoolToStr(OVERRIDEBREAKS, 'true', 'false'), 'Configs/BASettings.ini');
+  WriteINI(Username + 'Gemstone Crab Antiban Manager', 'CustomBreakInterval', IntToStr(CUSTOMBREAKINTERVAL), 'Configs/BASettings.ini');
+  WriteINI(Username + 'Gemstone Crab Antiban Manager', 'CustomBreakDuration', IntToStr(CUSTOMBREAKDURATION), 'Configs/BASettings.ini');
+end;
+
+procedure TConfig.StartScript(sender: TObject); override; 
+begin
+  Self.SaveUserSettings();
+
+  if ENABLEWEBHOOKS then
+  begin
+    Discord.SetWebhook(WEBHOOKURL);
+    Discord.SetUsername('BigAussies Gemstone Crab Slayer'); 
+    Discord.SetAvatar('https://oldschool.runescape.wiki/images/thumb/2/2e/Gemstone_crab.png/150px-Gemstone_crab.png');
+  end;
+
+  inherited;
+end;
+
+procedure TConfig.OpenURL(Sender: TObject);
+begin
+  if Sender = Self.WebhookInfo then
+    OpenWebPage('https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks');
+end;
+
+procedure TConfig.WebhooksCheckboxChanged({$H-}sender: TObject){$H+};
+begin
+  Self.WebhookInfo.SetVisible(Self.EnableWebhooksCheckBox.IsChecked());
+  if Assigned(Self.DiscordPanel) then
+    Self.DiscordPanel.SetVisible(Self.EnableWebhooksCheckBox.IsChecked());
+  if Assigned(Self.WebHookInput) then
+    Self.WebHookInput.SetVisible(Self.EnableWebhooksCheckBox.IsChecked());
+  if Assigned(Self.TestButton) then
+    Self.TestButton.SetVisible(Self.EnableWebhooksCheckBox.IsChecked());
+  if Assigned(Self.HourlyReportsCheckBox) then
+    Self.HourlyReportsCheckBox.SetVisible(Self.EnableWebhooksCheckBox.IsChecked());
+  if Assigned(Self.SessionSummaryCheckBox) then
+    Self.SessionSummaryCheckBox.SetVisible(Self.EnableWebhooksCheckBox.IsChecked());
+end;
+
+procedure TConfig.WorldHoppingCheckboxChanged({$H-}sender: TObject){$H+};
+begin
+  if Assigned(Self.WorldHopIntervalInput) then
+    Self.WorldHopIntervalInput.SetVisible(Self.EnableWorldHoppingCheckBox.IsChecked());
+end;
+
+procedure TConfig.BoostCheckboxChanged({$H-}sender: TObject){$H+};
+begin
+  if Assigned(Self.RepotIntervalInput) then
+    Self.RepotIntervalInput.SetVisible(Self.UseBoostsCheckBox.IsChecked());
+end;
+
+procedure TConfig.OverrideBreaksCheckboxChanged({$H-}sender: TObject){$H+};
+begin
+  if Assigned(Self.CustomBreakIntervalInput) then
+    Self.CustomBreakIntervalInput.SetVisible(Self.OverrideBreaksCheckBox.IsChecked());
+  if Assigned(Self.CustomBreakDurationInput) then
+    Self.CustomBreakDurationInput.SetVisible(Self.OverrideBreaksCheckBox.IsChecked());
+end;
+
+procedure TConfig.DharoksCheckboxChanged({$H-}sender: TObject){$H+};
+begin
+  if Assigned(Self.DharoksTargetHPInput) then
+    Self.DharoksTargetHPInput.SetVisible(Self.UseDharoksCheckBox.IsChecked());
+    
+  if Assigned(Self.EnablePrayerFlickCheckBox) then
+    Self.EnablePrayerFlickCheckBox.SetVisible(Self.UseDharoksCheckBox.IsChecked());
+    
+  if Assigned(Self.StopOnDegradeCheckBox) then
+    Self.StopOnDegradeCheckBox.SetVisible(Self.UseDharoksCheckBox.IsChecked());
+end;
+
+function TConfig.CreateLabeledPanel(owner: TControl; title: String; top, height: Int32; FontSize: Int32 = 10; Color: TColor = clBlack; FontStyles: TFontStyles = [fsBold]): TLabeledPanel;
+var
+  verticalSpacing: Int32;
+begin
+  verticalSpacing := TControl.AdjustToDPI(3);
+  Result.Create(owner);
+  with Result do
+  begin
+    SetCaption(title);
+
+    Panel.SetCaption('');
+    Panel.SetBevelWidth(1);
+    Panel.SetBevelInner(bvRaised);
+    Panel.SetBevelOuter(bvLowered);
+    Panel.SetTop(top + verticalSpacing);
+    Panel.SetWidth(Self.Form.GetWidth - TControl.AdjustToDPI(25));
+    Panel.SetHeight(TControl.AdjustToDPI(height));
+    Panel.SetBorderStyle(bsNone);
+
+    Caption.SetFontSize(FontSize);
+    Caption.SetFontColor(Color);
+    Caption.GetFont().SetStyle(FontStyles);
+  end;
+end;
+
+procedure TConfig.TestButtonClick({$H-}sender: TObject){$H+};
+begin
+  if Self.WebHookInput.GetText = '' then
+  begin
+    ShowMessage('Please enter a Webhook URL');
+    Exit;
+  end;
+  Discord.Webhook.Content := ('Test message from BigAussies Gemstone Crab Slayer');
+  Discord.Webhook.URL := Self.WebHookInput.GetText;
+  Discord.Send();
+  ShowMessage('Test message sent. Please check Discord.');
+end;
+
+procedure TConfig.Run(); override;
+var
+  tab: TTabSheet;
+  SavedWebhookURL: String;
+  SavedEnableWebhooks: Boolean;
+  SavedHourlyReports, SavedSessionSummary, SavedLoseFocus, SavedEnableWorldHopping, SavedUseBoosts, SavedUseDharoks, SavedEnablePrayerFlick, SavedStopOnDegrade: Boolean;
+  SavedWorldHopInterval, SavedRepotInterval: Integer;
+  panelTop: Int32;
+  SavedOverrideBreaks: Boolean;
+  SavedCustomBreakInterval, SavedCustomBreakDuration: Integer;
+  SavedDharoksTargetHP: Integer;
+  SavedDebugMode: Boolean;
+begin
+  if not DEBUGMODE then
+    ClearDebug();
+  
+  if (Login.PlayerIndex < 0) or (Login.PlayerIndex > High(Login.Players)) then
+    Username := 'NoUserNameSelected'
+  else
+    Username := Login.Players[Login.PlayerIndex].User;
+
+  Self.Setup('BigAussies Gemstone Crab Slayer');
+  Self.Start.SetOnClick(@Self.StartScript);
+
+  WLSettings.RemoteInput.BlockInput := True;
+
+  Self.AddTab('Script Settings');
+  tab := Self.Tabs[High(Self.Tabs)];
+
+  Self.CreateAccountManager(tab);
+  InitializeAccountManager();
+  Self.LoadUserSettings();
+
+  SavedWebhookURL := ReadINI(Username + ' Webhook Settings', 'WebhookURL', 'Configs/BASettings.ini');
+  SavedEnableWebhooks := StrToBoolDef(ReadINI(Username + ' Webhook Settings', 'EnableWebhooks', 'Configs/BASettings.ini'), False);
+  SavedHourlyReports := StrToBoolDef(ReadINI(Username + ' Webhook Settings', 'HourlyReports', 'Configs/BASettings.ini'), True);
+  SavedSessionSummary := StrToBoolDef(ReadINI(Username + ' Webhook Settings', 'SessionSummary', 'Configs/BASettings.ini'), True);
+  SavedLoseFocus := StrToBoolDef(ReadINI(Username + ' Antiban Manager', 'LoseFocus', 'Configs/BASettings.ini'), True);
+  SavedEnableWorldHopping := StrToBoolDef(ReadINI(Username + ' Gemstone Crab Settings', 'EnableWorldHopping', 'Configs/BASettings.ini'), False);
+  SavedWorldHopInterval := StrToIntDef(ReadINI(Username + ' Gemstone Crab Settings', 'WorldHopInterval', 'Configs/BASettings.ini'), 45);
+  SavedUseBoosts := StrToBoolDef(ReadINI(Username + ' Gemstone Crab Settings', 'UseBoosts', 'Configs/BASettings.ini'), False);
+  SavedRepotInterval := StrToIntDef(ReadINI(Username + ' Gemstone Crab Settings', 'RepotInterval', 'Configs/BASettings.ini'), 5);
+  SavedUseDharoks := StrToBoolDef(ReadINI(Username + ' Gemstone Crab Settings', 'UseDharoks', 'Configs/BASettings.ini'), False);
+  SavedDharoksTargetHP := StrToIntDef(ReadINI(Username + ' Gemstone Crab Settings', 'DharoksTargetHP', 'Configs/BASettings.ini'), 1);
+  SavedEnablePrayerFlick := StrToBoolDef(ReadINI(Username + ' Gemstone Crab Settings', 'EnablePrayerFlick', 'Configs/BASettings.ini'), False);
+  SavedStopOnDegrade := StrToBoolDef(ReadINI(Username + ' Gemstone Crab Settings', 'StopOnDegrade', 'Configs/BASettings.ini'), False);
+  SavedDebugMode := StrToBoolDef(ReadINI(Username + ' Gemstone Crab Settings', 'DebugMode', 'Configs/BASettings.ini'), False);
+
+  if SavedDharoksTargetHP < 1 then
+    SavedDharoksTargetHP := 1
+  else if SavedDharoksTargetHP > 99 then
+    SavedDharoksTargetHP := 99;
+  
+  SavedOverrideBreaks := StrToBoolDef(ReadINI(Username + 'Gemstone Crab Antiban Manager', 'OverrideBreaks', 'Configs/BASettings.ini'), False);
+  SavedCustomBreakInterval := StrToIntDef(ReadINI(Username + 'Gemstone Crab Antiban Manager', 'CustomBreakInterval', 'Configs/BASettings.ini'), 60);
+  SavedCustomBreakDuration := StrToIntDef(ReadINI(Username + 'Gemstone Crab Antiban Manager', 'CustomBreakDuration', 'Configs/BASettings.ini'), 5);
+
+  Self.ScriptSettingsPanel := Self.CreateLabeledPanel(tab, 'Script Settings', TControl.AdjustToDPI(140), 145, 10, clOrange);
+  Self.ScriptSettingsPanel.SetLeft(TControl.AdjustToDPI(10));
+
+  with Self.UseBoostsCheckBox do
+  begin
+    Create(Self.ScriptSettingsPanel.Panel);
+    SetCaption('Use Boosts');
+    SetLeft(TControl.AdjustToDPI(20));
+    SetTop(TControl.AdjustToDPI(25));
+    SetHint('Drinks any potions in your inventory during combat.');
+    SetChecked(SavedUseBoosts);
+    CheckBox.SetOnChange(@BoostCheckboxChanged);
+  end;
+  
+  with Self.UseDharoksCheckBox do
+  begin
+    Create(Self.ScriptSettingsPanel.Panel);
+    SetCaption('Dharoks Mode');
+    SetLeft(Self.UseBoostsCheckBox.GetRight() + TControl.AdjustToDPI(90));
+    SetTop(Self.UseBoostsCheckBox.GetTop());
+    SetHint('Enables Dharoks mode -  Requires Locator orb or Dwarven rock cake.');
+    SetChecked(SavedUseDharoks);
+    CheckBox.SetOnChange(@DharoksCheckboxChanged);
+  end;
+  
+  with Self.DharoksTargetHPInput do
+  begin
+    Create(Self.ScriptSettingsPanel.Panel);
+    SetCaption('Dharoks Target HP (1-99)');
+    SetLeft(Self.UseDharoksCheckBox.GetLeft());
+    SetTop(Self.UseDharoksCheckBox.GetTop() + TControl.AdjustToDPI(25));
+    SetWidth(TControl.AdjustToDPI(160));
+    SetText(IntToStr(SavedDharoksTargetHP));
+    SetHint('Target HP for Dharoks mode (reduces to target, then waits for HP to rise 3-5 points before reducing again)');
+    Edit.SetOnKeyPress(@Edit.NumberField);
+  end;
+
+  with Self.EnablePrayerFlickCheckBox do
+  begin
+    Create(Self.ScriptSettingsPanel.Panel);
+    SetCaption('Prayer Flicking');
+    SetLeft(Self.DharoksTargetHPInput.GetLeft());
+    SetTop(Self.DharoksTargetHPInput.GetTop() + TControl.AdjustToDPI(50));
+    SetHint('Flicks Rapid Heal prayer to prevent HP regeneration (only works with Dharoks mode).');
+    SetChecked(SavedEnablePrayerFlick);
+    SetVisible(SavedUseDharoks);
+  end;
+  
+  with Self.StopOnDegradeCheckBox do
+  begin
+    Create(Self.ScriptSettingsPanel.Panel);
+    SetCaption('Stop on Degrade');
+    SetLeft(Self.EnablePrayerFlickCheckBox.GetLeft());
+    SetTop(Self.EnablePrayerFlickCheckBox.GetTop() + TControl.AdjustToDPI(25));
+    SetHint('Terminate script when Dharoks armour degrades.');
+    SetChecked(SavedStopOnDegrade);
+    SetVisible(SavedUseDharoks);
+  end;
+  
+  with Self.RepotIntervalInput do
+  begin
+    Create(Self.ScriptSettingsPanel.Panel);
+    SetCaption('Boost Interval (minutes)');
+    SetLeft(Self.UseBoostsCheckBox.GetLeft());
+    SetTop(Self.UseBoostsCheckBox.GetTop() + TControl.AdjustToDPI(25));
+    SetWidth(TControl.AdjustToDPI(160));
+    SetText(IntToStr(SavedRepotInterval));
+    SetHint('How often to drink potions (15% random variation)');
+    Edit.SetOnKeyPress(@Edit.NumberField);
+  end;
+
+  with Self.EnableWebhooksCheckBox do
+  begin
+    Create(Self.ScriptSettingsPanel.Panel);
+    SetCaption("Discord Notifications");
+    SetLeft(Self.UseBoostsCheckBox.GetLeft());
+    SetTop(Self.RepotIntervalInput.GetTop() + TControl.AdjustToDPI(50));
+    SetHint('Enable Discord notifications.');
+    SetChecked(SavedEnableWebhooks);
+    CheckBox.SetOnChange(@WebhooksCheckboxChanged);
+  end;
+
+  with Self.DebugModeCheckBox do
+  begin
+    Create(Self.ScriptSettingsPanel.Panel);
+    SetCaption('Debug Mode');
+    SetLeft(Self.UseDharoksCheckBox.GetRight() + TControl.AdjustToDPI(20));
+    SetTop(Self.UseDharoksCheckBox.GetTop());
+    SetHint('Enable debug output using DebugLn for detailed logging.');
+    SetChecked(SavedDebugMode);
+  end;
+
+  panelTop := Self.ScriptSettingsPanel.GetTop() + Self.ScriptSettingsPanel.GetHeight() + TControl.AdjustToDPI(10);
+  Self.DiscordPanel := Self.CreateLabeledPanel(tab, 'Discord Settings', panelTop, 130, 10, clBlue);
+  Self.DiscordPanel.SetLeft(TControl.AdjustToDPI(10));
+
+  with Self.WebhookInfo do
+  begin
+    Create(Self.DiscordPanel.Panel);
+    SetLeft(TControl.AdjustToDPI(150));
+    SetTop(TControl.AdjustToDPI(5));
+    SetCaption('Click here to learn how to generate your own Discord webhook URL');
+    SetHint('Click here to learn how to generate your own Discord webhook URL');
+    setOnClick(@OpenURL);
+    SetFontSize(TControl.AdjustToDPI(9));
+    SetFontColor(clBlue);
+  end;
+
+  with Self.WebHookInput do
+  begin
+    Create(Self.DiscordPanel.Panel);
+    SetCaption('Webhook URL');
+    SetLeft(TControl.AdjustToDPI(20));
+    SetTop(TControl.AdjustToDPI(25));
+    SetWidth(TControl.AdjustToDPI(350));
+    SetText(SavedWebhookURL);
+    SetPasswordChar('*');
+    SetHint('Your Discord webhook URL.');
+  end;
+
+  with Self.TestButton do
+  begin
+    Create(Self.DiscordPanel.Panel);
+    SetCaption('Test Webhook');
+    SetLeft(Self.WebHookInput.GetRight() + TControl.AdjustToDPI(10));
+    SetTop(Self.WebHookInput.GetTop() + TControl.AdjustToDPI(15));
+    SetWidth(TControl.AdjustToDPI(90));
+    SetHeight(TControl.AdjustToDPI(25));
+    SetOnClick(@TestButtonClick);
+    SetHint('Send a test message to your webhook.');
+  end;
+
+  with Self.HourlyReportsCheckBox do
+  begin
+    Create(Self.DiscordPanel.Panel);
+    SetCaption('Hourly Progress Reports');
+    SetLeft(TControl.AdjustToDPI(20));
+    SetTop(Self.WebHookInput.GetTop() + TControl.AdjustToDPI(50));
+    SetHint('Sends detailed progress embeds every hour');
+    SetChecked(SavedHourlyReports);
+  end;
+
+  with Self.SessionSummaryCheckBox do
+  begin
+    Create(Self.DiscordPanel.Panel);
+    SetCaption('Session Summary on Stop');
+    SetLeft(Self.HourlyReportsCheckBox.GetRight() + TControl.AdjustToDPI(20));
+    SetTop(Self.HourlyReportsCheckBox.GetTop());
+    SetHint('Sends a detailed summary embed when script stops');
+    SetChecked(SavedSessionSummary);
+  end;
+
+  Self.WebhooksCheckboxChanged(nil);
+  Self.WorldHoppingCheckboxChanged(nil);
+  Self.BoostCheckboxChanged(nil);
+  Self.OverrideBreaksCheckboxChanged(nil);
+  Self.DharoksCheckboxChanged(nil);
+
+  Self.CreateAntibanManager();
+  
+  for tab in Self.Tabs do
+  begin
+    if tab.GetCaption() = 'Antiban Manager' then
+    begin
+      with Self.LoseFocusCheckBox do
+      begin
+        Create(tab);
+        SetCaption('Lose Focus');
+        SetLeft(TControl.AdjustToDPI(90));
+        SetTop(TControl.AdjustToDPI(220));
+        SetChecked(SavedLoseFocus);
+        SetHint('Enable or disable losing client focus during combat.');
+      end;
+
+      with Self.OverrideBreaksCheckBox do
+      begin
+        Create(tab);
+        SetCaption('Override Default Breaks');
+        SetLeft(TControl.AdjustToDPI(90));
+        SetTop(TControl.AdjustToDPI(260));
+        SetChecked(SavedOverrideBreaks);
+        SetHint('Override the default WaspLib break intervals with custom settings.');
+        CheckBox.SetOnChange(@OverrideBreaksCheckboxChanged);
+      end;
+
+      with Self.CustomBreakIntervalInput do
+      begin
+        Create(tab);
+        SetCaption('Break Interval (minutes)');
+        SetLeft(TControl.AdjustToDPI(90));
+        SetTop(TControl.AdjustToDPI(280));
+        SetWidth(TControl.AdjustToDPI(160));
+        SetText(IntToStr(SavedCustomBreakInterval));
+        SetHint('How often to take breaks (e.g., 60 = every hour). Includes 25% randomness.');
+        Edit.SetOnKeyPress(@Edit.NumberField);
+      end;
+
+      with Self.CustomBreakDurationInput do
+      begin
+        Create(tab);
+        SetCaption('Break Duration (minutes)');
+        SetLeft(TControl.AdjustToDPI(270));
+        SetTop(TControl.AdjustToDPI(280));
+        SetWidth(TControl.AdjustToDPI(160));
+        SetText(IntToStr(SavedCustomBreakDuration));
+        SetHint('How long breaks should last (e.g., 5 = 5 minute break). Includes 33% randomness.');
+        Edit.SetOnKeyPress(@Edit.NumberField);
+      end;
+
+      with Self.EnableWorldHoppingCheckBox do
+      begin
+        Create(tab);
+        SetCaption('Enable World Hopping');
+        SetLeft(TControl.AdjustToDPI(90));
+        SetTop(TControl.AdjustToDPI(330));
+        SetHint('Hop worlds at random intervals. Requires at least 2 worlds in player setup.');
+        SetChecked(SavedEnableWorldHopping);
+        CheckBox.SetOnChange(@WorldHoppingCheckboxChanged);
+      end;
+
+      with Self.WorldHopIntervalInput do
+      begin
+        Create(tab);
+        SetCaption('World Hop Interval (minutes)');
+        SetLeft(TControl.AdjustToDPI(90));
+        SetTop(TControl.AdjustToDPI(350));
+        SetWidth(TControl.AdjustToDPI(160));
+        SetText(IntToStr(SavedWorldHopInterval));
+        SetHint('Interval in minutes between world hops (10% random variation)');
+        Edit.SetOnKeyPress(@Edit.NumberField);
+      end;
+
+      Break;
+    end;
+  end;
+  
+  Self.WorldHoppingCheckboxChanged(nil);
+  
+  Self.CreateWaspLibSettings();
+  Self.CreateAPISettings();
+
+  inherited;
+end;
+
+var
+  Config: TConfig;
+{$ENDIF}
+
+procedure GemStoneCrabSlayer.SendTerminationNotification();
+begin
+  try
+    if not APIClient.Disabled then
+    begin
+      Self.SubmitAPIStats();
+    end;
+  except
+    WriteLn('[API] Error submitting final stats: ' + GetExceptionMessage);
+  end;
+  
+  Self.SendSessionSummary();
+end;
+
+procedure GemStoneCrabSlayer.CheckHourlyReport();
+var
+  CurrentTime: Int64;
+begin
+  CurrentTime := Self.RunningTime.ElapsedTime;
+  
+  if (CurrentTime - Self.LastHourlyReportTime) >= 3600000 then
+  begin
+    Self.SendHourlyReport();
+    Self.LastHourlyReportTime := CurrentTime;
+  end;
+end;
+
+procedure GemStoneCrabSlayer.CheckSystemUpdate();
+var
+  CurrentTime: UInt64;
+  SystemUpdateThreshold: Integer;
+begin
+  CurrentTime := GetTickCount();
+  
+  if (CurrentTime - Self.LastSystemUpdateCheck) < 30000 then
+    Exit;
+    
+  Self.LastSystemUpdateCheck := CurrentTime;
+  
+  SystemUpdateThreshold := 15;
+  
+  if Chat.CheckSystemUpdate(SystemUpdateThreshold) then
+  begin
+    WriteLn('SYSTEM UPDATE DETECTED! Server going down in ' + IntToStr(SystemUpdateThreshold) + ' minutes or less!');
+    
+    if not Self.SystemUpdateWarningShown then
+    begin
+      Self.SystemUpdateWarningShown := True;
+      
+      if ENABLEWEBHOOKS then
+      begin
+        try
+          Discord.Webhook.Content := '**SYSTEM UPDATE DETECTED** :warning: Server going down in ' + IntToStr(SystemUpdateThreshold) + ' minutes or less! Preparing to logout...';
+          Discord.Send();
+        except
+          WriteLn('[Discord] Failed to send system update warning');
+        end;
+      end;
+    end;
+    
+    // Only logout if we're NOT in combat
+    if not (Self.InCombat or Self.IsAttacking) then
+    begin
+      WriteLn('Not in combat - logging out safely for system update');
+      
+      if ENABLEWEBHOOKS then
+      begin
+        try
+          Discord.Webhook.Content := '**SAFE LOGOUT** :white_check_mark: Successfully logged out before system update. Runtime: ' + SRL.MsToTime(GetTimeRunning(), Time_Short);
+          Discord.SendScreenshot(False);
+        except
+          WriteLn('[Discord] Failed to send safe logout notification');
+        end;
+      end;
+      
+      Logout.ClickLogout();
+      TerminateScript('System update - safe logout completed');
+    end
+    else
+    begin
+      WriteLn('Currently in combat - CANNOT logout during combat! Waiting for combat to end...');
+      WriteLn('WARNING: Server will shutdown soon! Combat must end naturally before logout!');
+    end;
+  end;
+end;
+
+function FormatRoundedNumber(Number: Integer): String;
+begin
+  if Number >= 1000000 then
+    Result := FormatFloat('0.0M', Number / 1000000)
+  else if Number >= 1000 then
+    Result := FormatFloat('0K', Number / 1000)
+  else
+    Result := SRL.FormatNumber(Number);
+end;
+
+procedure GemStoneCrabSlayer.SendHourlyReport();
+var
+  EmbedIdx: Int32;
+  TotalXPGained: Int32;
+  XPPerHourActive, XPPerHourTotal: Int32;
+begin
+  if not SENDHOURLYREPORTMSG or not ENABLEWEBHOOKS then Exit;
+  
+  CurrentXP := Self.SafeReadXPBar();
+  TotalXPGained := CurrentXP - Self.StartXP;
+  
+  XPPerHourActive := Round(TotalXPGained / (ActiveTimer.ElapsedTime / 3600000));
+  XPPerHourTotal := Round(TotalXPGained / (RunningTime.ElapsedTime / 3600000));
+  
+  try
+    Discord.Webhook.Content := '**Hourly Progress Report** :chart_with_upwards_trend:';
+    
+    EmbedIdx := Discord.Webhook.AddEmbed();
+    Discord.Webhook.Embeds[EmbedIdx].Title := 'BigAussies Gemstone Crab Slayer - Hourly Report';
+    Discord.Webhook.Embeds[EmbedIdx].Color := $FFA500;
+    Discord.Webhook.Embeds[EmbedIdx].Description := 'Runtime: ' + SRL.MsToTime(GetTimeRunning, Time_Short) + LineEnding +
+                                                    'XP Gained: ' + FormatRoundedNumber(TotalXPGained) + LineEnding +
+                                                    'XP/Hour (Active): ' + FormatRoundedNumber(XPPerHourActive) + LineEnding +
+                                                    'XP/Hour (Total): ' + FormatRoundedNumber(XPPerHourTotal);
+    
+    if Discord.Send() then
+      WriteLn('[Discord] Hourly report sent!')
+    else
+      WriteLn('[Discord] Failed to send hourly report: ' + Discord.LastError);
+  except
+    WriteLn('[Discord] Error sending hourly report: ' + GetExceptionMessage);
+  end;
+end;
+
+procedure GemStoneCrabSlayer.SendSessionSummary();
+var
+  EmbedIdx: Int32;
+  TotalXPGained: Int32;
+  XPPerHourActive, XPPerHourTotal: Int32;
+begin
+  if not SENDSESSIONSUMMARYMSG or not ENABLEWEBHOOKS then Exit;
+  
+  TotalXPGained := Self.CurrentXP - Self.StartXP;
+  
+  XPPerHourActive := Round(TotalXPGained / (ActiveTimer.ElapsedTime / 3600000));
+  XPPerHourTotal := Round(TotalXPGained / (RunningTime.ElapsedTime / 3600000));
+  
+  try
+    Discord.Webhook.Content := '**Session Complete!** :checkered_flag:';
+    
+    EmbedIdx := Discord.Webhook.AddEmbed();
+    Discord.Webhook.Embeds[EmbedIdx].Title := 'BigAussies Gemstone Crab Slayer - Session Summary';
+    Discord.Webhook.Embeds[EmbedIdx].Color := $0000FF;
+    Discord.Webhook.Embeds[EmbedIdx].Description := 'Total Runtime: ' + SRL.MsToTime(GetTimeRunning, Time_Short) + LineEnding +
+                                                    'Total XP Gained: ' + FormatRoundedNumber(TotalXPGained) + LineEnding +
+                                                    'XP/Hour (Active): ' + FormatRoundedNumber(XPPerHourActive) + LineEnding +
+                                                    'XP/Hour (Total): ' + FormatRoundedNumber(XPPerHourTotal);
+    
+    if Discord.SendScreenshot(False) then
+      WriteLn('[Discord] Session summary sent!')
+    else
+      WriteLn('[Discord] Failed to send session summary: ' + Discord.LastError);
+  except
+    WriteLn('[Discord] Error sending session summary: ' + GetExceptionMessage);
+  end;
+end;
+
+procedure GemStoneCrabSlayer.SubmitAPIStats();
+var
+  TotalXPGained: Int32;
+  CurrentTime: UInt64;
+begin
+  if not APIClient.Disabled then
+    Exit;
+    
+  CurrentTime := GetTickCount();
+  
+  if (CurrentTime - Self.LastAPIUpdate) < Self.ApiUpdateInterval then
+    Exit;
+    
+  CurrentXP := Self.SafeReadXPBar();
+  TotalXPGained := CurrentXP - Self.StartXP;
+  
+  try
+    APIClient.UpdatePayload(TotalXPGained, 0, Round((CurrentTime - Self.LastAPIUpdate) / 1000));
+    
+    if APIClient.SubmitStats(APIClient.GetUUID()) then
+    begin
+      Self.LastAPIUpdate := CurrentTime;
+    end
+    else
+      WriteLn('[API] Failed to submit stats');
+  except
+    WriteLn('[API] Error submitting stats: ' + GetExceptionMessage);
+  end;
+end;
+
+procedure GemStoneCrabSlayer.TakeScreenshot(Name: String);
+var
+  i: Int32;
+  ScreenshotPath: String;
+  FileCount: Integer;
+begin
+  try  
+    if (Name = '') then
+      Name := 'Unknown';
+    
+    try
+      CreateDirectory('Screenshots/');
+    except
+      WriteLn('[Screenshot] Failed to create Screenshots directory');
+      Exit;
+    end;
+    
+    try
+      FileCount := Length(GetFiles('Screenshots/', 'png'));
+    except
+      WriteLn('[Screenshot] Failed to count existing screenshots, dfault to 0');
+      FileCount := 0;
+    end;
+    
+    ScreenshotPath := 'Screenshots/GemStoneCrab' + Name + '_' + IntToStr(FileCount) + '.png';
+    
+    try
+      SaveScreenshot(ScreenshotPath);
+      WriteLn('[Screenshot] Successfully saved: ' + ScreenshotPath);
+    except
+      WriteLn('[Screenshot] Failed to save screenshot - skipping');
+    end;
+    
+  except
+    WriteLn('[Screenshot] Error in TakeScreenshot - skipping');
+  end;
+end;
+
+function GemStoneCrabSlayer.WalkToNearestSpawn(): Boolean;
+var
+  CurrentPos: TPoint;
+  NorthDistance, EastDistance, SouthDistance: Double;
+  ClosestSpawn: TPoint;
+  SpawnName: String;
+  WalkSuccess: Boolean;
+  TargetPosition: TPoint;
+  DirectionVector: TPoint;
+  DistanceToSpawn: Double;
+begin
+  Result := False;
+  
+  WriteLn('No crabs found nearby - walking to nearest spawn location...');
+  
+  CurrentPos := Map.Position;
+  WriteLn('Current position: ', CurrentPos.X, ', ', CurrentPos.Y);
+  
+  NorthDistance := CurrentPos.DistanceTo(Point(996, 37738));
+  EastDistance := CurrentPos.DistanceTo(Point(1316, 37982));
+  SouthDistance := CurrentPos.DistanceTo(Point(860, 38258));
+  
+  WriteLn('Spawn distances - North: ', FloatToStr(NorthDistance), ', East: ', FloatToStr(EastDistance), ', South: ', FloatToStr(SouthDistance));
+  
+  if (NorthDistance <= EastDistance) and (NorthDistance <= SouthDistance) then
+  begin
+    ClosestSpawn := Point(996, 37738);
+    SpawnName := 'North';
+    DistanceToSpawn := NorthDistance;
+    WriteLn('North spawn is closest (', FloatToStr(NorthDistance), ' tiles)');
+  end
+  else if (EastDistance <= NorthDistance) and (EastDistance <= SouthDistance) then
+  begin
+    ClosestSpawn := Point(1316, 37982);
+    SpawnName := 'East';
+    DistanceToSpawn := EastDistance;
+    WriteLn('East spawn is closest (', FloatToStr(EastDistance), ' tiles)');
+  end
+  else
+  begin
+    ClosestSpawn := Point(860, 38258);
+    SpawnName := 'South';
+    DistanceToSpawn := SouthDistance;
+    WriteLn('South spawn is closest (', FloatToStr(SouthDistance), ' tiles)');
+  end;
+  
+  DirectionVector.X := ClosestSpawn.X - CurrentPos.X;
+  DirectionVector.Y := ClosestSpawn.Y - CurrentPos.Y;
+  
+  if DistanceToSpawn > 0 then
+  begin
+    DirectionVector.X := Round(DirectionVector.X / DistanceToSpawn);
+    DirectionVector.Y := Round(DirectionVector.Y / DistanceToSpawn);
+  end;
+
+  TargetPosition.X := ClosestSpawn.X - (DirectionVector.X * 10);
+  TargetPosition.Y := ClosestSpawn.Y - (DirectionVector.Y * 10);
+  
+  TargetPosition.X := TargetPosition.X + Random(-5, 5);
+  TargetPosition.Y := TargetPosition.Y + Random(-5, 5);
+  
+  WriteLn('Walking to ', SpawnName, ' spawn area (10 tiles away) at position: ', TargetPosition.X, ', ', TargetPosition.Y);
+  
+  WalkSuccess := Map.Walker.WebWalk(TargetPosition, 30, 0.2);
+  
+  if WalkSuccess then
+  begin
+    WriteLn('Successfully walked to ', SpawnName, ' spawn area (within 10 tiles of spawn)');
+    Result := True;
+  end
+  else
+  begin
+    WriteLn('Failed to walk to ', SpawnName, ' spawn area');
+  end;
+end;
+
+function GemStoneCrabSlayer.AttackClosestCrab(CrabLocation: String; StartXP: Integer): Boolean;
+begin
+  Result := False;
+  
+  if (CrabLocation = 'North') then
+  begin
+    WriteLn('Attempting to click North crab...');
+    if GemStoneCrabNorth.Click then
+    begin
+      WriteLn('Successfully clicked North crab, waiting for XP...');
+      if Self.WaitForXPGain(StartXP, 'NORTH: ') then
+      begin
+        Result := True;
+        Exit;
+      end;
+    end
+    else
+    begin
+      WriteLn('Simple click failed, trying walk-click for North crab...');
+      if GemStoneCrabNorth.WalkClick then
+      begin
+        WriteLn('Successfully walk-clicked North crab, waiting for XP...');
+        if Self.WaitForXPGain(StartXP, 'NORTH: ') then
+        begin
+          Result := True;
+          Exit;
+        end;
+      end
+      else
+      begin
+        WriteLn('Failed to click North crab (both simple and walk-click)');
+      end;
+    end;
+  end
+  else if (CrabLocation = 'East') then
+  begin
+    WriteLn('Attempting to click East crab...');
+    if GemStoneCrabEast.Click then
+    begin
+      WriteLn('Successfully clicked East crab, waiting for XP...');
+      if Self.WaitForXPGain(StartXP, 'EAST: ') then
+      begin
+        Result := True;
+        Exit;
+      end;
+    end
+    else
+    begin
+      WriteLn('Simple click failed, trying walk-click for East crab...');
+      if GemStoneCrabEast.WalkClick then
+      begin
+        WriteLn('Successfully walk-clicked East crab, waiting for XP...');
+        if Self.WaitForXPGain(StartXP, 'EAST: ') then
+        begin
+          Result := True;
+          Exit;
+        end;
+      end
+      else
+      begin
+        WriteLn('Failed to click East crab (both simple and walk-click)');
+      end;
+    end;
+  end
+  else if (CrabLocation = 'South') then
+  begin
+    WriteLn('Attempting to click South crab...');
+    if GemStoneCrabSouth.Click then
+    begin
+      WriteLn('Successfully clicked South crab, waiting for XP...');
+      if Self.WaitForXPGain(StartXP, 'SOUTH: ') then
+      begin
+        Result := True;
+        Exit;
+      end;
+    end
+    else
+    begin
+      WriteLn('Simple click failed, trying walk-click for South crab...');
+      if GemStoneCrabSouth.WalkClick then
+      begin
+        WriteLn('Successfully walk-clicked South crab, waiting for XP...');
+        if Self.WaitForXPGain(StartXP, 'SOUTH: ') then
+        begin
+          Result := True;
+          Exit;
+        end;
+      end
+      else
+      begin
+        WriteLn('Failed to click South crab (both simple and walk-click)');
+      end;
+    end;
+  end;
+end;
+
+function GemStoneCrabSlayer.FindGemStoneCrab(): Boolean;
+var
+  StartXP: Integer;
+  CurrentPos: TPoint;
+  NorthDistance, EastDistance, SouthDistance: Double;
+  ClosestCrab: String;
+  ClosestSpawnPoint: TPoint;
+  CaveEntered: Boolean;
+  RandomOffset: TPoint;
+  TargetTile: TPoint;
+  WaitStartTime: UInt64;
+begin
+  Result := False;
+  StartXP := Self.SafeReadXPBar();
+  
+  WriteLn('Looking for Gemstone Crab...');
+  
+  // Get our current position
+  CurrentPos := Map.Position;
+  WriteLn('Current position: ', CurrentPos.X, ', ', CurrentPos.Y);
+  
+  // Calculate distances to each spawn location
+  NorthDistance := CurrentPos.DistanceTo(Point(996, 37738));
+  EastDistance := CurrentPos.DistanceTo(Point(1316, 37982));
+  SouthDistance := CurrentPos.DistanceTo(Point(860, 38258));
+  
+  WriteLn('Distances - North: ', FloatToStr(NorthDistance), ', East: ', FloatToStr(EastDistance), ', South: ', FloatToStr(SouthDistance));
+  
+  // Determine which crab is closest
+  if (NorthDistance <= EastDistance) and (NorthDistance <= SouthDistance) then
+  begin
+    ClosestCrab := 'North';
+    ClosestSpawnPoint := Point(996, 37738);
+    WriteLn('North spawn is closest (', FloatToStr(NorthDistance), ' tiles)');
+  end
+  else if (EastDistance <= NorthDistance) and (EastDistance <= SouthDistance) then
+  begin
+    ClosestCrab := 'East';
+    ClosestSpawnPoint := Point(1316, 37982);
+    WriteLn('East spawn is closest (', FloatToStr(EastDistance), ' tiles)');
+  end
+  else
+  begin
+    ClosestCrab := 'South';
+    ClosestSpawnPoint := Point(860, 38258);
+    WriteLn('South spawn is closest (', FloatToStr(SouthDistance), ' tiles)');
+  end;
+  
+  WriteLn('Checking if any crab is visible...');
+  if GemStoneCrabNorth.IsVisible() then
+  begin
+    WriteLn('North crab is visible - attempting to attack...');
+    if Self.AttackClosestCrab('North', StartXP) then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end
+  else if GemStoneCrabEast.IsVisible() then
+  begin
+    WriteLn('East crab is visible - attempting to attack...');
+    if Self.AttackClosestCrab('East', StartXP) then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end
+  else if GemStoneCrabSouth.IsVisible() then
+  begin
+    WriteLn('South crab is visible - attempting to attack...');
+    if Self.AttackClosestCrab('South', StartXP) then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end
+  else
+  begin
+    WriteLn('No crab is visible - attempting to enter cave...');
+    
+    // Try to enter cave
+    CaveEntered := Self.TryEnterCave();
+    
+    if CaveEntered then
+    begin
+      WriteLn('Successfully entered cave - waiting for exit...');
+      
+      // Wait for cave exit (minimap black to not black)
+      if WaitUntil(Minimap.PercentBlack() < 20, 65, 10000) then
+      begin
+        WriteLn('Successfully exited cave, looking for crab at new location...');
+        Self.LastCaveExitTime := GetTickCount();
+        
+        Wait(600, 1000);
+        
+        CurrentPos := Map.Position;
+        WriteLn('Current position after cave exit: ', CurrentPos.X, ', ', CurrentPos.Y);
+        
+        WriteLn('Checking for visible crabs at new location...');
+        if GemStoneCrabNorth.IsVisible() then
+        begin
+          WriteLn('North crab is visible at new location - attempting to attack...');
+          if Self.AttackClosestCrab('North', StartXP) then
+          begin
+            Result := True;
+            Exit;
+          end;
+        end
+        else if GemStoneCrabEast.IsVisible() then
+        begin
+          WriteLn('East crab is visible at new location - attempting to attack...');
+          if Self.AttackClosestCrab('East', StartXP) then
+          begin
+            Result := True;
+            Exit;
+          end;
+        end
+        else if GemStoneCrabSouth.IsVisible() then
+        begin
+          WriteLn('South crab is visible at new location - attempting to attack...');
+          if Self.AttackClosestCrab('South', StartXP) then
+          begin
+            Result := True;
+            Exit;
+          end;
+        end
+        else
+        begin
+          WriteLn('No crabs visible at new location - calculating closest spawn...');
+          
+          NorthDistance := CurrentPos.DistanceTo(Point(996, 37738));
+          EastDistance := CurrentPos.DistanceTo(Point(1316, 37982));
+          SouthDistance := CurrentPos.DistanceTo(Point(860, 38258));
+          
+          WriteLn('Distances after cave exit - North: ', FloatToStr(NorthDistance), ', East: ', FloatToStr(EastDistance), ', South: ', FloatToStr(SouthDistance));
+          
+          if (NorthDistance <= EastDistance) and (NorthDistance <= SouthDistance) then
+          begin
+            ClosestCrab := 'North';
+            ClosestSpawnPoint := Point(996, 37738);
+            WriteLn('North spawn is closest after cave exit (', FloatToStr(NorthDistance), ' tiles)');
+          end
+          else if (EastDistance <= NorthDistance) and (EastDistance <= SouthDistance) then
+          begin
+            ClosestCrab := 'East';
+            ClosestSpawnPoint := Point(1316, 37982);
+            WriteLn('East spawn is closest after cave exit (', FloatToStr(EastDistance), ' tiles)');
+          end
+          else
+          begin
+            ClosestCrab := 'South';
+            ClosestSpawnPoint := Point(860, 38258);
+            WriteLn('South spawn is closest after cave exit (', FloatToStr(SouthDistance), ' tiles)');
+          end;
+          
+          // Try to attack the closest crab at the new location
+          if Self.AttackClosestCrab(ClosestCrab, StartXP) then
+          begin
+            Result := True;
+            Exit;
+          end
+          else
+          begin
+            WriteLn('Failed to attack crab after cave exit');
+            Exit(False);
+          end;
+        end;
+      end
+      else
+      begin
+        WriteLn('Failed to exit cave within timeout');
+        Exit(False);
+      end;
+    end
+    else
+    begin
+      WriteLn('Failed to enter cave - attempting walk-click on closest crab...');
+      
+      // Disable minimap filter because south NPC dot is fucked and i'm lazy
+      if ClosestCrab = 'North' then
+      begin
+        GemStoneCrabNorth.Filter.Minimap := False;
+        WriteLn('Disabled minimap filter for North crab');
+      end
+      else if ClosestCrab = 'East' then
+      begin
+        GemStoneCrabEast.Filter.Minimap := False;
+        WriteLn('Disabled minimap filter for East crab');
+      end
+      else if ClosestCrab = 'South' then
+      begin
+        GemStoneCrabSouth.Filter.Minimap := False;
+        WriteLn('Disabled minimap filter for South crab');
+      end;
+      
+      if Self.AttackClosestCrab(ClosestCrab, StartXP) then
+      begin
+        // Re-enable minimap filter because fast
+        if ClosestCrab = 'North' then
+        begin
+          GemStoneCrabNorth.Filter.Minimap := True;
+          WriteLn('Re-enabled minimap filter for North crab');
+        end
+        else if ClosestCrab = 'East' then
+        begin
+          GemStoneCrabEast.Filter.Minimap := True;
+          WriteLn('Re-enabled minimap filter for East crab');
+        end
+        else if ClosestCrab = 'South' then
+        begin
+          GemStoneCrabSouth.Filter.Minimap := True;
+          WriteLn('Re-enabled minimap filter for South crab');
+        end;
+        
+        Result := True;
+        Exit;
+      end
+      else
+      begin
+        // Re-enable minimap filter
+        if ClosestCrab = 'North' then
+        begin
+          GemStoneCrabNorth.Filter.Minimap := True;
+          WriteLn('Re-enabled minimap filter for North crab (walk-click failed)');
+        end
+        else if ClosestCrab = 'East' then
+        begin
+          GemStoneCrabEast.Filter.Minimap := True;
+          WriteLn('Re-enabled minimap filter for East crab (walk-click failed)');
+        end
+        else if ClosestCrab = 'South' then
+        begin
+          GemStoneCrabSouth.Filter.Minimap := True;
+          WriteLn('Re-enabled minimap filter for South crab (walk-click failed)');
+        end;
+        
+       WriteLn('Failed to walk-click closest crab');
+        Exit(False);
+      end;
+    end;
+  end;
+end;
+
+function GemStoneCrabSlayer.WaitForXPGain(StartXP: Integer; ModePrefix: String): Boolean;
+var
+  TimeoutStart: UInt64;
+begin
+  Result := False;
+  TimeoutStart := GetTickCount();
+  
+  repeat   
+    if Self.SafeReadXPBar() > StartXP then
+    begin
+      Self.IsAttacking := True;
+      Self.InCombat := True;
+      Self.PrevXP := Self.SafeReadXPBar();
+      Self.LastHealthCheck := GetTickCount();
+      WL.Activity.Restart();
+      
+      Self.ConsecutiveFailedAttacks := 0;
+      WriteLn(ModePrefix + 'Successfully attacked boss and gained XP!');
+      
+      if USEBOOSTS then
+      begin
+        if Self.ShouldRepot() then
+        begin
+          if Self.TryConsumeAnyBoost() then
+          begin
+            Self.LastRepotTime := GetTickCount();
+            Self.NextRepotTime := GetTickCount() + Self.GetRandomRepotTime();
+          end
+        end
+      end;
+      
+      Result := True;
+      Exit;
+    end;
+    
+  until (GetTickCount() - TimeoutStart) > 5000;
+  
+  WriteLn(ModePrefix + 'No XP gained within 5 seconds after attack');
+  
+  Inc(Self.ConsecutiveFailedAttacks);
+  Self.LastFailedAttackTime := GetTickCount();
+  WriteLn(ModePrefix + 'Attack failed to gain XP. Consecutive failed attacks: ', Self.ConsecutiveFailedAttacks, '/3');
+  
+  if Self.ConsecutiveFailedAttacks >= 3 then
+  begin
+    WriteLn('3 consecutive boss attacks failed to gain XP!');
+    WriteLn('This likely means we are out of ammo/runes. Logging out and terminating script.');
+    
+    Self.TakeScreenshot('_NoAmmoFailsafe');
+    
+    if ENABLEWEBHOOKS then
+    begin
+      try
+        Discord.Webhook.Content := 'Failed to gain XP! Script will logout and terminate. Please check your ammo/runes!';
+        Discord.SendScreenshot(False);
+      except
+        WriteLn('[Discord] Failed to send no ammo notification');
+      end;
+    end;
+    
+    TerminateScript('No XP gained from 3 consecutive attacks');
+    Logout.ClickLogout();
+  end;
+  
+  Result := True;
+end;
+
+function GemStoneCrabSlayer.IsInCombat(): Boolean;
+begin
+  CurrentXP := Self.SafeReadXPBar();
+  
+  if CurrentXP > Self.PrevXP then
+  begin
+    Self.PrevXP := CurrentXP;
+    Self.LastHealthCheck := GetTickCount();
+    Self.InCombat := True;
+    WL.Activity.Restart();
+    Result := True;
+  end
+  else
+  begin
+    if Self.InCombat and ((GetTickCount() - Self.LastHealthCheck) < 15000) then
+      Result := True
+    else
+    begin
+      Self.InCombat := False;
+      Self.IsAttacking := False;
+      Result := False;
+    end;
+  end;
+end;
+
+function GemStoneCrabSlayer.HandleCombat(): Boolean;
+var
+  TimeSinceLastXP: UInt64;
+begin
+  Result := True;
+  
+  CurrentXP := Self.SafeReadXPBar();
+  TimeSinceLastXP := GetTickCount() - Self.LastHealthCheck;
+  
+  if CurrentXP > Self.PrevXP then
+  begin
+    Self.PrevXP := CurrentXP;
+    Self.LastHealthCheck := GetTickCount();
+    Self.InCombat := True;
+    WL.Activity.Restart();
+
+    if ABLOSEFOCUS then
+    begin
+      Antiban.LoseFocus();
+    end;
+  end
+  else
+  begin
+    if Length(MainScreen.FindHPBars()) = 0 then
+    begin
+      Self.LastHealthCheck := GetTickCount();
+      
+      WriteLn('Combat ended - no bars found');
+      Self.InCombat := False;
+      Self.IsAttacking := False;
+
+      if Self.ShouldHopWorld() then
+        Self.DoWorldHop();
+
+      Self.DoAntiban(True, True);
+
+      Result := False;
+    end
+    else if TimeSinceLastXP > 15000 then
+    begin
+      WriteLn('Combat ended - no XP gained for 15 seconds');
+      Self.InCombat := False;
+      Self.IsAttacking := False;
+      Result := False;
+    end;
+
+    // Check if we need to reduce HP for Dharoks
+    if USEDHAROKS and Self.ShouldReduceHP() then
+    begin
+      WriteLn('Dharoks: Reducing HP during combat');
+      Self.TryReduceHP();
+    end;
+
+    // Check if we should use Dragon Battleaxe special attack
+    if Self.ShouldUseDragonBattleaxe() then
+    begin
+      WriteLn('Using Dragon Battleaxe special attack');
+      Self.UseDragonBattleaxeSpecial();
+    end;
+
+    // Check if we need to repot while in combat
+    if Self.InCombat then
+      Self.TryRepot();
+    
+    // Check if we should flick prayer
+    if Self.ShouldFlickPrayer() and (Minimap.GetHPLevel() = DHAROKSTARGETHPS) then
+    begin
+      WriteLn('Prayer flicking: Timer finished, flicking prayer');
+      Self.FlickPrayer();
+    end;
+  end;
+end;
+
+procedure GemStoneCrabSlayer.DoAction();
+var
+  TimeSinceLastXP: UInt64;
+  BossFound: Boolean;
+begin
+  if (Self.ConsecutiveFailedAttacks > 0) and 
+     (Self.LastFailedAttackTime > 0) and 
+     ((GetTickCount() - Self.LastFailedAttackTime) > 600000) then
+  begin
+    Self.ConsecutiveFailedAttacks := 0;
+    Self.LastFailedAttackTime := 0;
+  end;
+  
+  CurrentXP := Self.SafeReadXPBar();
+  if CurrentXP > Self.PrevXP then
+  begin
+    Self.PrevXP := CurrentXP;
+    Self.LastHealthCheck := GetTickCount();
+    Self.InCombat := True;
+    WL.Activity.Restart();
+  end;
+  
+  TimeSinceLastXP := GetTickCount() - Self.LastHealthCheck;
+  if TimeSinceLastXP > 15000 then
+  begin
+    if Self.InCombat or Self.IsAttacking then
+    begin
+      WriteLn('No XP for 15+ seconds - combat ended');
+      Self.InCombat := False;
+      Self.IsAttacking := False;
+    end;
+  end;
+  
+  if Self.IsAttacking and (TimeSinceLastXP > 8000) then
+  begin
+    Self.IsAttacking := False;
+  end;
+
+  // Check if we need to bank for potions
+  if USEBOOSTS and Self.ShouldRepot() and Self.OutOfPotions then
+  begin
+    if BankingDisabled then
+      Exit;
+
+    WriteLn('[POTIONS] Consume timer up and out of potions - heading to bank');
+    Self.HandleBanking();
+    
+    // After banking, check if we have supplies
+    if Self.HasSupplies then
+    begin
+      WL.Activity.Restart();
+      WriteLn('[POTIONS] Successfully restocked potions - continuing script');
+      Self.OutOfPotions := False;
+      
+      WriteLn('[NAVIGATION] Walking to north after banking...');
+      if Map.Walker.WebWalk(Point(996, 37738), 20, 0.2) then
+      begin
+        WriteLn('[NAVIGATION] Successfully walked to north crab spawn');
+        WL.Activity.Restart();
+        Exit;
+      end
+    end
+    else
+    begin
+      WriteLn('[POTIONS] Failed to restock potions - banking disabled, continuing without potions');
+    end;
+  end;
+
+  if Self.IsInCombat() then
+  begin
+    if not Self.HandleCombat() then
+    begin
+      WriteLn('Combat ended, resetting combat state');
+      Self.InCombat := False;
+      Self.IsAttacking := False;
+    end;
+  end
+  else
+  begin
+    WriteLn('Not in combat - looking for boss...');
+    
+    if USEDHAROKS and not Self.InitializeDharoks() then
+    begin
+      WriteLn('Failed to initialize Dharoks - disabling Dharoks mode');
+      USEDHAROKS := False;
+    end;
+    BossFound := Self.FindGemStoneCrab();
+    
+    if BossFound then
+    begin
+      WriteLn('Found and attacked Gemstone Crab!');
+    end
+  end;
+end;
+
+function GetLibraryVersion(LibraryName: String): String;
+var
+  ChangelogPath: String;
+  FileHandle: Integer;
+  Line: String;
+  VersionStart, VersionEnd: Integer;
+begin
+  Result := 'Unknown';
+  ChangelogPath := IncludePath + LibraryName + '/CHANGELOG.md';
+  
+  if not FileExists(ChangelogPath) then
+    Exit;
+    
+  FileHandle := OpenFile(ChangelogPath, False);
+  if FileHandle = -1 then
+    Exit;
+    
+  try
+    if ReadFileString(FileHandle, Line, 100) then
+    begin
+      VersionStart := Pos('## [', Line);
+      if VersionStart > 0 then
+      begin
+        VersionStart := VersionStart + 4;
+        VersionEnd := Pos(']', Line);
+        if VersionEnd > VersionStart then
+          Result := Copy(Line, VersionStart, VersionEnd - VersionStart);
+      end;
+    end;
+  finally
+    CloseFile(FileHandle);
+  end;
+end;
+
+procedure GemStoneCrabSlayer.Report();
+var
+  Runtime: Integer;
+  XPPerHour, XPPerHourExcludingBreaks: Integer;
+  CurrentTime: UInt64;
+  NextBreakTime: Double;
+  i: Integer;
+begin
+  CurrentTime := GetTickCount();
+  
+  if (CurrentTime - Self.LastReportTime) < 3000 then
+    Exit;
+    
+  Self.LastReportTime := CurrentTime;
+  
+  if not DEBUGMODE then
+    ClearDebug();
+  
+  CurrentXP := Self.SafeReadXPBar();
+  Self.GainedXP := CurrentXP - Self.StartXP;
+  Runtime := GetTimeRunning();
+    
+  XPPerHour := Round((Self.GainedXP) / (RunningTime.ElapsedTime / 3600000));
+  XPPerHourExcludingBreaks := Round((Self.GainedXP) / (ActiveTimer.ElapsedTime / 3600000));
+  
+  Self.SubmitAPIStats();
+    
+  WriteLn('========================================');
+  WriteLn('    BigAussies Gemstone Crab Slayer.   ');
+  WriteLn('========================================');
+  WriteLn('   Runtime: ' + SRL.MsToTime(Runtime, Time_Short));
+  WriteLn('   XP Gained: ' + FormatRoundedNumber(Self.GainedXP));
+  WriteLn('   XP/Hour (Active): ' + FormatRoundedNumber(XPPerHourExcludingBreaks));
+  WriteLn('   XP/Hour (Total): ' + FormatRoundedNumber(XPPerHour));  
+  if ENABLEWORLDHOPPING then
+  begin
+    WriteLn('   Hops Completed: ' + IntToStr(Self.WorldHopsCompleted));
+    if Self.NextWorldHopTime > GetTickCount() then
+      WriteLn('   Next Hop: ' + SRL.MsToTime(Self.NextWorldHopTime - GetTickCount(), Time_Short))
+    else
+      WriteLn('   Next Hop: READY!');
+  end
+  
+  if USEBOOSTS then
+  begin
+    if Self.NextRepotTime > GetTickCount() then
+      WriteLn('   Next Boost: ' + SRL.MsToTime(Self.NextRepotTime - GetTickCount(), Time_Short))
+    else
+      WriteLn('   Next Boost: READY!');
+  end
+    
+  if USEDHAROKS then
+  begin
+    WriteLn('   Dharoks Mode: (Target: ' + IntToStr(DHAROKSTARGETHPS) + ' HP)');
+  end
+
+  NextBreakTime := 0;
+  for i := 0 to High(Antiban.Breaks) do
+  begin
+    if Antiban.Breaks[i].NextAtTime > NextBreakTime then
+      NextBreakTime := Antiban.Breaks[i].NextAtTime;
+  end;
+  
+  if OVERRIDEBREAKS then
+  begin
+    if NextBreakTime > GetTimeRunning() then
+      WriteLn('   Next Custom Break: ' + SRL.MsToTime(Round(NextBreakTime - GetTimeRunning()), Time_Short))
+    else
+      WriteLn('   Next Custom Break: READY!');
+  end
+  else
+  begin
+    if NextBreakTime > GetTimeRunning() then
+      WriteLn('   Next Wasplib Break: ' + SRL.MsToTime(Round(NextBreakTime - GetTimeRunning()), Time_Short))
+    else
+      WriteLn('   Next Wasplib Break: READY!');
+  end
+    
+  if Self.SystemUpdateWarningShown then
+    WriteLn('   WARNING: System update detected! Will logout when combat ends.');
+    
+  WriteLn('========================================');
+  if WaspClient.HasAccess({$MACRO SCRIPT_ID}, {$MACRO SCRIPT_REVISION}) then
+    WriteLn('    BigAussies Gemstone Crab Slayer   ')
+  else
+    WriteLn('    BigAussies Gemstone Crab Slayer.   ');
+  WriteLn('    Revision: ' + {$MACRO SCRIPT_REVISION});
+
+  // Hello scripter here to steal my libs version reporter
+  WriteLn('    Libraries: SRL-T v' + GetLibraryVersion('SRL-T') + ' | WaspLib v' + GetLibraryVersion('WaspLib'));
+  WriteLn('========================================');
+end;
+
+procedure GemStoneCrabSlayer.Init(MaxActions: UInt32; MaxTime: UInt64); override;
+begin
+  inherited;
+  
+  Map.SetupChunkEx([18, 49, 21, 47], [0, 1, 2]);
+  Self.SetupObjects();
+  Objects.Setup(Map.Objects(), @Map.Walker);
+  Npcs.Setup(Map.NPCs(), @Map.Walker);
+  
+  // Ensure ALL_CHAT or GAME_CHAT is selected for out of ammo detection
+  if (not ChatButtons.IsActive(ERSChatButton.ALL_CHAT)) and (not ChatButtons.IsActive(ERSChatButton.GAME_CHAT)) then
+    ChatButtons.Open(ERSChatButton.ALL_CHAT);
+  
+  if ENABLEWEBHOOKS then
+   Discord.Setup(WEBHOOKURL); 
+  
+  if SENDSESSIONSUMMARYMSG and ENABLEWEBHOOKS then
+    AddOnTerminate(@Self.SendTerminationNotification)
+  else
+    AddOnTerminate(@SubmitAPIStats);
+
+  Self.StartXP := Self.SafeReadXPBar();
+  Self.PrevXP := Self.StartXP;
+  Self.LastHourlyReportTime := 0;
+  
+  Self.InCombat := False;
+  Self.IsAttacking := False;
+  Self.LastHealthCheck := GetTickCount();
+  
+  Self.ConsecutiveFailedAttacks := 0;
+  Self.LastFailedAttackTime := 0;
+  Self.LastSuccessfulClick := False;
+  
+  Self.LastCaveExitTime := 0;
+  
+  Self.ConsecutiveBlockedCaveAttempts := 0;
+  
+  Self.NextRepotTime := 0;
+  Self.LastRepotTime := 0;
+  
+  Self.UseFallbackMode := False;
+  
+  Self.LastHPReduction := 0;
+  Self.DharoksInitialized := False;
+  
+  Self.PrayFlickEnabled := False;
+  
+  if USEDHAROKS and ENABLEPRAYERFLICK then
+  begin
+    if Stats.GetLevel(ERSSkill.PRAYER) > 21 then
+    begin
+      Self.PrayFlickEnabled := True;
+      Self.PrayFlickTimer.Setup(RandomRange(40000, 60000));
+      WriteLn('Prayer flicking enabled - will flick Rapid Heal every 60 seconds to prevent HP regeneration');
+      QuickPrayer.SelectPrayer(ERSPrayer.RAPID_HEAL);
+    end
+    else
+    begin
+      WriteLn('Prayer flicking disabled - requires Prayer level 22+');
+      Self.PrayFlickEnabled := False;
+    end;
+  end;
+  
+  Self.DragonBattleaxeSlot := -1;
+  Self.LastDragonBattleaxeUse := 0;
+  Self.NextDragonBattleaxeUse := 1;
+  
+  Self.UseDragonBattleaxe := Inventory.ContainsItem('Dragon battleaxe');
+  if Self.UseDragonBattleaxe then
+  begin
+    WriteLn('Dragon Battleaxe detected in inventory - special attack boost enabled!');
+    WriteLn('Dragon Battleaxe will be used with random delays when special attack reaches 100%');
+  end
+  else
+  begin
+    WriteLn('No Dragon Battleaxe found in inventory - special attack boost disabled');
+  end;
+  
+  Self.LastAPIUpdate := GetTickCount();
+  Self.ApiUpdateInterval := 5 * 60000;
+  
+  Self.RunningTime.Start();
+  Self.ActiveTimer.Start();
+  
+  Self.WorldHopsCompleted := 0;
+  Self.LastWorldHopTime := 0;
+  Self.SetupWorldHopping();
+  Self.LastReportTime := 0;
+  Self.LastImageClear := 0;
+  Self.LastSystemUpdateCheck := 0;
+  Self.SystemUpdateWarningShown := False;
+  
+  Self.HasSupplies := True;
+  Self.BankingDisabled := False;
+  Self.OutOfPotions := False;
+  Self.ConsecutiveXPFailures := 0;
+  Self.SetupLoadouts();
+  
+  Options.SetZoomLevel(RandomRange(5, 15));
+end;
+
+function GemStoneCrabSlayer.SafeReadXPBar(): Integer;
+var
+  XPValue: Integer;
+  AttemptCount: Int32;
+  ValidReading: Boolean;
+  PreviousValidXP: Integer;
+  XPDifference: Integer;
+  TimeSinceLastRead: UInt64;
+  MaxPossibleGain: Integer;
+begin
+  if (not RSClient.IsLoggedIn) then
+    Exit(Self.PrevXP);
+
+  Result := Self.PrevXP;
+  ValidReading := False;
+  AttemptCount := 0;
+  
+  if Self.PrevXP > 0 then
+    PreviousValidXP := Self.PrevXP
+  else
+    PreviousValidXP := Self.StartXP;
+  
+  while (not ValidReading) and (AttemptCount < 5) do
+  begin
+    Inc(AttemptCount);
+    
+    // Check if XP bar is open because it was randomly closing??
+    if not XPBar.IsOpen() then
+    begin
+      WriteLn('XP bar not open, attempting to open...');
+      XPBar.Open();
+      Wait(500 + Random(500));
+    end;
+    
+    XPValue := XPBar.Read();
+    
+    if XPValue <= 0 then
+    begin
+      WriteLn('Invalid XP reading: ', XPValue, ' (zero or negative)');
+    end
+    else if XPValue < 10000 then
+    begin
+      WriteLn('Invalid XP reading: ', XPValue, ' (too low)');
+    end
+    else if (PreviousValidXP > 0) then
+    begin
+      XPDifference := XPValue - PreviousValidXP;
+      TimeSinceLastRead := GetTickCount() - Self.LastHealthCheck;
+      
+      MaxPossibleGain := Round((TimeSinceLastRead / 1000.0) * 100);
+      if MaxPossibleGain < 1000 then MaxPossibleGain := 1000;
+      
+      if XPDifference > MaxPossibleGain then
+      begin
+        WriteLn('Invalid XP reading: ', XPValue, ' (impossible gain of ', XPDifference, ' XP in ', Round(TimeSinceLastRead/1000), 's)');
+      end
+      else if XPDifference < -1000 then
+      begin
+        WriteLn('Invalid XP reading: ', XPValue, ' (impossible loss of ', Abs(XPDifference), ' XP)');
+      end
+      else
+      begin
+        ValidReading := True;
+        Result := XPValue;
+      end;
+    end
+    else
+    begin
+      ValidReading := True;
+      Result := XPValue;
+    end;
+    
+    if not ValidReading then
+    begin
+      if AttemptCount < 3 then
+      begin
+        WriteLn('Rotating camera for xp bar. Is your XP bar visible?!?!');
+        Antiban.RandomRotate();
+        Wait(500 + Random(1000));
+      end
+      else
+      begin
+        WriteLn('Waiting before retry...');
+        Wait(1000 + Random(2000));
+      end;
+    end;
+  end;
+  
+  if not ValidReading then
+  begin
+    Inc(Self.ConsecutiveXPFailures);
+    WriteLn('Failed to get valid XP reading after 5 attempts. Consecutive failures: ', Self.ConsecutiveXPFailures);
+    
+    if Self.ConsecutiveXPFailures >= 10 then
+    begin
+      WriteLn('CRITICAL ERROR: XP bar reading failed!');
+      WriteLn('XP bar setup must be wrong. Please check your XP bar configuration.');
+      WriteLn('Terminating script.');
+      Self.TakeScreenshot('XP_Bar_Setup_Error');
+      TerminateScript();
+    end;
+    
+    Result := PreviousValidXP;
+  end
+  else
+  begin
+    Self.ConsecutiveXPFailures := 0;
+  end;
+end;
+
+procedure GemStoneCrabSlayer.Run(MaxActions: UInt32; MaxTime: UInt64);
+begin
+  Self.Init(MaxActions, MaxTime);
+  repeat
+  if (not RSClient.IsLoggedIn) then
+    if Login.GetPlayer.User <> '' then
+      Login.LoginPlayer
+    else
+    begin
+      Exit;
+    end;
+
+    if (GetTickCount() - Self.LastImageClear) >= 30000 then
+    begin
+      RSClient.Image.Clear;
+      Self.LastImageClear := GetTickCount();
+    end;
+        
+    Self.CheckHourlyReport();
+    Self.CheckSystemUpdate();
+
+    // Check for death
+    if (Chat.FindMessage('you are dead', [CHAT_COLOR_BLACK]) and (Minimap.GetHPPercent > 80)) then
+    begin
+      Self.TakeScreenshot('_PlayerDeath');
+      WaitUntil(Minimap.PercentBlack() < 20, 65, 10000);
+      WriteLn('PLAYER HAS DIED! Terminating script');
+        
+      if ENABLEWEBHOOKS then
+      begin
+        try
+          Discord.Webhook.Content := '**PLAYER DEATH** :skull: Script detected player death and is terminating.';
+          Discord.SendScreenshot(False);
+        except
+          WriteLn('[Discord] Failed to send death notification');
+        end;
+      end;
+      Logout.ClickLogout();
+      TerminateScript('Player death detected');
+    end;
+
+    // Check for out of ammo
+    if Self.IsOutOfAmmo() then
+    begin
+      WriteLn('OUT OF AMMO DETECTED! Terminating script');
+      Self.TakeScreenshot('_OutOfAmmo');
+      
+      if ENABLEWEBHOOKS then
+      begin
+        try
+          Discord.Webhook.Content := '**OUT OF AMMO** :warning: Script detected ammo depletion and is terminating.';
+          Discord.SendScreenshot(False);
+        except
+          WriteLn('[Discord] Failed to send out of ammo notification');
+        end;
+      end;
+      Logout.ClickLogout();
+      TerminateScript('Out of ammo detected');
+    end;
+
+    // Check for Dharoks armour degradation
+    if Self.CheckForDegradation() then
+    begin
+      Exit;
+    end;
+        
+    Self.DoAction();
+
+    if Self.InCombat or Self.IsAttacking then
+    begin
+      Self.DoAntiban(True, False); // Allow break in combat but not sleep (logout chance removed in TakeBreak override)
+    end
+    else
+    begin
+      Self.DoAntiban(True, True); // Allow breaks when not in combat
+    end;
+        
+    if (GetTimeRunning() mod 10000) < 1000 then
+      Self.Report();
+
+    if WL.Activity.IsFinished() then
+      begin
+      WriteLn('No activity detected in 5 minutes! Shutting down.');
+      TerminateScript('No activity detected in 5 minutes');
+    end;
+      
+  until Self.ShouldStop();
+    
+  Self.Report();
+  if ENABLEWEBHOOKS then
+  begin
+    try
+      Discord.Webhook.Content := '';
+      Discord.Webhook.Content += '**Script finished normally** :checkered_flag: Runtime: ' + SRL.MsToTime(GetTimeRunning(), Time_Short);
+      Discord.Send();
+    except
+      WriteLn('[Discord] Failed to send completion notification');
+    end;
+  end;
+end;
+
+function GemStoneCrabSlayer.TryEnterCave(): Boolean;
+var
+  StartTime: UInt64;
+  CurrentPos: TPoint;
+  NorthDistance, EastDistance, SouthDistance: Double;
+  ClosestCave: TRSObjectV2;
+  CaveName: String;
+begin
+  Result := False;
+  
+  WriteLn('Finding nearest cave entrance...');
+  
+  CurrentPos := Map.Position;
+  WriteLn('Current position: ', CurrentPos.X, ', ', CurrentPos.Y);
+  
+  // Calculate distances to each cave
+  NorthDistance := CurrentPos.DistanceTo(Point(1020, 37758));
+  EastDistance := CurrentPos.DistanceTo(Point(1312, 37934));
+  SouthDistance := CurrentPos.DistanceTo(Point(892, 38286));
+  
+  WriteLn('Cave distances - North: ', FloatToStr(NorthDistance), ', East: ', FloatToStr(EastDistance), ', South: ', FloatToStr(SouthDistance));
+  
+  // Find the closest cave
+  if (NorthDistance <= EastDistance) and (NorthDistance <= SouthDistance) then
+  begin
+    ClosestCave := CaveNorth;
+    CaveName := 'North';
+    WriteLn('North cave is closest (', FloatToStr(NorthDistance), ' tiles)');
+  end
+  else if (EastDistance <= NorthDistance) and (EastDistance <= SouthDistance) then
+  begin
+    ClosestCave := CaveEast;
+    CaveName := 'East';
+    WriteLn('East cave is closest (', FloatToStr(EastDistance), ' tiles)');
+  end
+  else
+  begin
+    ClosestCave := CaveSouth;
+    CaveName := 'South';
+    WriteLn('South cave is closest (', FloatToStr(SouthDistance), ' tiles)');
+  end;
+  
+  // Attempt to enter the closest cave
+  WriteLn('Attempting to enter ', CaveName, ' cave...');
+    
+  if ClosestCave.WalkClick() then
+  begin
+    WriteLn('Successfully clicked ', CaveName, ' cave entrance');
+    StartTime := GetTickCount();
+        
+    repeat  
+      if Chat.HasContinue() then
+      begin
+        // We need to CHECK the message because walker misclicks the rocks for mining
+        if 'blockage' in Chat.GetChat() then
+        begin
+          WriteLn('Cave is blocked!');
+          Chat.ClickContinue();
+          Exit(False);
+        end
+        else
+        begin
+          WriteLn('Clicked wrong object, retrying cave');
+          Chat.ClickContinue();
+          if ClosestCave.WalkClick() then
+          begin
+            WriteLn('Retried clicking ', CaveName, ' cave entrance');
+            StartTime := GetTickCount();
+          end
+          else
+          begin
+            WriteLn('Failed to retry click ', CaveName, ' cave entrance');
+            Exit(False);
+          end;
+        end;
+      end;
+          
+      if Minimap.PercentBlack() > 80 then
+      begin
+        WriteLn('Entering cave...');
+        Exit(True);
+      end;
+          
+    until (GetTickCount() - StartTime) > 20000;
+        
+    WriteLn('Cave timed out');
+    Exit(False);
+  end
+  else
+  begin
+    WriteLn('Failed to click ', CaveName, ' cave entrance');
+    Exit(False);
+  end;
+end;
+
+function GemStoneCrabSlayer.GetRandomRepotTime(): UInt64;
+var
+  BaseInterval: UInt64;
+  RandomVariation: Integer;
+begin
+  BaseInterval := REPOTINTERVAL * 60000;
+  
+  RandomVariation := Random(-15, 15);
+  Result := BaseInterval + Round(BaseInterval * (RandomVariation / 100.0));
+  
+  if Result < 60000 then
+    Result := 60000;
+
+end;
+
+function GemStoneCrabSlayer.ShouldRepot(): Boolean;
+begin
+  if not USEBOOSTS then
+    Exit(False);
+    
+  Result := GetTickCount() >= Self.NextRepotTime;
+end;
+
+function GemStoneCrabSlayer.TryRepot(): Boolean;
+begin
+  Result := False;
+  
+  if not USEBOOSTS then
+    Exit;
+    
+  if not Self.ShouldRepot() then
+    Exit;
+    
+  if not Self.InCombat then
+    Exit;
+    
+  WriteLn('Time to boost!');
+  
+  if Self.TryConsumeAnyBoost() then
+  begin
+    Self.LastRepotTime := GetTickCount();
+    Self.NextRepotTime := GetTickCount() + Self.GetRandomRepotTime();
+    Result := True;
+  end
+end;
+
+function GemStoneCrabSlayer.TryConsumeAnyBoost(): Boolean;
+var
+  BoostCategories: array of TRSItemArray;
+  Category: TRSItemArray;
+  Item: TRSItem;
+  Slot: Int32;
+  ConsumedAny: Boolean;
+begin
+  Result := False;
+  ConsumedAny := False;
+  
+  if not USEBOOSTS then
+    Exit;
+  
+  if not Inventory.IsOpen() then
+    Inventory.Open();
+  
+  BoostCategories := Self.GetBoostPotionCategories();
+  
+  for Category in BoostCategories do
+  begin
+    for Item in Category do
+    begin
+      if Inventory.FindItem(Item, Slot) then
+      begin
+        if Inventory.ClickSlot(Slot, 'Drink') then
+        begin
+          WriteLn('Consumed boost: ', Item.GetSingle());
+          ConsumedAny := True;
+          Self.IsAttacking := False;
+          Self.InCombat := False;
+          Self.OutOfPotions := False;
+          Wait(1200, 1400);
+          Break;
+        end;
+      end;
+    end;
+  end;
+  
+  if ConsumedAny then
+    Result := True
+  else
+  begin
+    WriteLn('No boost potions found in inventory');
+    Self.OutOfPotions := True;
+  end;
+end;
+
+function GemStoneCrabSlayer.ShouldUseDragonBattleaxe(): Boolean;
+var
+  CurrentTime: UInt64;
+  MinDelay, MaxDelay: UInt64;
+begin
+  Result := False;
+  
+  if not Self.UseDragonBattleaxe then
+    Exit;
+    
+  if Minimap.GetSpecLevel() < 100 then
+    Exit;
+    
+  if not Inventory.ContainsItem('Dragon battleaxe') then
+    Exit;
+    
+  if not (Self.InCombat or Self.IsAttacking) then
+    Exit;
+    
+  CurrentTime := GetTickCount();
+  
+  // Some randomness after we hit 100% because this is an afk boss
+  if Self.NextDragonBattleaxeUse = 0 then
+  begin
+    MinDelay := 0;
+    MaxDelay := 90000;
+    Self.NextDragonBattleaxeUse := CurrentTime + Random(MinDelay, MaxDelay);
+    WriteLn('Dragon Battleaxe: Special at 100% - will use in ' + SRL.MsToTime(Self.NextDragonBattleaxeUse - CurrentTime, Time_Short));
+    Exit(False);
+  end;
+  
+  if CurrentTime >= Self.NextDragonBattleaxeUse then
+  begin
+    Result := True;
+    Self.NextDragonBattleaxeUse := 0;
+  end;
+end;
+
+function GemStoneCrabSlayer.UseDragonBattleaxeSpecial(): Boolean;
+var
+  CurrentSpec: Int32;
+  Attempts: Int32;
+  ReEquipAttempts: Int32;
+  FinalCheckAttempts: Int32;
+begin
+  Result := False;
+  
+  WriteLn('Dragon Battleaxe: Using special attack');
+  
+  if not Inventory.IsOpen() then
+    Inventory.Open();
+    
+  if not Inventory.FindItem('Dragon battleaxe', Self.DragonBattleaxeSlot) then
+  begin
+    WriteLn('Dragon Battleaxe: Could not find Dragon battleaxe in inventory');
+    Exit;
+  end;
+  
+  WriteLn('Dragon Battleaxe: Found Dragon battleaxe in slot ', Self.DragonBattleaxeSlot);
+  
+  if not Inventory.ClickSlot(Self.DragonBattleaxeSlot, ['Equip', 'Wield']) then
+  begin
+    WriteLn('Dragon Battleaxe: Failed to equip Dragon battleaxe');
+    Exit;
+  end;
+
+  Wait(1400, 1800); // Need a wait here because axe goes to fast sometimes
+  
+  if not WaitUntil(not Inventory.ContainsItem('Dragon battleaxe'), 65, 3000) then
+  begin
+    WriteLn('Dragon Battleaxe: Timeout waiting for Dragon battleaxe to be equipped');
+    Exit;
+  end;
+  
+  WriteLn('Dragon Battleaxe: Successfully equipped, activating special attack');
+  
+  CurrentSpec := Minimap.GetSpecLevel();
+  
+  Attempts := 0;
+  while (Attempts < 3) and (Minimap.GetSpecLevel() >= 100) do
+  begin
+    Inc(Attempts);
+    
+    if Minimap.EnableSpec(100) then
+    begin
+      WriteLn('Dragon Battleaxe: Special attack activated (attempt ', Attempts, ')');
+      Wait(1000, 1200);
+      Break;
+    end
+    else
+    begin
+      WriteLn('Dragon Battleaxe: Failed to activate special attack (attempt ', Attempts, ')');
+      Wait(1000, 1200);
+    end;
+  end;
+  
+  if WaitUntil(Minimap.GetSpecLevel() < CurrentSpec, 65, 3000) then
+  begin
+    WriteLn('Dragon Battleaxe: Special attack used!');
+    Wait(800, 1200);
+    
+    if Inventory.IsSlotUsed(Self.DragonBattleaxeSlot) then
+    begin
+      WriteLn('Dragon Battleaxe: Re-equipping original weapon from slot ', Self.DragonBattleaxeSlot);
+      
+      ReEquipAttempts := 0;
+      while (ReEquipAttempts < 5) and (not Inventory.ContainsItem('Dragon battleaxe')) do
+      begin
+        Inc(ReEquipAttempts);
+        WriteLn('Dragon Battleaxe: Re-equip attempt ', ReEquipAttempts, ' of 5');
+        
+        if Inventory.ClickSlot(Self.DragonBattleaxeSlot, ['Equip', 'Wield']) then
+        begin
+          if WaitUntil(Inventory.ContainsItem('Dragon battleaxe'), 65, 3000) then
+          begin
+            WriteLn('Dragon Battleaxe: Successfully re-equipped original weapon on attempt ', ReEquipAttempts);
+            Self.LastDragonBattleaxeUse := GetTickCount();
+            Result := True;
+            Break;
+          end
+          else
+          begin
+            WriteLn('Dragon Battleaxe: Timeout waiting for Dragon battleaxe to return to inventory (attempt ', ReEquipAttempts, ')');
+            Wait(1200, 1600);
+          end;
+        end
+        else
+        begin
+          WriteLn('Dragon Battleaxe: Failed to click original weapon slot (attempt ', ReEquipAttempts, ')');
+          Wait(1200, 1600);
+        end;
+      end;
+      
+      if not Inventory.ContainsItem('Dragon battleaxe') then
+      begin
+        WriteLn('Dragon Battleaxe: Warning - failed to re-equip original weapon after 5 attempts');
+        Self.LastDragonBattleaxeUse := GetTickCount();
+        Result := True;
+      end;
+    end
+    else
+    begin
+      WriteLn('Dragon Battleaxe: Warning - original weapon slot is empty');
+      Self.LastDragonBattleaxeUse := GetTickCount();
+      Result := True;
+    end;
+  end
+  else
+  begin
+    WriteLn('Dragon Battleaxe: Special attack may not have worked we shouldnt be here???');
+    Self.LastDragonBattleaxeUse := GetTickCount();
+  end;
+  
+  WriteLn('Dragon Battleaxe: Performing final check...');
+  FinalCheckAttempts := 0;
+  while (FinalCheckAttempts < 3) and (not Inventory.ContainsItem('Dragon battleaxe')) do
+  begin
+    Inc(FinalCheckAttempts);
+    WriteLn('Dragon Battleaxe: Final check attempt ', FinalCheckAttempts, ' of 3 - Dragon battleaxe not found in inventory');
+    Wait(1000, 1500);
+    
+    if not Inventory.IsOpen() then
+      Inventory.Open();
+  end;
+  
+  if not Inventory.ContainsItem('Dragon battleaxe') then
+  begin
+    WriteLn('Dragon Battleaxe: Dragon battleaxe is missing from inventory after special attack!');
+    WriteLn('Dragon Battleaxe: Logging out and terminating script');
+    Logout.ClickLogout();
+    TerminateScript('Dragon battleaxe missing from inventory after special attack');
+  end
+  else
+  begin
+    WriteLn('Dragon Battleaxe: Final check passed - Dragon battleaxe confirmed in inventory');
+  end;
+  
+  WL.Activity.Restart();
+end;
+
+function GemStoneCrabSlayer.ShouldFlickPrayer(): Boolean;
+begin
+  Result := False;
+  
+  if not USEDHAROKS then
+    Exit;
+    
+  if not ENABLEPRAYERFLICK then
+    Exit;
+    
+  if not Self.PrayFlickEnabled then
+    Exit;
+    
+  if Minimap.GetPrayerPercent() <= 0 then
+  begin
+    WriteLn('Prayer flicking: Disabled - no prayer points remaining');
+    Exit;
+  end;
+    
+  Result := Self.PrayFlickTimer.IsFinished();
+end;
+
+function GemStoneCrabSlayer.FlickPrayer(): Boolean;
+begin
+  Result := False;
+  
+  if not USEDHAROKS or not ENABLEPRAYERFLICK then
+    Exit;
+    
+  if not Self.PrayFlickEnabled then
+    Exit;
+    
+  WriteLn('Prayer flicking: Toggling Rapid Heal prayer');
+  
+  if Minimap.IsPrayerEnabled() then
+  begin
+    Result := Minimap.DisablePrayer();
+    WriteLn('Prayer flicking: Disabled prayer');
+  end
+  else
+  begin
+    if Minimap.EnablePrayer() then
+    begin
+      if WaitUntil(Minimap.IsPrayerEnabled(), 65, 2000) then
+      begin
+        Result := Minimap.DisablePrayer();
+        Wait(800, 1000);
+        WriteLn('Prayer flicking: Enabled then disabled prayer');
+      end
+      else
+      begin
+        WriteLn('Prayer flicking: Timeout waiting for prayer to enable');
+        Result := True;
+      end;
+    end;
+  end;
+
+  if Result then
+  begin
+    // Restart timer with random variation (-20 seconds)
+    Self.PrayFlickTimer.Restart(-20000);
+    WriteLn('Prayer flicking: Timer restarted');
+  end;
+end;
+
+function TRSInventory.DiscoverItem(Slot: Int32): TRSItem;
+var
+  DiscoveredItems: TRSItemArray;
+  Item: TRSItem;
+begin
+  if not Self.Open() then
+    Exit;
+
+  DiscoveredItems := Self.Discover(Slot);
+  if Length(DiscoveredItems) = 0 then
+    Exit;
+
+  if Length(DiscoveredItems) = 1 then
+    Exit(DiscoveredItems[0]);
+
+  for Item in DiscoveredItems do
+    if Self.ContainsItem(Item) then
+      Exit(Item);
+end;
+
+function TRSInventory.DiscoverAllItems(): TRSItemArray;
+var
+  i: Int32;
+  item: TRSItem;
+begin
+  for i := Inventory.LOW_SLOT to Inventory.HIGH_SLOT do
+  begin
+    item := Inventory.DiscoverItem(i);
+    if assigned(item) and (item <> '') then
+      Result += item;
+  end;
+end;
+
+function GemStoneCrabSlayer.SetupLoadouts: Boolean;
+var
+  inventoryItems: TRSItemArray;
+  i: Int32;
+  potionCount: Int32;
+  potionName: String;
+begin
+  if not USEBOOSTS then
+  begin
+    WriteLn('[INVENTORY] USEBOOSTS disabled - skipping potion tracking');
+    Result := True;
+    Exit;
+  end;
+  
+  inventoryItems := Inventory.DiscoverAllItems();
+  inventoryItems := inventoryItems.Unique();
+  
+  potionCount := 0;
+  Self.InventoryLoadout := [];
+  
+  for i := 0 to High(inventoryItems) do
+  begin
+    potionName := inventoryItems[i];
+    if Self.IsPotion(potionName) then
+    begin
+      Inc(potionCount);
+      WriteLn('[INVENTORY] Found potion: ', potionName);
+      
+      // Add to inventory loadout for later
+      if Inventory.ItemIsStackable(potionName) then
+        Self.InventoryLoadout += [TRSBankItem.Setup(potionName, -1, False)]
+      else
+        Self.InventoryLoadout += [TRSBankItem.Setup(potionName, Inventory.CountItem(potionName), False)];
+    end;
+  end;
+  
+  WriteLn('[INVENTORY] Found ', potionCount, ' potion types at startup');
+  WriteLn('[INVENTORY] Inventory loadout contains ', Length(Self.InventoryLoadout), ' items');
+  Result := True;
+end;
+
+function GemStoneCrabSlayer.IsPotion(itemName: String): Boolean;
+var
+  lowerItemName: String;
+  BoostCategories: array of TRSItemArray;
+  Category: TRSItemArray;
+  Item: TRSItem;
+begin
+  lowerItemName := LowerCase(itemName);
+  
+  // Get the boost potios
+  BoostCategories := Self.GetBoostPotionCategories();
+  
+  // Check if the item matches any of our boost potios
+  for Category in BoostCategories do
+  begin
+    for Item in Category do
+    begin
+      if LowerCase(Item.GetSingle()) = lowerItemName then
+      begin
+        Result := True;
+        Exit;
+      end;
+    end;
+  end;
+
+  Result := False;
+end;
+
+function GemStoneCrabSlayer.GetItemsToWithdraw(): TRSBankItemArray;
+var
+  loadoutItem: TRSBankItem;
+  currentQuantity, neededQuantity: Int32;
+begin
+  Result := [];
+  
+  WriteLn('[BANK] Checking which potions need to be withdrawn...');
+  
+  for loadoutItem in Self.InventoryLoadout do
+  begin
+    if loadoutItem.Quantity = -1 then
+    begin
+      currentQuantity := Inventory.CountItemStack(loadoutItem.Item);
+      if currentQuantity = 0 then
+      begin
+        WriteLn('[BANK] Need to withdraw stackable potion: "', loadoutItem.Item, '"');
+        Result += [loadoutItem];
+      end
+      else
+      begin
+        WriteLn('[BANK] Already have stackable potion: "', loadoutItem.Item, '" (', currentQuantity, ')');
+      end;
+    end
+    else
+    begin
+      currentQuantity := Inventory.CountItem(loadoutItem.Item);
+      neededQuantity := loadoutItem.Quantity - currentQuantity;
+      
+      if neededQuantity > 0 then
+      begin
+        WriteLn('[BANK] Need to withdraw ', neededQuantity, 'x "', loadoutItem.Item, '" (have ', currentQuantity, ', need ', loadoutItem.Quantity, ')');
+        Result += [TRSBankItem.Setup(loadoutItem.Item, neededQuantity, loadoutItem.Noted)];
+      end
+      else
+      begin
+        WriteLn('[BANK] Already have enough "', loadoutItem.Item, '" (', currentQuantity, '/', loadoutItem.Quantity, ')');
+      end;
+    end;
+  end;
+  
+  WriteLn('[BANK] Found ', Length(Result), ' potions that need to be withdrawn');
+end;
+
+function TBaseBankScript.Withdraw(items: TRSBankItemArray): Boolean; overload;
+var
+  item: TRSBankItem;
+begin
+  for item in items do
+    Result := Self.Withdraw(item);
+end;
+
+function GemStoneCrabSlayer.HandleBankItems: Boolean;
+var
+  itemsToWithdraw: TRSBankItemArray;
+  item: TRSBankItem;
+  i: Int32;
+  withdrawalSuccess: Boolean;
+begin
+  if not Banks.Open then
+    Exit(False);
+
+  itemsToWithdraw := Self.GetItemsToWithdraw();
+  WriteLn('[INVENTORY] Inventory loadout contains ', Length(Self.InventoryLoadout), ' items');
+  
+  if Length(itemsToWithdraw) = 0 then
+  begin
+    WriteLn('[BANK] No potions need to be withdrawn - inventory is complete');
+    Result := True;
+  end
+  else
+  begin
+    WriteLn('[BANK] Withdrawing ', Length(itemsToWithdraw), ' missing potions...');
+    
+    withdrawalSuccess := True;
+    for i := 0 to High(itemsToWithdraw) do
+    begin
+      item := itemsToWithdraw[i];
+      WriteLn('[BANK] Withdrawing ', item.Quantity, 'x "', item.Item, '"');
+      
+      if Self.Withdraw(item) then
+      begin
+        if not WaitUntil(Inventory.ContainsItem(item.Item), 65, 4000) then
+        begin
+          WriteLn('[BANK] WARNING: Item "', item.Item, '" did not appear in inventory');
+          withdrawalSuccess := False;
+        end
+        else
+        begin
+          WriteLn('[BANK] Successfully withdrew "', item.Item, '" - item confirmed in inventory');
+        end;
+      end
+      else
+      begin
+        WriteLn('[BANK] Failed to withdraw "', item.Item, '"');
+        withdrawalSuccess := False;
+      end;
+    end;
+    
+    Result := withdrawalSuccess;
+  end;
+  
+  if Result then
+    RSInterface.Close(True);
+end;
+
+procedure GemStoneCrabSlayer.HandleBanking();
+var
+  attempts: Int32;
+  maxAttempts: Int32;
+  bankingSuccess: Boolean;
+begin
+  if Self.BankingDisabled then
+  begin
+    WriteLn('[BANK] Banking disabled - skipping bank operation');
+    Exit;
+  end;
+  
+  maxAttempts := 3;
+  attempts := 0;
+  
+  while attempts < maxAttempts do
+  begin
+    Inc(attempts);
+    
+    if not Bank.IsOpen() then
+    begin
+      // Sometimes we got poll by accident, so lets check
+      if RSInterface.IsOpen() then
+      begin
+        WriteLn('[BANK] Non-bank interface detected - closing it before opening bank');
+        RSInterface.Close(True);
+        Wait(800, 1200);
+      end;
+      
+      if not Banks.WalkOpen() then
+      begin
+        WriteLn('[BANK] Failed to open bank (attempt ', attempts, '/', maxAttempts, ')');
+        if attempts >= maxAttempts then
+        begin
+          WriteLn('[BANK] Failed to open bank after ', maxAttempts, ' attempts - disabling banking');
+          Self.BankingDisabled := True;
+          Exit;
+        end;
+        Continue;
+      end;
+
+      if not WaitUntil(Bank.IsOpen(), 65, 9000) then
+      begin
+        WriteLn('[BANK] Bank did not open after walking (attempt ', attempts, '/', maxAttempts, ')');
+        if attempts >= maxAttempts then
+        begin
+          WriteLn('[BANK] Failed to open bank after ', maxAttempts, ' attempts - disabling banking');
+          Self.BankingDisabled := True;
+          Exit;
+        end;
+        Continue;
+      end;
+    end;
+    
+    Break;
+  end;
+
+  Self.DepositVials();
+
+  bankingSuccess := Self.HandleBankItems;
+
+  if bankingSuccess then
+  begin
+    Bank.Close();
+    Self.HasSupplies := True;
+    Self.OutOfPotions := False;
+    Self.InCombat := False;
+    Self.IsAttacking := False;
+    WriteLn('[BANK] Successfully handled banking');
+  end
+  else
+  begin
+    WriteLn('[BANK] Failed to withdraw correct potions - disabling banking');
+    Self.BankingDisabled := True;
+    Self.HasSupplies := False;
+  end;
+end;
+
+procedure GemStoneCrabSlayer.DepositVials();
+var
+  vialsDeposited: Int32;
+  totalVials: Int32;
+  vialItem: TRSBankItem;
+begin
+  if not Bank.IsOpen() then
+  begin
+    WriteLn('[VIALS] Bank not open - cannot deposit vials');
+    Exit;
+  end;
+    
+  if Inventory.ContainsItem('Vial') then
+  begin
+    totalVials := Inventory.CountItem('Vial');
+    WriteLn('[VIALS] Found ', totalVials, ' empty vials in inventory - depositing them at bank');
+    
+    vialItem.Item := 'Vial';
+    vialItem.Quantity := Bank.QUANTITY_ALL;
+    
+    if Bank.DepositItem(vialItem, True) then
+    begin
+      vialsDeposited := totalVials;
+      WriteLn('[VIALS] Successfully deposited all ', vialsDeposited, ' empty vials at bank!');
+    end
+    else
+    begin
+      WriteLn('[VIALS] Failed to deposit vials with bulk deposit - attempting individual deposits');
+      
+      vialsDeposited := 0;
+      while Inventory.ContainsItem('Vial') do
+      begin
+        vialItem.Quantity := 1;
+        if Bank.DepositItem(vialItem, True) then
+        begin
+          Inc(vialsDeposited);
+          Wait(600, 800);
+        end;
+      end;
+      
+      if Inventory.ContainsItem('Vial') then
+      begin
+        WriteLn('[VIALS] WARNING: Some vials may not have been deposited, attempting again...');
+        while Inventory.ContainsItem('Vial') do
+        begin
+          vialItem.Quantity := 1;
+          if Bank.DepositItem(vialItem, True) then
+          begin
+            Inc(vialsDeposited);
+            Wait(600, 800);
+          end
+          else
+          begin
+            WriteLn('[VIALS] ERROR: Failed to deposit remaining vials on second attempt');
+            Break;
+          end;
+        end;
+      end;
+      
+      if not Inventory.ContainsItem('Vial') then
+        WriteLn('[VIALS] Successfully deposited all ', vialsDeposited, ' empty vials at bank!')
+      else
+        WriteLn('[VIALS] ERROR: Failed to deposit all vials after second attempt');
+    end;
+  end
+  else
+  begin
+    WriteLn('[VIALS] No empty vials found in inventory - proceeding with banking');
+  end;
+end;
+
+procedure GemStoneCrabSlayer.WalkToCrabSpawn();
+var
+  CurrentPos: TPoint;
+  NorthDistance, EastDistance, SouthDistance: Double;
+  ClosestSpawn: TPoint;
+  SpawnName: String;
+  TargetPosition: TPoint;
+  DirectionVector: TPoint;
+  DistanceToSpawn: Double;
+  RandomDistance: Int32;
+begin
+  WriteLn('Walking closer to crab boss spawn...');
+  
+  CurrentPos := Map.Position;
+  WriteLn('Current position: ', CurrentPos.X, ', ', CurrentPos.Y);
+  
+  NorthDistance := CurrentPos.DistanceTo(Point(996, 37738));
+  EastDistance := CurrentPos.DistanceTo(Point(1316, 37982));
+  SouthDistance := CurrentPos.DistanceTo(Point(860, 38258));
+  
+  WriteLn('Spawn distances - North: ', FloatToStr(NorthDistance), ', East: ', FloatToStr(EastDistance), ', South: ', FloatToStr(SouthDistance));
+  
+  if (NorthDistance <= EastDistance) and (NorthDistance <= SouthDistance) then
+  begin
+    ClosestSpawn := Point(996, 37738);
+    SpawnName := 'North';
+    DistanceToSpawn := NorthDistance;
+    WriteLn('North spawn is closest (', FloatToStr(NorthDistance), ' tiles)');
+  end
+  else if (EastDistance <= NorthDistance) and (EastDistance <= SouthDistance) then
+  begin
+    ClosestSpawn := Point(1316, 37982);
+    SpawnName := 'East';
+    DistanceToSpawn := EastDistance;
+    WriteLn('East spawn is closest (', FloatToStr(EastDistance), ' tiles)');
+  end
+  else
+  begin
+    ClosestSpawn := Point(860, 38258);
+    SpawnName := 'South';
+    DistanceToSpawn := SouthDistance;
+    WriteLn('South spawn is closest (', FloatToStr(SouthDistance), ' tiles)');
+  end;
+  
+  DirectionVector.X := ClosestSpawn.X - CurrentPos.X;
+  DirectionVector.Y := ClosestSpawn.Y - CurrentPos.Y;
+  
+  if DistanceToSpawn > 0 then
+  begin
+    DirectionVector.X := Round(DirectionVector.X / DistanceToSpawn);
+    DirectionVector.Y := Round(DirectionVector.Y / DistanceToSpawn);
+  end;
+  
+  RandomDistance := Random(5, 8);
+  TargetPosition.X := ClosestSpawn.X - (DirectionVector.X * RandomDistance);
+  TargetPosition.Y := ClosestSpawn.Y - (DirectionVector.Y * RandomDistance);
+  
+  TargetPosition.X := TargetPosition.X + Random(-3, 3);
+  TargetPosition.Y := TargetPosition.Y + Random(-3, 3);
+  
+  WriteLn('Walking to ', SpawnName, ' spawn area (', RandomDistance, ' tiles away) at position: ', TargetPosition.X, ', ', TargetPosition.Y);
+  
+  if Map.Walker.WebWalk(TargetPosition, 30, 0.2) then
+  begin
+    WriteLn('Successfully walked closer to ', SpawnName, ' spawn area');
+  end
+  else
+  begin
+    WriteLn('Failed to walk closer to ', SpawnName, ' spawn area - continuing anyway');
+  end;
+end;
+
+function GemStoneCrabSlayer.GetBoostPotionCategories(): array of TRSItemArray;
+begin
+  Result := [
+    // Combat potions (attack + strength + defence)
+    ['Divine super combat potion(1..4)', 'Super combat potion(1..4)', 'Combat potion(1..4)', 'Zamorak brew(1..4)'],
+    // Strength boosts
+    ['Divine super strength potion(1..4)', 'Super strength(1..4)', 'Strength potion(1..4)'],
+    // Attack boosts  
+    ['Divine super attack potion(1..4)', 'Super attack(1..4)', 'Attack potion(1..4)'],
+    // Defence boosts
+    ['Divine super defence potion(1..4)', 'Super defence(1..4)', 'Defence potion(1..4)'],
+    // Ranging boosts
+    ['Divine ranging potion(1..4)', 'Ranging potion(1..4)'],
+    // Magic boosts
+    ['Divine magic potion(1..4)', 'Magic potion(1..4)'],
+    // Combo potions
+    ['Divine bastion potion(1..4)', 'Bastion potion(1..4)'],
+    ['Divine battlemage potion(1..4)', 'Battlemage potion(1..4)']
+  ];
+end;
+
+begin
+  {$IFDEF SCRIPT_GUI}
+  Sync(@Config.Run);
+  {$ENDIF}
+
+  GemStoneCrabBot.Run(WLSettings.MaxActions, WLSettings.MaxTime);
+end.

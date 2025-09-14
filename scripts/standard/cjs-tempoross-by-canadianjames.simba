@@ -1,0 +1,5012 @@
+{$DEFINE SCRIPT_ID := '7cdc180a-e873-4601-8ccc-10514db8c0bb'}
+{$DEFINE SCRIPT_REVISION := '9'}
+program CJpoross;
+{$I WaspLib/osr.simba}
+
+{$SCOPEDENUMS ON}
+type
+
+  EOutputLevel = (USER, USEFUL, ALL);
+
+  ETemporossHazard = (
+    NONE, WAVE, STORM, FIRE, CANNON_ELECTRIC
+    );
+
+  EHarpoonType = (BARE_HANDED, HARPOON, BARB_TAIL_HARPOON, DRAGON_HARPOON, INFERNAL_HARPOON, CRYSTAL_HARPOON);
+
+  EInterruptReason = (
+    NONE, GAME_OVER, HAZARD, LOAD, ATTACK, MISSING_TOOL, TETHERED
+    );
+
+  EScriptState =( WAIT,
+                  HANDLING_HAZARD,
+                  GAME_START,
+                  FISHING,
+                  COOKING,
+                  LOADING_FISH,
+                  GET_TOOLS,
+                  ATTACKING,
+                  GAME_END
+                );
+{$SCOPEDENUMS OFF}
+
+  //if a Hazard occurs, we can set the ATPA as well at that point
+  //This way we don't need to find the hazard again.
+  THazard = record
+    hazardType : ETemporossHazard;
+    ATPA : T2DPointArray;
+  end;
+
+  TCJTempoross = record
+    Name : string;
+
+    fishXPGained,
+    startFishXP,
+    cookingXPGained,
+    startXP,
+    totalXP,
+    fishXPThisGame,
+    permitsReceived,
+    gpEarned,
+    wins,
+    losses,
+    crateCoordIndex : Int32;
+
+    currentHazard : THazard;
+    actualXPTimer : TStopwatch;
+
+    isGameStarted,
+    areGameObjectsSet,
+    isFishing,
+    isCooking,
+    isLoading,
+    atDoubleFish,
+    isNorthSide,
+    handlingHazard,
+    needTools,
+    attackOverride : Boolean;
+
+    closeDangerbox,
+    currFishingArea : TBox;
+
+    fishingWalkpath,
+    //Used to store original coordinates which are filtered based on game area
+    cachedMastCoords,
+    cachedTotemCoords,
+    cachedShrineCoords,
+    cachedCrateCoords,
+    cachedRopeCrateCoords,
+    cachedHammerCrateCoords,
+    cachedHarpoonCrateCoords,
+    cachedBucketCrateCoords,
+    cachedPumpCoords,
+    cachedTemporossPoolCoords,
+    fishBoxLocations : TPointArray;
+
+    waveTimer,
+    chatToggleTimer,
+    noXPTimer : TCountDown;
+
+    logPath : string;
+
+    state,
+    lastState       : EScriptState;
+    RSW             : TRSWalker;
+    wikiPermitValue : TIntegerArray;
+  end;
+
+  TFishSearchParams = record
+    findDouble, findSingle : Boolean;
+    doubleTPA, singleTPA : TPointArray; //Filled out by search functions.
+    searchTime : Int32;
+  end;
+
+const
+  CJT_CONFIG_BASE_PATH : string := AppPath + 'Configs' + DirectorySeparator + "CJTempoross" + DirectorySeparator;
+  ENERGY_BOX : TBox := [14, 61, 185, 77];
+  ESSENCE_BOX : TBox := [14, 80, 185, 94];
+  INTENSITY_BOX : TBox := [14, 99, 185, 115];
+  FIRE_BOXES : TBoxArray := [[216, 68, 230, 82], //North
+                            [194, 95, 208, 109],// West
+                            [257, 95, 271, 108],//East
+                            [236, 121, 250, 135]];//South
+
+var
+  CJDebugLevel : EOutputLevel := EOutputLevel.USEFUL;
+  Bot : TCJTempoross;
+  CJTempNeedRope, CJTempNeedHammer, CJTempCook, CJTempSoloMode : Boolean;
+  CJTempHarpoonType : EHarpoonType;
+  CJTempReqBuckets : Int32;
+  CJTempUseSleeps : Boolean;
+  CJTempSleepLength: UInt64 := 8 * ONE_HOUR;
+  CJTempSleepTime: String := "00:00:00";
+  CJTempStopTime : UInt64 := 0;
+  CJTempStopPermits : Int32 := 0;
+  CJTempUseBreaks : Boolean;
+
+function GetHarpoonString(harpoon : EHarpoonType) : string;
+var
+  charPtr : PChar;
+begin
+  if harpoon = EHarpoonType.BARB_TAIL_HARPOON then
+    Exit("Barb-tail harpoon");
+
+  Result := ToStr(harpoon);
+  Result := Result.Replace("_", " ").ToLower();
+  charPtr := PChar(Result);
+  charPtr^ := UpCase(charPtr^);
+  Result := charPtr^ + Copy(Result, 2, Length(Result));
+  charPtr := nil;
+end;
+
+function TRSMinimap.SetZoomToPoint(p: TPoint; randomness: Int32 = 0): Boolean; override;
+begin
+  Result := Self.InZoomRange(p);
+  randomness := 0;
+end;
+
+function TRectangle.Contains(tpa : TPointArray) : Boolean; overload;
+var
+  i : Int32;
+begin
+  for i := 0 to High(tpa) do
+  begin
+    if Self.Contains(tpa[i]) then
+      Exit(true);
+  end;
+end;
+
+function TRectangle.Contains(atpa : T2DPointArray) : Boolean; overload;
+var
+  i : Int32;
+begin
+  if Length(atpa) < 1 then
+    Exit(false);
+
+  for i := 0 to High(atpa) do
+  begin
+    if Self.Contains(atpa[i]) then
+      Exit(true);
+  end;
+end;
+
+procedure TRectArray.Shuffle();
+var
+  i : Integer;
+begin
+  for i := High(Self) downto 0 do
+    System.Swap(Self[i], Self[random(i + 1)]);
+end;
+
+procedure TCountdown.Reset();
+begin
+  with Self do
+  begin
+    Length := 0;
+    Timeout := 0;
+    Paused := 0;
+  end;
+end;
+
+//By Flight
+procedure TAntiban.HoverMSPlayers(); override;
+begin
+  if (Bot.state <> EScriptState.ATTACKING)
+    and (Bot.waveTimer.Length > 0)
+    and (Bot.waveTimer.TimeRemaining <= 3000) then
+  begin
+    Self.DebugLn("Skipping player hover: waveTimer");
+    Exit;
+  end;
+
+  Self.HoverMSTile(ERSMinimapDot.PLAYER);
+end;
+
+//By Flight
+procedure TAntiban.DoLoseFocus();
+Var T: Int32;
+begin
+  if (Bot.state <> EScriptState.ATTACKING)
+    and (Bot.waveTimer.Length > 0)
+    and (Bot.waveTimer.TimeRemaining <= 3500) then
+  begin
+    Self.DebugLn("Skipping lose focus: waveTimer");
+    Exit;
+  end;
+
+  T := SRL.NormalRange(1200, 3500);
+  Self.DebugLn('Losing focus for '+SRL.MsToTime(T, Time_Short));
+  Self.LoseFocus(T);
+end;
+
+procedure TAntiban.CheckCharges(); override;
+var
+  item: TRSItem;
+begin
+
+  if not Equipment.Open() then
+    Exit;
+
+  item := GetHarpoonString(CJTempHarpoonType);
+
+  if not Equipment.ContainsItem(item) then
+    Exit;
+
+  Self.DebugLn('Checking ' + ToStr(item) + ' charges');
+  Equipment.ClickItem(item, 'Check');
+end;
+
+procedure TAntiban.RandomTab; override;
+begin
+  Self.DebugLn('Random Tab');
+
+  if Random() < 0.80 then
+  begin
+    if Random() < 0.50 then
+    begin
+      GameTabs.Open(ERSGameTab(SRL.NormalRange(Ord(ERSGameTab.COMBAT), Ord(ERSGameTab.MAGIC), 6.0)));
+
+      Wait(300, 3000, wdLeft);
+    end;
+
+    GameTabs.Open(ERSGameTab(Random(Ord(ERSGameTab.COMBAT), Ord(ERSGameTab.MAGIC))));
+  end else
+  begin
+    if Random() < 0.50 then
+    begin
+      GameTabs.Open(ERSGameTab(SRL.NormalRange(Ord(ERSGameTab.CLAN), Ord(ERSGameTab.MUSIC), 6.0)));
+
+      Wait(0, 2500, wdLeft);
+    end;
+
+    GameTabs.Open(ERSGameTab(Random(Ord(ERSGameTab.CLAN), Ord(ERSGameTab.MUSIC))));
+  end;
+
+  Wait(0, 2000, wdLeft);
+end;
+
+procedure TAntiban.RandomGameTabTask(); override;
+begin
+
+  if (Bot.state <> EScriptState.ATTACKING)
+    and (Bot.waveTimer.Length > 0)
+    and (Bot.waveTimer.TimeRemaining() <= 5000) then
+  begin
+    Self.DebugLn("Skipped GameTab for waveTimer");
+    Exit;
+  end;
+
+  case Random(13) of
+    0..3:   Self.RandomTab();
+    10..11: Self.ToggleAchievementTabs();
+    12:
+    begin
+      if (CJTempHarpoonType = EHarpoonType.CRYSTAL_HARPOON)
+        or (CJTempHarpoonType = EHarpoonType.INFERNAL_HARPOON) then
+          Self.CheckCharges();
+    end;
+  end;
+end;
+
+procedure TAntiban.HoverSkills; override;
+begin
+  if Self.Skills = [] then
+  begin
+    Self.DebugLn('HoverSkills: No skills declared');
+    Exit;
+  end;
+
+  if (Bot.state <> EScriptState.ATTACKING)
+    and (Bot.waveTimer.Length > 0)
+    and (Bot.waveTimer.TimeRemaining <= 5400) then
+  begin
+    Self.DebugLn("Skipping HoverSkills: waveTimer");
+    Exit;
+  end;
+
+  HoverSkill(Self.Skills[Random(Length(Self.Skills))], SRL.TruncatedGauss(1000, 5000), SRL.Dice(50));
+end;
+
+procedure TCJTempoross.OnBreakStart(Task: PBreakTask);
+var T: PBreakTask;
+begin
+  Self.actualXPTimer.Pause();
+  T := Task;
+end;
+
+procedure TCJTempoross.OnBreakFinish(Task: PBreakTask);
+var T: PBreakTask;
+begin
+  Self.actualXPTimer.Start();
+  T := Task;
+end;
+
+procedure TCJTempoross.OnSleepStart(Task: PSleepTask);
+var T: PSleepTask;
+begin
+  Self.actualXPTimer.Pause();
+  T := Task;
+end;
+
+procedure TCJTempoross.OnSleepFinish(Task: PSleepTask);
+var T: PSleepTask;
+begin
+  Self.actualXPTimer.Start();
+  T := Task;
+end;
+
+function TPoint.InRange(other: TPoint; dist: Double; debug : Boolean): Boolean; constref; overload;
+begin
+  Result := Self.DistanceTo(other) <= dist;
+  if (debug) then
+    Writeln("In range dist: ", Result);
+end;
+
+function GetHarpoonStrings() : TStringArray;
+var
+  i : Int32;
+begin
+  for i := 0 to Length(EHarpoonType) - 1 do
+  begin
+    Result += GetHarpoonString(EHarpoonType(i));
+  end;
+end;
+
+procedure TRSStats.SetupAlignment(); override;
+var
+  alignment: TRSInterfaceAlignment;
+  boxes: TBoxArray;
+  i: Int32;
+begin
+  alignment.Left := GameTab.Bounds.X1 - 3;
+  alignment.Right := GameTab.Bounds.X2 + 3;
+
+  alignment.Top := GameTab.Bounds.Y1;
+  alignment.Bottom := GameTab.Bounds.Y2;
+  Self.SetupAlignment(alignment);
+
+  boxes := Grid(3, 8, 53, 23, [10, 9], [Self.Bounds.X1 + 2, Self.Bounds.Y1 + 6]);
+  for i := 0 to Ord(High(ERSSkill)) do
+    Self.SkillBoxes[ERSSkill(i)] := boxes[i];
+end;
+
+//Override for the internal setup
+//Because the Player Ready number is also white and can be in one of the areas of the XPBar it will return a false positive.
+// XPBar FindColor threshold is 0 normally, setting to 100 lets us more accurately find our XPBar at the lobby.
+procedure TRSXPBar._Setup(); override;
+var
+  tpa: TPointArray;
+begin
+  if not Self.Enable() then
+  begin
+    Self.Debugln("XPBAR: Enable failed");
+    Exit;
+  end;
+
+  for Self.Alignment in Self.Alignments do
+  begin
+    Self.SetupAlignment(Self.Alignment);
+    if SRL.FindColors(tpa, $FFFFFF, Self.Bounds) > 100 then
+      Break;
+  end;
+
+  if tpa = [] then
+  begin
+    Self.Alignment := [];
+    Self.Font := [];
+    Exit;
+  end;
+
+  if tpa = [] then
+  begin
+    Self.Alignment := [];
+    Self.Font := [];
+    Self.Debugln("XPBAR: TPA was empty failed");
+    Exit;
+  end;
+
+  case tpa.Bounds().Height() of
+    8:  Self.Font := RS_FONT_PLAIN_11;
+    11: Self.Font := RS_FONT_PLAIN_12;
+    10: Self.Font := RS_FONT_BOLD_12;
+    else
+    begin
+      Self.Alignment := [];
+      Self.Font := [];
+      Self.Debugln("XPBAR: Bounds not sufficient");
+      Exit;
+    end;
+  end;
+
+  Self.IsSetup := True;
+
+  Self.Tracker.Current := Self.Read();
+
+  if Self.Tracker.Current > 0 then
+  begin
+    Self.Tracker.Start := Self.Tracker.Current;
+    Self.Tracker.Previous := Self.Tracker.Current;
+    Self.Tracker.IsSetup := true;
+  end;
+end;
+
+function TSRL.FindColors(out TPA: TPointArray; Color: TCTS2Color; rect: TRectangle) : Int32; overload;
+var
+  p: TPoint;
+  newTPA: TPointArray;
+begin
+  Result := self.FindColors(tpa, Color, rect.Bounds());
+  for p in TPA do
+    if rect.Contains(p) then
+      newTPA += p;
+
+  TPA := newTPA;
+  Result := newTPA.Len();
+end;
+
+function TSRL.FindColors(out TPA: TPointArray; Colors : array of TCTS2Color; Area: TRectangle; erodeAmount : Int32 = 0): Int32; overload;
+var
+  Points: TPointArray;
+  i : Int32;
+begin
+  TPA := [];
+  for i := 0 to High(colors) do
+    if FindColors(Points, colors[i], Area) then
+    begin
+      TPA += Points;
+      if erodeAmount > 0 then
+      begin
+        TPA := TPA.Erode(erodeAmount);
+        TPA := TPA.Grow(erodeAmount + 1);
+      end;
+    end;
+
+  Result := Length(TPA);
+end;
+
+//https://stackoverflow.com/questions/75540029/how-to-draw-a-rectangle-with-a-straight-line-as-the-central-axis
+function TRectangle.RectFromLine(startP, endP: TPoint; expandAmount : Int32) : TRectangle;
+var
+  p1, p2 : TPoint;
+  lineLength, angle, sinA, cosA : Double;
+begin
+  lineLength := Distance(startP, endP);
+  p1 := Point(startP.X - endP.X, startP.y - endP.Y);
+  angle := ArcTan2(p1.y, p1.x);
+
+  sinA := Sin(angle);
+  cosA := Cos(angle);
+
+  p1 := Point(Round( startP.X - expandAmount / 2 * sinA),Round(startP.Y + expandAmount / 2 * cosA));
+  p2 := Point(Round(startP.X + expandAmount / 2 * sinA), Round(startP.Y - expandAmount / 2 * cosA));
+
+  Result := [p2,
+             p1,
+             Point(Round(p1.X - lineLength * cosA), Round(p1.Y - lineLength * sinA)),
+             Point(Round(p2.X - lineLength * cosA), Round(p2.Y - lineLength * sinA))];
+
+ Result := Result.FixOrder();
+end;
+
+function TRectangle.LimitTo(b : TBox) : TRectangle;
+var
+  tpa : TPointArray;
+  i : Int32;
+begin
+  b.Normalize();
+
+  tpa := Self.ToTPA(); //t, r, b, l;
+
+  for i := 0 to High(tpa) do
+  begin
+    if tpa[i].X < b.X1 then
+      tpa[i].x := b.X1;
+
+    if tpa[i].X > b.X2 then
+      tpa[i].X := b.X2;
+
+    if tpa[i].Y < b.Y1 then
+      tpa[i].Y := b.Y1;
+
+    if tpa[i].Y > b.Y2 then
+      tpa[i].Y := b.Y2;
+  end;
+
+  Result.Top := tpa[0];
+  Result.Right := tpa[1];
+  Result.Btm := tpa[2];
+  Result.Left := tpa[3];
+  Result := Result.FixOrder();
+end;
+
+function TRSInventory.CountAll(items: TRSItemArray): Int32; overload;
+begin
+  if not Self.IsOpen() then
+    Self.Open();
+
+  if not Self.IsOpen() then
+    Exit(0);
+
+  Result := Length(Self.Items.IndicesOf(items));
+end;
+
+function TRSMinimap.GetFishIcons() : T2DPointArray;
+const
+  MMBLUE : TCTS2Color := CTS2(16422429, 10, 0.63, 0.95);
+  MMGREY : TCTS2Color := CTS2(11513775, 7, 2.66, 0.09);
+var
+  mmBlueTPA, greyTPA : TPointArray;
+  i, j : Int32;
+  testB : TBox;
+  testRect : TRectangle;
+  partitionRects : TRectArray;
+  tempATPA : T2DPointArray;
+  shortLen, longLen : Int32;
+
+begin
+  if SRL.FindColors(mmBlueTPA, MMBLUE, Self.Bounds) < 1 then
+    Exit;
+
+  if SRL.FindColors(greyTPA, MMGREY, Self.Bounds) < 1 then
+    Exit;
+
+  tempATPA := greyTPA.Cluster(1);
+
+  for i := 0 to High(tempATPA) do
+  begin
+    testB := tempATPA[i].Bounds();
+
+    if testB.ContainsAny(mmBlueTPA) then
+    begin
+      testRect := tempATPA[i].MinAreaRectEx(longLen, shortLen);
+
+      if longLen > 12 then
+      begin
+        partitionRects := testRect.Partition(1, 2, testRect.DirByLen(true));
+
+        for j := 0 to High(partitionRects) do
+        begin
+          Result += tempATPA[i].FilterRectangle(partitionRects[j]);
+        end;
+      end
+      else
+        Result += tempATPA[i];
+    end;
+  end;
+
+  if Length(Result) < 1 then
+    Result := [];
+end;
+
+function TCJTempoross.GetDoubleFishColors() : array of TCTS2Color;
+begin
+  Result := [CTS2(10390910, 3, 0.18, 0.42),
+             CTS2(10391426, 4, 0.30, 0.55)]; //Main one
+end;
+
+function TCJTempoross.GetSingleFishColors() : TCTS2Color;
+begin
+  Result := CTS2(11904668, 4, 0.28, 0.56);
+end;
+
+function TCJTempoross.ComputeSkillChance(lowC, highC: Double; level: Int32) : Double;
+var
+  d : Double;
+begin
+  d := Floor(lowC * (99 - level) / 98 + highC*(level - 1)/98 + 0.5) + 1;
+  Result := Min(Max(d/256, 0), 1);
+end;
+
+function TCJTempoross.GetEstimatedFishLevel() : Int32;
+begin
+  Result := SRL.GetLevelAtXP(Self.startFishXP + Self.fishXPGained);
+end;
+
+//Idea from XJ, modified by me to handle skill bonuses for the minigame.
+function TCJTempoross.GetFishingTime() : UInt32;
+var
+  skillChance, lowC, highC : Double;
+  level : Int32;
+begin
+  level := Self.GetEstimatedFishLevel();
+  lowC := 170;
+  highC := 255;
+
+  case CJTempHarpoonType of
+    EHarpoonType.DRAGON_HARPOON,
+    EHarpoonType.INFERNAL_HARPOON :
+    begin
+      lowC *= 1.05;
+      highC *= 1.05;
+    end;
+
+    EHarpoonType.CRYSTAL_HARPOON:
+    begin
+      lowC *= 1.1;
+      highC *= 1.1;
+    end;
+  end;
+
+  skillChance := Self.ComputeSkillChance(lowC, highC, level);
+  Result := Floor(2400 / skillChance) + Random(700, 1400);
+end;
+
+procedure TCJTempoross.SetDefaultScriptSettings();
+begin
+  CJTempCook := true;
+  CJTempNeedRope := true;
+  CJTempNeedHammer := true;
+  CJTempReqBuckets := 4;
+  CJTempHarpoonType := EHarpoonType.HARPOON;
+  CJTempUseSleeps := true;
+  CJTempSleepTime := "00:00:00";
+  CJTempSleepLength := 8 * ONE_HOUR;
+  CJTempStopTime := 0;
+  CJTempStopPermits := 0;
+  CJTempUseBreaks := true;
+end;
+
+procedure TAntiban.Setup(); override;
+begin
+  // purposefully left blank to remove default wasplib antiban
+end;
+
+procedure TAntiban.SetupBreaks(); override;
+begin
+  if Self.Breaks <> [] then
+    Self.Breaks := [];
+
+  Self.AddBreak(25 * ONE_MINUTE, 2 * ONE_MINUTE, 0.33, 0.01);
+  Self.AddBreak(60 * ONE_MINUTE, 6 * ONE_MINUTE, 0.33, 0.15);
+  Self.AddBreak(120 * ONE_MINUTE, 20 * ONE_MINUTE, 0.33, 0.5);
+end;
+
+procedure TCJTempoross.WriteUserConfig();
+var
+  filePath : string := CJT_CONFIG_BASE_PATH + "Settings" + ToStr(Login.PlayerIndex);
+begin
+  WriteINI('General', 'NeedCook', ToStr(CJTempCook), filePath);
+  WriteINI('General', 'NeedRope', ToStr(CJTempNeedRope), filePath);
+  WriteINI('General', 'NeedHammer', ToStr(CJTempNeedHammer), filePath);
+  WriteINI('General', 'ReqBuckets', ToStr(CJTempReqBuckets), filePath);
+  WriteINI('General', 'HarpoonType', ToStr(Ord(CJTempHarpoonType)), filePath);
+  WriteINI('General', 'StopTime', ToStr(CJTempStopTime), filePath);
+  WriteINI('General', 'StopPermits', ToStr(CJTempStopPermits), filePath);
+  WriteINI('General', 'UseSleeps', ToStr(CJTempUseSleeps), filePath);
+  WriteIni('General', 'UsesBreaks', ToStr(CJTempUseBreaks), filePath);
+  WriteINI('General', 'SleepTime', CJTempSleepTime, filePath);
+  WriteINI('General', 'SleepLength', ToStr(CJTempSleepLength), filePath);
+end;
+
+procedure TCJTempoross.ImportUserConfig();
+var
+  filePath : string := CJT_CONFIG_BASE_PATH + "Settings" + ToStr(Login.PlayerIndex);
+
+begin
+  if not FileExists(filePath) then
+  begin
+    Bot.SetDefaultScriptSettings();
+    Self.WriteUserConfig();
+    Exit;
+  end;
+
+  CJTempCook := StrToBool(ReadINI('General', 'NeedCook', filePath));
+  CJTempNeedRope := StrToBool(ReadINI('General', 'NeedRope', filePath));
+  CJTempNeedHammer := StrToBool(ReadINI('General', 'NeedHammer', filePath));
+  CJTempReqBuckets := StrToInt(ReadINI('General', 'ReqBuckets', filePath));
+  CJTempHarpoonType := EHarpoonType(StrToInt(ReadINI('General', 'HarpoonType', filePath)));
+  CJTempStopTime := StrToUInt64(ReadINI("General", "StopTime", filePath));
+  CJTempStopPermits := StrToInt(ReadINI("General", "StopPermits", filePath));
+  CJTempUseSleeps := StrToBool(ReadINI('General', 'UseSleeps', filePath));
+  CJTempUseBreaks := StrToBoolDef(ReadIni('General', 'UsesBreaks', filePath), true);
+  CJTempSleepTime := ReadINI('General', 'Sleeptime', filePath);
+  CJTempSleepLength := StrToUInt64(ReadINI('General', 'SleepLength', filePath));
+end;
+
+procedure TCJTempoross.ResetGame();
+begin
+  Self.isGameStarted := false;
+  Self.isFishing := false;
+  Self.isCooking := false;
+  Self.isLoading := false;
+  Self.atDoubleFish := false;
+  Self.isNorthSide := false;
+  Self.handlingHazard := false;
+  Self.needTools := false;
+  Self.RSW.Enabled := false;
+  Self.attackOverride := false;
+  Self.areGameObjectsSet := false;
+  Self.fishXPThisGame := Self.fishXPGained;
+  Self.waveTimer.Reset();
+  Self.noXPTimer.Reset();
+end;
+
+procedure TCJTempoross.LogLine(text : string; addStamp : Boolean);
+var
+  commonText : string;
+begin
+  if addStamp then
+    commonText := SRL.TimeStamp() + ':[' + Self.Name + ']: ';
+
+  WriteFileContents(Self.logPath, commonText + text + STR_NEW_LINE, true);
+end;
+
+procedure TCJTempoross.Debugln(text : string; level : EOutputLevel);
+var
+  commonText : string;
+begin
+
+  commonText := SRL.TimeStamp() + ':[' + Self.Name + ']: ';
+  Self.LogLine(commonText + text, false);
+
+  if level <= CJDebugLevel then
+    WriteLn(commonText + text);
+end;
+
+function TCJTempoross.HasMSWater(area : TRectangle) : Boolean;
+const
+  COL : TCTS2Color := CTS2(9666929, 20, 0.20, 0.33);
+var
+  tpa : TPointArray;
+begin
+  if SRL.FindColors(tpa, COL, area) >= (Round(area.Area() * 0.5)) then
+    Exit(true);
+end;
+
+function TCJTempoross.HasMMWater(p : TPoint) : Boolean;
+const
+  COL : TCTS2Color := CTS2(11900802, 2, 0.96, 0.99);
+var
+  tpa : TPointArray;
+begin
+  if SRL.FindColors(tpa, COL, Box(p, 1, 1)) > 0 then
+    Exit(true);
+end;
+
+function TCJTempoross.GetMSWalkGrid(dim : Int32) : TRectArray;
+var
+  x, y : Int32;
+  tile :  Vector3;
+  msRect : TRectangle;
+  angleRad : Double;
+begin
+  angleRad := Minimap.GetCompassAngle(false);
+  for X := Minimap.Center.X - dim * 4 to Minimap.Center.X + dim * 4 with 4 do
+    for Y := Minimap.Center.Y - dim * 4 to Minimap.Center.Y + dim* 4 with 4 do
+    begin
+      Tile := Vec3(X, Y).RotateXY(angleRad, Minimap.Center.X, Minimap.Center.Y);
+      if HasMMWater(Point(Round(Tile.X), Round(Tile.Y))) then
+        continue;
+
+      msRect := Minimap.VectorToMSRect(Tile, 1, 1, angleRad);
+      if Mainscreen.Bounds.Contains(msRect)
+      and not HasMSWater(msRect) then
+        Result += msRect;
+    end;
+end;
+
+//Modified SRL-T version
+function TRSXPBar.Read(): Int64; override;
+begin
+  if not Self.IsSetup then
+    Self._Setup();
+
+  if not Self.IsSetup or not Self.Enable() then
+    Exit;
+
+  Result := OCR.RecognizeNumber(Self.Bounds, TOCRColorFilter.Create([$FFFFFF]), Self.Font);
+
+  if Self.Tracker.IsSetup then
+    while Abs(Result - Self.Tracker.Current) > 10000 do
+    begin
+      Writeln("Fixing bad xp: ", "Detected: ", Result, " Current: ", Self.Tracker.Current);
+      Result := OCR.RecognizeNumber(Self.Bounds, TOCRColorFilter.Create([$FFFFFF]), Self.Font);
+      Wait(100);
+    end;
+
+  Self.Tracker.IsSetup := (Result > 0) and (Result >= Self.Tracker.Current);
+
+  if Self.Tracker.IsSetup then
+  begin
+    if Self.Tracker.Start = 0 then
+      Self.Tracker.Start := Result;
+
+    if (Self.Tracker.Current = 0) or (Result > Self.Tracker.Current) then
+      Self.Tracker.Current := Result;
+  end;
+end;
+
+function TRSXPBar.EarnedXP({$H-}currentXP: Int32;{$H+} isFishingXP: Boolean): Boolean; overload;
+var
+  xpDiff : Int32;
+begin
+  if not Self.Tracker.IsSetup then
+    Exit;
+
+  Result := Self.Tracker.Current > Self.Tracker.Previous;
+
+  if Result then
+  begin
+    Bot.noXPTimer.Restart();
+
+    xpDiff := Self.Tracker.Current - Self.Tracker.Previous;
+
+    if isFishingXP then
+      Bot.fishXPGained += xpDiff
+    else
+      Bot.cookingXPGained += xpDiff;
+
+    Self.Tracker.Previous := Self.Tracker.Current;
+  end;
+end;
+
+function TRSXPBar.EarnedXP(isFishingXP: Boolean): Boolean; overload;
+begin
+  Result := Self.EarnedXP(Self.Read(), isFishingXP);
+end;
+
+//Use the SRL-T version.
+function TRSXPBar.EarnedXP(): Boolean; override;
+begin
+  Result := Self.Read() > Self.Tracker.Previous;
+
+  if Result and Self.Tracker.IsSetup then
+    Self.Tracker.Previous := Self.Tracker.Current;
+end;
+
+//This is the same as the regular Init without the OnTerminateFree that is usually added.
+procedure THTTPClient.InitNoFree(name, server: String; handleCookies: Boolean = True);
+begin
+  Self.Name := name;
+  Self.Server := server;
+  Self.Client := InitializeHTTPClient(handleCookies);
+  Self.IsSetup := True;
+end;
+
+function TCJTempoross.ExtractWikiPermitInfo() : TIntegerArray;
+var
+  rewardPoolClient : THTTPClient;
+  pageString : string;
+  tableInfo : TStringArray;
+  i : Int32;
+begin
+  rewardPoolClient.InitNoFree("Rewards", "https://oldschool.runescape.wiki/", false);
+  pageString := rewardPoolClient.Get("/w/Reward_pool", false, false);
+  pageString := pageString.After('id="Rewards"').Before('id="Unique"');
+  tableInfo := pageString.Explode("<tr>");
+  rewardPoolClient.Free();
+
+  for i := 2 to High(tableInfo) do
+  begin
+    Result += Round(StrToFloat(tableInfo[i].After('coins-pos">').Before('</span>').Replace(",", "", [rfReplaceAll])));
+  end;
+end;
+
+function TCJTempoross.GetFishingPermitValue(fishLevel : Int32) : Int32;
+var
+  splodeIndex : Int32;
+begin
+  if fishLevel < 35 then
+    Exit;
+
+  if fishLevel > 99 then
+    fishLevel := 99;
+
+  case fishLevel of
+    35..39 : splodeIndex := 0;
+    40..45 : splodeIndex := 1;
+    46..49 : splodeIndex := 2;
+    50..75 : splodeIndex := 3;
+    76..78 : splodeIndex := 4;
+    79..80 : splodeIndex := 5;
+    81 .. 99 : splodeIndex := 6;
+  end;
+
+  if (Length(Self.wikiPermitValue) < 1)
+    or (High(Self.wikiPermitValue) < splodeIndex) then
+  begin
+    Writeln("USER DID NOT GET THE WIKI DATA CORRECTLY!");
+    Exit;
+  end;
+
+  Result := Self.wikiPermitValue[splodeIndex];
+end;
+
+function TCJTempoross.IsWavePresent() : Boolean;
+begin
+  Result := (Self.waveTimer.TimeRemaining = 0) and Self.HazardChatDetected("wave")
+end;
+
+function TCJTempoross.HazardChatDetected(hazardText : string) : Boolean;
+var
+  ocrFilter: TOCRColorFilter := TOCRColorFilter.Create ([723923], [20]);
+  foundStr : string;
+  i : Int32;
+begin
+  for i := 1 to 4 do
+  begin
+    foundStr := OCR.Recognize(Chat.LineBoxes[CHAT_INPUT_LINE - i].Expand(3), ocrFilter, RS_FONT_PLAIN_12);
+    Result := foundStr.Contains(hazardText);
+    if Result then
+      break;
+  end;
+end;
+
+function TCJTempoross.GetStormATPA(filterArea : TBox = []) : T2DPointArray;
+var
+  tempTPA, TPA : TPointArray;
+  searchColours : array of TCTS2Color;
+  i : Int32;
+begin
+
+   searchColours := [CTS2(4219240, 4, 0.43, 0.31),
+                  CTS2(4021090, 2, 0.86, 0.58),
+                  CTS2(4014665, 1, 2.32, 3.70),
+                  CTS2(4219752, 1, 1.21, 1.46),
+                  CTS2(4482925, 2, 0.93, 0.50) //NEW
+                  ];
+
+  //For when we're on the ship
+  if Self.isLoading then
+    searchColours += CTS2(3554626, 7, 0.23, 0.76);
+
+  if filterArea = [] then
+    filterArea := Self.closeDangerbox;
+
+  for i := 0 to High(searchColours) do
+  begin
+    SRL.FindColors(tempTpa, searchColours[i], filterArea);
+    tempTPA := tempTPA.Erode(1);
+    tpa += tempTPA.Grow(4);
+  end;
+
+  if tpa.Len() < 8 then
+    Exit(Result);
+
+  Result := tpa.Grow(6).Cluster(10);
+  Result := Result.SortFrom(Mainscreen.GetPlayerBox().Center());
+end;
+
+function TCJTempoross.StormPresent(out ATPA : T2DPointArray; searchArea : TBox = []) : Boolean;
+var
+  stormATPA : T2DPointArray := Self.GetStormATPA(searchArea);
+begin
+  Result := stormATPA.Len() > 0;
+  if Result then
+    ATPA := stormATPA;
+end;
+
+function TCJTempoross.GetFireATPA(filterArea : TBox = []) : T2DPointArray;
+const
+    FIRE_COLOURS : TCTS2ColorArray := [CTS2(5749485, 10, 0.17, 1.44), CTS2(6866927, 16, 0.19, 1.24)];
+var
+  tempTPA, tpa : TPointArray;
+  i : Int32;
+begin
+  if filterArea = [] then
+    filterArea := Self.closeDangerbox;
+
+  for i := 0 to High(FIRE_COLOURS) do
+  begin
+    if SRL.FindColors(tempTPA, FIRE_COLOURS[i], filterArea) > 0 then
+    begin
+      tpa += tempTPA;
+    end;
+  end;
+
+  if tpa.Len() = 0 then
+    Exit;
+
+  tpa := tpa.Grow(1);
+  Result := tpa.Cluster(1);
+  Result.FilterSize(60, EComparator.__GT__);
+end;
+
+function TCJTempoross.FirePresent(out atpa : T2DPointArray; searchBox : TBox = []) : Boolean;
+var
+  fireATPA : T2DPointArray;
+
+begin
+  fireATPA := Self.GetFireATPA(searchBox);
+  Result := fireATPA.Len() > 0;
+  if Result then
+    ATPA := fireATPA;
+end;
+
+function TCJTempoross.GetMSFishRectsNew() : TRectArray;
+var
+  iconATPA : T2DPointArray;
+  i : Int32;
+  myPos, tempPoint : TPoint;
+  height, compassAngle : Double;
+
+begin
+
+  iconATPA := Minimap.GetFishIcons();
+  compassAngle := Minimap.GetCompassAngle(false);
+  myPos := RSW.GetMyPos(height);
+
+  if Length(iconATPA) < 1 then
+    Exit;
+
+  for i := 0 to High(iconATPA) do
+  begin
+    tempPoint := iconATPA[i].Mean();
+    Result += Minimap.GetTileMS([tempPoint.X, tempPoint.Y, 0], [4.5, 4.5, 0 - height], [2, 2, 0], compassAngle);
+  end;
+end;
+
+function TCJTempoross.GetMSFishRects(limitBox : TBox) : TRectArray;
+var
+  msRect : TRectangle;
+  stormATPA, fireATPA : T2DPointArray;
+  tempRects : TRectArray;
+  myPos : TPoint;
+  hasWater : Boolean;
+begin
+
+  myPos :=  RSW.GetMyPos();
+
+  stormATPA := Self.GetStormATPA(Mainscreen.Bounds).SortFrom(Mainscreen.Center);
+  fireATPA := Self.GetFireATPA(Mainscreen.Bounds).SortFrom(Mainscreen.Center);
+  tempRects := Self.GetMSFishRectsNew();
+
+  hasWater := Inventory.ContainsItem("Bucket of water");
+
+  if CJDebugLevel = EOutputLevel.ALL then
+    RSClient.Image().Clear();
+
+  for msRect in tempRects do
+  begin
+
+    msRect := msRect.LimitTo(limitBox);
+
+    if not limitBox.Contains(msRect) then
+       continue;
+
+    if not hasWater
+      and (Length(fireATPA) > 0)
+      and msRect.Contains(fireATPA) then
+		    continue;
+
+    if (Length(stormATPA) > 0) and msRect.Contains(stormATPA) then
+      continue;
+
+    if CJDebugLevel = EOutputLevel.ALL then
+      RSClient.Image().DrawRect(msRect, clLime);
+
+    Result += msRect;
+  end;
+end;
+
+function TCJTempoross.CannonElectrified() : Boolean;
+begin
+  Result := false;
+end;
+
+function T2DPointArray.FilterRect(rect : TRectangle) : T2DPointArray;
+var
+  tpa : TPointArray;
+begin
+  for tpa in Self do
+  begin
+    tpa := tpa.FilterRectangle(rect);
+    if Length(tpa) < 1 then
+      continue;
+
+    Result += tpa;
+  end;
+end;
+
+function TCJTempoross.ScanForHazardsWalker(filterRect : TRectangle = []) : THazard;
+var
+  hazardATPA : T2DPointArray;
+begin
+  if Self.handlingHazard then
+  begin
+    Self.Debugln("Already handling hazard!", EOutputLevel.ALL);
+    Exit;
+  end;
+
+  if Self.FirePresent(hazardATPA, Mainscreen.Bounds)
+    and (Inventory.CountItem('Bucket of water') >= 1) then
+  begin
+    hazardATPA := hazardATPA.FilterRect(filterRect);
+    Result := [ETemporossHazard.FIRE, hazardATPA];
+    Exit(Result);
+  end;
+
+  if Self.IsWavePresent() then
+  begin
+    Result := [ETemporossHazard.WAVE, []];
+    Exit(Result);
+  end;
+
+  if Self.StormPresent(hazardATPA, Self.closeDangerbox) then
+  begin
+    Result := [ETemporossHazard.STORM, hazardATPA];
+    Exit(Result);
+  end;
+end;
+
+function TCJTempoross.ScanForHazards() : THazard;
+var
+  hazardATPA : T2DPointArray;
+begin
+  if Self.handlingHazard then
+  begin
+    Self.Debugln("Already handling hazard!", EOutputLevel.ALL);
+    Exit;
+  end;
+
+  if Self.FirePresent(hazardATPA)
+    and (Inventory.CountItem('Bucket of water') >= 1) then
+  begin
+    Result := [ETemporossHazard.FIRE, hazardATPA];
+    Exit(Result);
+  end;
+
+  if Self.IsWavePresent() then
+  begin
+    Result := [ETemporossHazard.WAVE, []];
+    Exit(Result);
+  end;
+
+  if Self.StormPresent(hazardATPA) then
+  begin
+    Result := [ETemporossHazard.STORM, hazardATPA];
+    Exit(Result);
+  end;
+end;
+
+function TSRL.FindColors(out TPA: TPointArray; Colors : array of TCTS2Color; Area: TBox; erodeAmount : Int32 = 0): Int32; constref; overload;
+var
+  Points: TPointArray;
+  i : Int32;
+begin
+  TPA := [];
+  for i := 0 to High(colors) do
+    if FindColors(Points, colors[i], Area) then
+    begin
+      TPA += Points;
+      if erodeAmount > 0 then
+      begin
+        TPA := TPA.Erode(erodeAmount);
+        TPA := TPA.Grow(erodeAmount + 1);
+      end;
+    end;
+
+  Result := Length(TPA);
+end;
+
+function TCJTempoross.GetDoubleFishATPA(rects : TRectArray) : T2DPointArray;
+var
+  i : Int32;
+  tpa : TPointArray;
+begin
+  for i := 0 to High(rects) do
+  begin
+    if SRL.FindColors(tpa, Self.GetDoubleFishColors(), rects[i], 1) < 1 then
+    continue;
+
+    Result += tpa.Cluster(5);
+  end;
+end;
+
+function TCJTempoross.FilterDoubleFishATPA(const passedATPA : T2DPointArray) : TPointArray;
+var
+  atpa : T2DPointArray;
+  tpa : TPointArray;
+
+begin
+
+  if Length(passedATPA) < 1 then
+    Exit;
+
+  atpa := Copy(passedATPA, 0, Length(passedATPA));
+
+  tpa := ATPA.Merge();
+  ATPA := [];
+  ATPA := tpa.Cluster(8);
+
+  ATPA.SortBySize();
+  if ATPA.Len() > 0 then
+  begin
+    Self.Debugln("Double spot size: " + ToStr(Length(ATPA[0])), EOutputLevel.ALL);
+    ATPA[0] := ATPA[0].Erode(3); //The largest one
+    Result += ATPA[0].RandomMean();
+  end;
+end;
+
+function TCJTempoross.GetSingleFishTPA(rects : TRectArray) : T2DPointArray;
+var
+  i : Int32;
+  tpa : TPointArray;
+begin
+  for i := 0 to High(rects) do
+  begin
+    if SRL.FindColors(tpa, GetSingleFishColors(), rects[i]) < 1 then
+    begin
+      continue;
+    end;
+
+    tpa := tpa.Grow(1);
+    Result += tpa.Cluster(11);
+  end;
+end;
+
+function TCJTempoross.FilterSingleFishATPA(const passedATPA : T2DPointArray) : TPointArray;
+var
+  atpa : T2DPointArray;
+  tpa : TPointArray;
+begin
+
+  if Length(passedATPA) < 1 then
+    Exit;
+
+  atpa := Copy(passedATPA, 0, Length(passedATPA));
+
+  tpa := ATPA.Merge(); //Flatten the ATPA out into indivifual things.
+  ATPA := tpa.Cluster(8); //Cluster again to merge into little pockets.
+
+  if ATPA.Len() > 0 then
+  begin
+    for tpa in ATPA do
+    begin
+      Self.Debugln("Single spot size: " + ToStr(tpa.Len()), EOutputLevel.ALL);
+      Result += tpa.Mean();
+    end;
+
+    Result.Sort(Mainscreen.Center);
+  end;
+end;
+
+//Adopted from AeroFisher. Credits to Flight.
+//Any copies or re-implementations of this "exposure" method should give credit to Flight at the minimum
+function TCJTempoross.GetFishDoubleSpot2Rects(searchTime: Int32 = 0; rects : TRectArray) : TPointArray;
+var
+  tpa : TPointArray;
+  atpa : T2DPointArray;
+  timer : TCountdown;
+  searchColors : array of TCTS2Color;
+  i : Int32;
+begin
+
+  if (Length(rects) < 1) then
+  begin
+    Self.Debugln("GetFishDoubleSpot2Rects: Empty rects array!", EOutputLevel.USER);
+    Exit;
+  end;
+
+  searchColors := Self.GetDoubleFishColors();
+
+  if searchTime > 0 then
+  begin
+    timer.Init(searchTime);
+
+    while not timer.IsFinished() do
+    begin
+      for i := 0 to High(rects) do
+      begin
+        if SRL.FindColors(tpa, searchColors, rects[i], 1) < 1 then
+          continue;
+
+        atpa += tpa.Cluster(5);
+      end;
+    end;
+
+    if atpa.Len() > 0 then
+    begin
+      tpa := ATPA.Merge();
+      ATPA := [];
+      ATPA := tpa.Cluster(8);
+
+      ATPA.SortBySize();
+      if ATPA.Len() > 0 then
+      begin
+        Self.Debugln("Double spot size: " + ToStr(Length(ATPA[0])), EOutputLevel.ALL);
+        ATPA[0] := ATPA[0].Erode(3); //The largest one
+        Result += ATPA[0].RandomMean();
+      end;
+    end;
+  end;
+end;
+
+function TCJTempoross.GetFishingSpots4Rects(searchTime: Int32 = 0; rects : TRectArray) : TPointArray;
+var
+  bubbleTPA : TPointArray;
+  T: TCountDown;
+  ATPA : T2DPointArray;
+  i : Int32;
+begin
+  if Length(rects) < 1 then
+  begin
+    Exit;
+  end;
+
+  if searchTime > 0 then
+  begin
+    T.Init(searchTime);
+    while T.TimeRemaining() > 0 do
+    begin
+      for i := 0 to High(rects) do
+      begin
+        if SRL.FindColors(bubbleTPA, Self.GetSingleFishColors(), rects[i]) < 1 then
+        begin
+          continue;
+        end;
+
+        bubbleTPA := bubbleTPA.Grow(1);
+        ATPA += bubbleTPA.Cluster(11);
+      end;
+      Wait(5);
+    end;
+
+    if ATPA.Len() > 0 then
+    begin
+      bubbleTPA := ATPA.Merge(); //Flatten the ATPA out into indivifual things.
+      ATPA := bubbleTPA.Cluster(8); //Cluster again to merge into little pockets.
+    end;
+
+    if ATPA.Len() > 0 then
+    begin
+      for bubbleTPA in ATPA do
+      begin
+        Self.Debugln("Single spot size: " + ToStr(bubbleTPA.Len()), EOutputLevel.ALL);
+        Result += bubbleTPA.Mean();
+      end;
+
+      Result.Sort(Mainscreen.Center);
+    end;
+
+    Exit(Result);
+  end;
+end;
+
+function TCJTempoross.GetFishingSpots(var fishParams : TFishSearchParams; rects : TRectArray) : Boolean;
+var
+  T: TCountDown;
+  doubleATPA, singleATPA : T2DPointArray;
+begin
+  if Length(rects) < 1 then
+  begin
+    Exit;
+  end;
+
+  if fishParams.searchTime > 0 then
+  begin
+    T.Init(fishParams.searchTime);
+    while T.TimeRemaining() > 0 do
+    begin
+      if fishParams.findDouble then
+        doubleATPA += Self.GetDoubleFishATPA(rects);
+
+      if fishParams.findSingle then
+        singleATPA += Self.GetSingleFishTPA(rects);
+
+      Wait(5);
+    end;
+
+    if fishParams.findDouble then
+    begin
+      fishParams.doubleTPA := Self.FilterDoubleFishATPA(doubleATPA);
+
+      if Length(fishParams.doubleTPA) > 0 then
+        Exit(true);
+    end;
+
+    if fishParams.findSingle then
+    begin
+      fishParams.singleTPA := Self.FilterSingleFishATPA(singleATPA);
+
+      if Length(fishParams.singleTPA) > 0 then
+        Exit(true);
+    end;
+  end;
+end;
+
+//Easy replacements instead of every occurrence.
+function TCJTempoross.DoubleSpotWrapper(searchTime: Int32 = 0; fishRects : TRectArray) : TPointArray;
+begin
+    Result := Self.GetFishDoubleSpot2Rects(searchTime, fishRects);
+end;
+
+function TCJTempoross.GetSingleSpotWrapper(searchTime: Int32 = 0; fishRects : TRectArray) : TPointArray;
+begin
+	Result := Self.GetFishingSpots4Rects(searchTime, fishRects)
+end;
+
+function TCJTempoross.IsOnNorthSide() : boolean;
+const
+  NORTH_SHIP_BOX : TBox := [7522, 4493, 7550, 4572];
+begin
+  Result := NORTH_SHIP_BOX.Contains(RSW.GetMyPos());
+end;
+
+function TCJTempoross.GetFishingUptext() : TStringArray;
+begin
+  Result := ['arp', 'poo', 'ish', 'ng spot', 'ot'];
+end;
+
+function TCJTempoross.ConfirmUptext(textToCheck : TStringArray) : Boolean;
+const
+  TEXT_COLOR : TCTS0Color := CTS0(1298381, 19); //Yellow Action text
+var
+  tpa : TPointArray;
+begin
+  Result := (SRL.FindColors(tpa, TEXT_COLOR, MainScreen.UpTextArea) > 0)
+             and (Mainscreen.IsUpText(textToCheck));
+end;
+
+function TCJTempoross.ClickFishingSpot(spots : TPointArray; out spotIndex : Int32) : Boolean;
+var
+  i, j : Int32;
+  fireATPA, fireClickATPA : T2DPointArray;
+  pathRect : TRectangle;
+begin
+  if CJDebugLevel = EOutputLevel.ALL then
+    RSClient.Image().Clear();
+
+  if spots.Len() < 1 then
+    Exit(false);
+
+  for i := 0 to High(spots) do
+  begin
+    if spots[i] = Point(0, 0) then
+      continue;
+
+    Mouse.Move(spots[i]);
+
+    fireATPA := Self.GetFireATPA(Mainscreen.Bounds);
+
+    if Self.ConfirmUptext(Self.GetFishingUptext()) then
+    begin
+      Self.Debugln("ClickFishingSpot!", EOutputLevel.USEFUL);
+
+      if Length(fireATPA) > 0 then
+      begin
+        pathRect := pathRect.RectFromLine(Mainscreen.Center, spots[i], Mainscreen.NormalizeDistance(180));
+
+        if CJDebugLevel = EOutputLevel.ALL then
+          RSClient.Image().DrawRect(pathRect, CHAT_COLOR_BLUE);
+
+        //Get fires along path
+        fireClickATPA := fireATPA.FilterRect(pathRect);
+
+        for j := 0 to High(fireATPA) do
+        begin
+          if (fireATPA[j].Mean().DistanceTo(Mouse.Position()) < Mainscreen.NormalizeDistance(80))
+            and not fireClickATPA.Contains(fireATPA[j]) then
+              fireClickATPA += fireATPA[j];
+        end;
+
+        if CJDebugLevel = EOutputLevel.ALL then
+          RSClient.Image().DrawATPA(fireClickATPA);
+
+        if fireClickATPA.Len() > 0 then
+        begin
+
+          if Self.isCooking then
+          begin
+            Self.Debugln("Cooking! Exiting before clicking", EOutputLevel.USEFUL);
+            Exit(false);
+          end;
+
+          Self.Debugln("Fire on route!", EOutputLevel.USEFUL);
+          Self.HandleFire(fireClickATPA);
+          Exit(false);
+        end;
+      end;
+
+      Mouse.Click(MOUSE_LEFT);
+      if Mainscreen.DidRedClick(350) then
+      begin
+        Self.Debugln("ClickFishingSpot: Spot clicked!", EOutputLevel.USEFUL);
+        spotIndex := i;
+        Exit(true);
+      end;
+    end
+    else
+      Writeln("Fish uptext was: ", Mainscreen.GetUpText());
+  end;
+end;
+
+function TCJTempoross.FindEitherColour(primary, secondary : TCTS2Color; searchBox : TBox) : boolean;
+var
+  pTPA, sTPA : TPointArray;
+begin
+  Result := (SRL.FindColors(pTPA, primary, searchBox) > 1) or (SRL.FindColors(sTPA, secondary, searchBox) > 1);
+end;
+
+function TCJTempoross.IsGameRunning() : boolean;
+const
+  ENERGY_BLUE : TCTS2Color := CTS2(15916832, 10, 0.01, 1.18);
+  ESSENCE_GREEN : TCTS2Color := CTS2(3134061, 11, 0.60, 3.44);
+  INTENSITY_WHITE : TCTS2Color := CTS2(14737632, 3, 0.01, 0.01);
+
+  ENERGY_OTHER : TCTS2Color := CTS2(10789243, 10, 0.03, 0.15);
+  ESSENCE_OTHER : TCTS2Color := CTS2(1579241, 11, 0.01, 1.65);
+  INTENSITY_OTHER : TCTS2Color := CTS2(11250603, 7, 0.01, 0.01);
+begin
+  //Check for the UI elements
+  Result := Self.FindEitherColour(ENERGY_BLUE, ENERGY_OTHER, ENERGY_BOX)
+            and Self.FindEitherColour(ESSENCE_GREEN, ESSENCE_OTHER, ESSENCE_BOX)
+            and Self.FindEitherColour(INTENSITY_WHITE, INTENSITY_OTHER, INTENSITY_BOX);
+end;
+
+function TCJTempoross.GetIntensity()  : Int32;
+var
+  ocrFilter: TOCRColorFilter := TOCRColorFilter.Create([CHAT_COLOR_BLACK], [20]);
+  text: string;
+begin
+  text := OCR.Recognize(INTENSITY_BOX, ocrFilter, RS_FONT_PLAIN_11);
+  Result := text.ExtractNumber();
+end;
+
+function GetBossEnergy() : Int32;
+const
+  BAR_COL : TCTS2Color := CTS2(15916832, 10, 0.01, 1.18);
+var
+  tpa : TPointArray;
+  ocrFilter: TOCRColorFilter;
+  text: string;
+  boxPercent : Int32;
+begin
+  if SRL.FindColors(tpa, BAR_COL, ENERGY_BOX) < 1 then
+    Exit(0);
+
+  tpa.SortByX(false);
+  text := OCR.Recognize(ENERGY_BOX, ocrFilter, RS_FONT_PLAIN_11);
+  Result := text.ExtractNumber();
+  boxPercent := Round(100 * (tpa[0].X - ENERGY_BOX.X1 + 1) div (ENERGY_BOX.X2 - 1 - ENERGY_BOX.X1));
+
+  //Handle the case where we clicked on something and the X would overlap on our bar.
+   if not InRange(Result, boxPercent - 3, boxPercent + 3) then
+    Result := boxPercent;
+end;
+
+function TCJTempoross.GetBossEnergy() : Int32;
+var
+  ocrFilter: TOCRColorFilter := TOCRColorFilter.Create([CHAT_COLOR_BLACK], [20]);
+  text: string;
+begin
+  text := OCR.Recognize(ENERGY_BOX, ocrFilter, RS_FONT_PLAIN_11);
+  Result := text.ExtractNumber();
+end;
+
+function TCJTempoross.GetBossHealth() : Int32;
+var
+  ocrFilter: TOCRColorFilter := TOCRColorFilter.Create([CHAT_COLOR_BLACK], [20]);
+  text: string;
+begin
+  text := OCR.Recognize(ESSENCE_BOX, ocrFilter, RS_FONT_PLAIN_11);
+  Result := text.ExtractNumber();
+end;
+
+function TCJTempoross.OnBoat() : Boolean;
+const
+  BOAT_COLOUR : TCTS2Color := CTS2(5265754, 2, 1.84, 2.05);
+  BOAT_BOX : TBox := [7911, 5059, 7933, 5131];
+begin
+  Result := BOAT_BOX.Contains(Self.RSW.GetMyPos());
+end;
+
+function TCJTempoross.OnGameBoat() : Boolean;
+const
+  BOAT_COLOUR : TCTS2Color :=   CTS2(2782859, 1, 0.01, 0.01);
+var
+  boatTPA : TPointArray;
+
+begin
+  if SRL.FindColors(boatTPA, BOAT_COLOUR, Minimap.Bounds) < 1 then
+    Exit;
+
+  Result := boatTPA.Bounds().Contains(Minimap.Center);
+end;
+
+procedure TCJTempoross.SetupGameObjectLocations();
+const
+  NORTH_FISHING_BOX : TBox := [7527, 4426, 7611, 4481];
+  SOUTH_FISHING_BOX : TBox := [7521, 4584, 7605, 4645];
+
+  NORTH_SIDE_GAME_AREA : TBoxArray := [ [7514, 4420, 7608, 4523], [7515, 4487, 7563, 4586] ];
+  SOUTH_SIDE_GAME_AREA : TBoxArray := [ [7513, 4592, 7606, 4649 ], [7558, 4541, 7666, 4598 ], [7608, 4494, 7660, 4590]];
+var
+  gameArea : TBoxArray;
+
+begin
+  if Self.isNorthSide then
+  begin
+    Self.currFishingArea := NORTH_FISHING_BOX;
+    gameArea := NORTH_SIDE_GAME_AREA;
+    Self.fishBoxLocations := [Point(7596, 4474), Point(7543, 4460), Point(7584, 4444)];
+    Self.fishingWalkpath := [[7573, 4473], [7581, 4461], [7561, 4459], [7577, 4471]];
+  end
+  else
+  begin
+    Self.currFishingArea := SOUTH_FISHING_BOX;
+    gameArea := SOUTH_SIDE_GAME_AREA;
+    Self.fishBoxLocations := [Point(7539, 4596), Point(7585, 4620), Point(7577, 4628)];
+    Self.fishingWalkpath := [[7553, 4611], [7573, 4619], [7561, 4595], [7569, 4615]];
+  end;
+
+  RSObjects.TemporossMasts.Coordinates := gameArea.Filter(Self.cachedMastCoords);
+  RSObjects.TemporossTotems.Coordinates := gameArea.Filter(Self.cachedTotemCoords);
+  RSObjects.TemporossShrines.Coordinates := gameArea.Filter(Self.cachedShrineCoords);
+  RSObjects.TemporossCrates.Coordinates := gameArea.Filter(Self.cachedCrateCoords);
+  RSObjects.TemporossRopes.Coordinates := gameArea.Filter(Self.cachedRopeCrateCoords);
+  RSObjects.TemporossHammers.Coordinates := gameArea.Filter(Self.cachedHammerCrateCoords);
+  RSObjects.TemporossHarpoons.Coordinates := gameArea.Filter(Self.cachedHarpoonCrateCoords);
+  RSObjects.TemporossBuckets.Coordinates := gameArea.Filter(Self.cachedBucketCrateCoords);
+  RSObjects.TemporossPump.Coordinates := gameArea.Filter(Self.cachedPumpCoords);
+  RSObjects.TemporossPools.Coordinates := gameArea.Filter(Self.cachedTemporossPoolCoords);
+end;
+
+procedure TCJTempoross.FillBuckets();
+var
+  numBuckets, bucketCount, waterBucketCount : Int32;
+  bucketSlots : TIntegerArray;
+  delIndex : Int32;
+  fillTimeout : TCountdown;
+begin
+  waterBucketCount := Inventory.CountItem('Bucket of water');
+
+  if waterBucketCount >= CJTempReqBuckets then
+    Exit;
+
+  bucketCount := Inventory.CountItem('Bucket');
+  numBuckets := CJTempReqBuckets - bucketCount - waterBucketCount;
+
+  //Check if we got too many buckets already.
+  if((bucketCount + waterBucketCount) > CJTempReqBuckets) then
+  begin
+    if Inventory.FindItem('bucket', bucketSlots) then
+      if Inventory.ShiftDrop([bucketSlots[0]]) then
+        Self.Debugln("Dropped extra bucket", EOutputLevel.USER);
+
+    Dec(numBuckets);
+  end;
+
+  fillTimeout.Init(15000);
+
+  numBuckets := Min(Min(CJTEMPReqBuckets, Inventory.CountEmptySlots()), numBuckets);
+
+  while (numBuckets >= 1)
+        and (not fillTimeout.IsFinished()) do
+  begin
+    Self.Debugln("Getting buckets: " + ToStr(numBuckets), EOutputLevel.USEFUL);
+    if not RSObjects.TemporossBuckets.WalkClick() then
+    begin
+      Self.Debugln("Couldn't click buckets, breaking this loop", EOutputLevel.USEFUL);
+      break;
+    end;
+
+    if WaitUntil(Inventory.CountItem('Bucket') > bucketCount, 200, 4400) then
+    begin
+      Inc(bucketCount);
+      Dec(numBuckets);
+    end;
+  end;
+
+  if Inventory.CountItem('Bucket') > 0 then
+  begin
+    Self.Debugln("Filling buckets", EOutputLevel.ALL);
+    if RSObjects.TemporossPump.WalkClick() then
+      WaitUntil(Inventory.CountItem('Bucket') < 1, 250, 4500);
+  end;
+
+  numBuckets := Inventory.CountItem('Bucket of water');
+
+  if numBuckets > CJTempReqBuckets then
+  begin
+    Inventory.FindItem('Bucket of water', bucketSlots);
+
+    if Length(bucketSlots) < 1 then
+      Exit;
+
+    delIndex := High(bucketSlots);
+    while (numBuckets > CJTempReqBuckets)
+           and (not fillTimeout.IsFinished()) do
+    begin
+      if Inventory.ShiftDrop([bucketSlots[delIndex]]) then
+      begin
+        numBuckets := Inventory.CountItem('Bucket of water');
+        delIndex := Max(0, delIndex - 1);
+      end;
+    end;
+  end;
+end;
+
+function TCJTempoross.GetTool(tool : TRSItem; clickObject : TRSObject; attempts : Int32 = 3) : Boolean;
+var
+  i : Int32;
+begin
+  if Inventory.ContainsItem(tool) then
+    Exit(true);
+
+  Self.Debugln("GetTool: Getting " + ToStr(tool), EOutputLevel.USER);
+  for i := 0 to attempts do
+  begin
+    if clickObject.WalkClick()
+      and WaitUntil(Inventory.ContainsItem(tool), 100, 4200) then
+        Exit(True)
+    else
+      Antiban.SmallCameraRotation();
+  end;
+end;
+
+procedure TCJTempoross.HandleTools();
+var
+  fishCount : Int32;
+begin
+
+  fishCount := Inventory.CountItem("Raw harpoonfish");
+  fishCount += Inventory.CountItem("Harpoonfish");
+
+  if CJTempHarpoonType = EHarpoonType.CRYSTAL_HARPOON then
+    fishCount += Inventory.CountItem("Crystallised harpoonfish");
+
+  //Get required tools but if we needed to, then we should consider also loading
+
+  if CJTempNeedRope
+    and Self.GetTool('Rope', RSObjects.TemporossRopes)
+    and (fishCount >= 5) then
+      Self.isLoading := true;
+
+  if CJTempNeedHammer
+    and Self.GetTool('Hammer', RSObjects.TemporossHammers)
+    and (fishCount >= 5) then
+      Self.isLoading := true;
+
+  Self.FillBuckets();
+end;
+
+function TCJTempoross.GetPlayerHUDCount() : Int32;
+const
+  SEARCH_BOX : TBox = [63, 53, 77, 67];
+var
+  time : string;
+begin
+  Result := -1;
+  time := OCR.Recognize(SEARCH_BOX, TOCRColorFilter.Create([16777215], [1]), RS_FONT_PLAIN_12);
+
+  if time.ContainsAny(["None", ""]) then
+    Exit(Result);
+
+  Result := StrToIntDef(time.Explode(" ")[0], -1);
+end;
+
+function TCJTempoross.GetDepartureTime() : Int32;
+const
+  SEARCH_BOX : TBox = [23, 88,119, 103];
+var
+  time : string;
+begin
+  time := OCR.Recognize(SEARCH_BOX, TOCRColorFilter.Create([16777215], [1]), RS_FONT_PLAIN_12);
+
+  if time.Contains("wait") then
+    Exit(-1);
+
+  Result := StrToIntDef(time.Explode(" ")[0], -1);
+end;
+
+function TCJTempoross.GetOnShipEnoughPlayers() : Boolean;
+begin
+  Result := (Self.GetPlayerHUDCount() > 4)
+             and RSObjects.UnkahShipRopeLadder.WalkClick()
+             and WaitUntil(Self.OnBoat(), 150, 10000);
+end;
+
+function TCJTempoross.FindTravelIcon() : Boolean;
+const
+  BORDER_COL : TCTS2Color := CTS2(1861341, 3, 0.01, 0.01);
+  INSIDE_COL : TCTS2Color := CTS2(5727550, 6, 0.39, 0.58);
+var
+  borderTPA, insideTPA : TPointArray;
+  atpa : T2DPointArray;
+  mmBounds : TBox := Minimap.Bounds;
+begin
+  if SRL.FindColors(borderTPA, BORDER_COL, mmBounds) < 1 then
+    Exit(false);
+  if SRL.FindColors(insideTPA, INSIDE_COL, mmBounds) < 1 then
+    Exit(false);
+
+  atpa := borderTPA.Combine(insideTPA).Cluster(4);
+  Result := Length(atpa) > 0;
+end;
+
+procedure TCJTempoross.InitialiseSide();
+begin
+  Self.areGameObjectsSet := true;
+  Self.isNorthSide := Self.IsOnNorthSide();
+  Self.isGameStarted := true;
+  Self.Debugln("Are we north side? " + ToStr(Self.isNorthSide), EOutputLevel.USEFUL);
+  Self.SetupGameObjectLocations();
+  Self.noXPTimer.Init(85000);
+end;
+
+procedure TCJTempoross.HandleGameStart();
+var
+  timeout : TCountdown;
+  boatPump : TRSObject;
+  canFillBuckets : Boolean;
+begin
+
+  Self.ResetGame();
+
+  if not Self.OnBoat() then
+  begin
+
+    if Chat.HasContinue()
+      and not Self.IsGameRunning()
+      and RSRegions.TEMPOROSS_COVE.Contains(Self.RSW.GetMyPos()) then
+    begin
+      Self.Debugln("We're stuck in the minigame, exiting via NPC!", EOutputLevel.USER);
+      if RSNpcs.SpiritAngler.WalkSelectOption(['eave', 'orfeit'], 2)
+        and WaitUntil(Self.FindTravelIcon(), 300, 30000) then
+      begin
+        Self.Debugln("Exited game, not enough players", EOutputLevel.USER);
+        Exit;
+      end;
+    end;
+
+    //Pause the running timer because this is going to lose some time.
+    Self.actualXPTimer.Pause();
+
+    if not Self.GetOnShipEnoughPlayers() then
+    begin
+
+      if not Self.RSW.AtTile(RSObjects.UnkahShipRopeLadder.Coordinates[0], 15)
+        and not Self.RSW.WebWalk(RSObjects.UnkahShipRopeLadder.Coordinates[0], 15) then
+        begin
+          Self.Debugln("Couldn't get to ship!", EOutputLevel.USEFUL);
+          Exit;
+        end;
+
+      Antiban.DoAntiban(false, false);
+
+      if Self.GetPlayerHUDCount() = -1 then
+      begin
+        Self.Debugln("Player count is invalid!", EOutputLevel.USEFUL);
+        Exit;
+      end;
+
+      if not WaitUntil(Self.GetPlayerHUDCount() > 4, 400, 30000) then
+      begin
+        Self.Debugln("Player count not found after 30 seconds!", EOutputLevel.USEFUL);
+        Exit;
+      end;
+
+      if not RSObjects.UnkahShipRopeLadder.Click(true, 2) then
+      begin
+        Self.Debugln("Couldn't click ladder!", EOutputLevel.USEFUL);
+        Exit;
+      end;
+
+      if not WaitUntil(Self.OnBoat(), 150, 10000) then
+      begin
+        Self.Debugln("In place, clicked ladder, didn't get onto boat after 10 seconds!", EOutputLevel.USEFUL);
+        Exit;
+      end;
+    end;
+  end;
+
+  Self.actualXPTimer.Resume();
+  Self.Debugln("On boat, waiting for game start", EOutputLevel.USER);
+
+  canFillBuckets := Inventory.ContainsItem("Bucket") and (Self.GetDepartureTime() >= 10);
+
+  if canFillBuckets then
+  begin
+    BoatPump.Finder := RSObjects.TemporossPump.Finder;
+    BoatPump.SetupEx([0.7, 0.7, 4], [[7933, 5120]]);
+  end;
+
+  timeout.Init(Random(33000, 40000));
+  while not Self.IsGameRunning() and not timeout.IsFinished() do
+  begin
+    if canFillBuckets and Inventory.ContainsItem("Bucket") then
+    begin
+      BoatPump.WalkClick();
+      WaitUntil(not Inventory.ContainsItem("Bucket"), 400, 5000);
+      canFillBuckets := false;
+    end;
+
+    Antiban.DoAntiban(false, false);
+    Wait(300);
+  end;
+
+  if timeout.IsFinished() then
+  begin
+    Self.Debugln("Boat game started has timed out!", EOutputLevel.USEFUL);
+    Exit;
+  end;
+
+  if Length(Minimap.GetDots([ERSMinimapDot.PLAYER])) <= 2 then
+  begin
+    if RSNpcs.SpiritAngler.WalkSelectOption(['eave', 'orfeit'], 2)
+      and WaitUntil(Self.FindTravelIcon(), 300, 30000) then
+    begin
+      Self.Debugln("Exited game, not enough players", EOutputLevel.USER);
+      Exit;
+    end;
+  end;
+
+  Self.InitialiseSide();
+  Self.HandleTools();
+end;
+
+function TCJTempoross.GetTetherObject() : TRSObject;
+var
+  myPos : TPoint;
+  distTotem, distMast : Double;
+begin
+  myPos := Self.RSW.GetMyPos();
+  distTotem := RSObjects.TemporossTotems.Coordinates[0].DistanceTo(myPos);
+  distMast := RSObjects.TemporossMasts.Coordinates[0].DistanceTo(myPos);
+
+  //Alter the distances during state navigation so we don't get caught in the middle.
+  if Self.state = EScriptState.FISHING then
+    distTotem -= 25
+  else if Self.state = EScriptState.LOADING_FISH then
+    distMast -= 25;
+
+  if distTotem < distMast then
+    Result := RSObjects.TemporossTotems
+  else
+    Result := RSObjects.TemporossMasts;
+end;
+
+function TCJTempoross.TetherObjectNeedsRepairs(tetherObject : TRSObject) : Boolean;
+const
+  MAST_BOX : TBox := [190, 54, 264, 140];
+var
+  tetherDTM, x, y : Int32;
+
+begin
+
+  if Self.isNorthSide then
+  begin
+    if tetherObject.UpText.Contains('mast') then
+      tetherDTM := DTMFromString('mLgAAAHicY2JgYLgExC+AOA6I44H4PxBPnjKBAQYYoZiBAQCbCAUy') //WEST
+    else
+      tetherDTM := DTMFromString('mLgAAAHicY2JgYHgBxM+B2AWII4H4PxCvWLmcAQYYoZiBAQCfqQVo'); //NORTH
+  end
+  else
+  begin
+    if tetherObject.UpText.Contains('mast') then
+      tetherDTM := DTMFromString('mLgAAAHicY2JgYPgLxC+AOB6IY4H4PxDPnj2NAQYYoZiBAQCjtwVx') //EAST
+    else
+      tetherDTM := DTMFromString('mLgAAAHicY2JgYHgBxVVAHA/E/4F48pQJDDDACMUMDACiXAVk'); //SOUTH
+  end;
+
+  Result := FindDTM(tetherDTM, x, y, MAST_BOX);
+  FreeDTM(tetherDTM);
+end;
+
+function TCJTempoross.UnTether() : Boolean;
+var
+  message : string;
+  tetherObject : TRSObject;
+  ATPA : T2DPointArray;
+
+begin
+  message := Chat.GetMessage(7, [CHAT_COLOR_BLACK]);
+
+  if message.Contains("I can't reach") or message.Contains("You must untether") then
+  begin
+    tetherObject := Self.GetTetherObject();
+    Self.Debugln("Fixing tether", EOutputLevel.USEFUL);
+
+    if not tetherObject.Find(ATPA) then
+      Exit;
+
+    message := Mainscreen.GetUpText();
+
+    while not message.ContainsAny(tetherObject.UpText) do
+    begin
+      Mouse.Move(atpa[Random(0, High(atpa))].RandomMean());
+      message := Mainscreen.GetUpText();
+    end;
+
+    Mouse.Click(MOUSE_LEFT);
+    Result := WaitUntil(Chat.GetMessage(7, [CHAT_COLOR_BLACK]).Contains("You untether yourself"), 100, 4000);
+  end;
+end;
+
+procedure TCJTempoross.TetherPlayer();
+var
+  tetherObject : TRSObject;
+  tetherTImer : TCountdown;
+  dist, lastDist : Double;
+begin
+
+  tetherObject := Self.GetTetherObject();
+  Self.WaveTimer.Init(25000);
+  Self.Debugln("TETHER ATTEMPT", EOutputLevel.USEFUL);
+  tetherTimer.Init(10300);
+
+  //Cache our current distance.
+  lastDist := Self.RSW.GetMyPos().DistanceTo(tetherObject.Coordinates[0]);
+
+  //Try to tether, if it fails try again. Could have failed due to fire.
+  if tetherObject.WalkClick(true, 2) then
+    Wait(Random(1200, 1600))
+  else
+  begin
+    tetherObject.WalkClick(true, 2);
+    Wait(Random(1200, 1600))
+  end;
+
+  if Self.isFishing then
+    XPBar.EarnedXP(true)
+  else
+    XPBar.EarnedXP(false);
+
+  while not Chat.GetMessage(7, [CHAT_COLOR_BLACK]).Contains("securely")
+        and not tetherTimer.IsFinished() do
+  begin
+    if Chat.GetMessage(7, [CHAT_COLOR_BLACK, 723923]).Contains("to the waves") then
+    begin
+      Self.Debugln("TETHER: Hit by waves", EOutputLevel.USEFUL);
+      Exit;
+    end;
+
+    dist := Self.RSW.GetMyPos().DistanceTo(tetherObject.Coordinates[0]);
+    Self.Debugln("TETHER: dist: " + ToStr(dist) + " lastDist: " + ToStr(lastDist), EOutputLevel.ALL);
+    if (dist >= lastDist) then
+    begin
+      Self.Debugln("TETHER: DID NOT MOVE!", EOutputLevel.ALL);
+      if (dist <= 6.5) then //If we're close
+      begin
+        if XPBar.EarnedXP() then
+        begin
+          if tetherObject.WalkClick()
+            and WaitUntil(Chat.GetMessage(7, [CHAT_COLOR_BLACK]).Contains("securely"), 200, 2400) then
+            break;
+        end
+        else if WaitUntil(Chat.GetMessage(7, [CHAT_COLOR_BLACK]).Contains("securely"), 200, 3500) then
+        begin
+          Self.Debugln("TETHER: TETHERED WHILE CLOSE!", EOutputLevel.ALL);
+          break;
+        end;
+      end;
+
+      //Surely it doesn't break twice right?
+      if tetherObject.Hover()
+        and not Mainscreen.GetUpText().Contains("ntet")
+        and not Chat.GetMessage(7, [CHAT_COLOR_BLACK]).Contains("securely")
+        and tetherObject.WalkClick()
+        and WaitUntil(Chat.GetMessage(7, [CHAT_COLOR_BLACK]).Contains("securely"), 400, 6000) then
+      begin
+        Self.Debugln("TETHER: FROM SECOND CLICK!", EOutputLevel.ALL);
+        break;
+      end;
+
+      //tetherObject.WalkClick();
+      //Self.Debugln("TETHER: CLICKING AGAIN!", EOutputLevel.ALL);
+    end;
+
+    lastDist := dist;
+    Wait(800, 1400);
+  end;
+
+  Self.Debugln("TETHER: TETHERED NOW!", EOutputLevel.USEFUL);
+
+  if not WaitUntil(Chat.GetMessage(7, [CHAT_COLOR_BLACK]).Contains("untet"), 100, tetherTimer.TimeRemaining()) then
+  begin
+
+    //Safeties so we don't have it happen again.
+    if ChatButtons.GetState(ERSChatButton.GAME_CHAT) <> ERSChatButtonState.ENABLED then
+      ChatButtons.ChangeState(ERSChatButton.GAME_CHAT, ERSChatButtonState.ENABLED);
+
+    if not ChatButtons.IsActive(ERSChatButton.GAME_CHAT) then
+      ChatButtons.Open(ERSChatButton.GAME_CHAT);
+
+    if Chat.FindMessage("securely tether", [CHAT_COLOR_BLACK])
+      and tetherObject.Click() then
+        WaitUntil(Chat.GetMessage(7, [CHAT_COLOR_BLACK]).Contains("untet"), 150, 3500);
+
+    Self.Debugln("TETHER: UNTETHERED probably", EOutputLevel.USEFUL);
+    Exit;
+  end;
+
+  if (Random(0, 20) > 7)
+    and (not CJTempNeedHammer or Inventory.ContainsItem("Hammer"))
+     and Self.TetherObjectNeedsRepairs(tetherObject)
+     and tetherObject.Click(true) then
+  begin
+    Self.Debugln("Repairing!", EOutputLevel.USEFUL);
+    WaitUntil(XPBar.EarnedXP(), 250, 3800);
+  end;
+
+  Self.Debugln("Wave handled", EOutputLevel.USEFUL);
+end;
+
+procedure TCJTempoross.HandleFire(passedATPA : T2DPointArray);
+var
+  numBuckets, i : Int32;
+  fireHovered : Boolean;
+  upT : string;
+  atpa : T2DPointArray;
+begin
+  Self.Debugln("Handling fire", EOutputLevel.USEFUL);
+
+  if passedATPA.Len() < 1 then
+  begin
+    atpa := Self.GetFireATPA(Mainscreen.Bounds); //Get all the fires.
+    if atpa.Len() < 1 then
+    begin
+      Self.Debugln("FireATPA still empty?", EOutputLevel.USER);
+      Exit;
+    end;
+  end
+  else
+    atpa := passedATPA;
+
+  atpa := atpa.SortFrom(Mainscreen.Center);
+
+  numBuckets := Inventory.CountItem('Bucket of Water');
+
+  if numBuckets < 1 then
+  begin
+    Self.Debugln("We don't have any buckets! Exiting", EOutputLevel.USER);
+    Exit;
+  end;
+
+  Mouse.Teleport(atpa[0].Mean());
+
+  fireHovered := Mainscreen.IsUpText(['ous', 'ir', 're']);
+
+  if not fireHovered then
+    for i := 0 to Max(High(atpa[0]), 10) do
+    begin
+      upT := Mainscreen.GetUpText();
+
+      if upT.ContainsAny(['ous', 'ir', 're']) then
+      begin
+        fireHovered := true;
+        break;
+      end;
+
+      Mouse.Move(atpa[0][i]);
+    end;
+
+  if fireHovered then
+  begin
+    Mouse.Click(MOUSE_LEFT);
+    if Mainscreen.DidRedClick(300) then
+    begin
+      if WaitUntil(Inventory.CountItem('Bucket of Water') < numBuckets, 200, Random(1733, 2584)) then
+      begin
+        numBuckets -= 1;
+        Self.Debugln("Doused a fire!", EOutputLevel.ALL);
+      end;
+    end;
+  end;
+
+  if Self.isFishing then
+    XPBar.EarnedXP(true);
+
+  Self.Debugln("Fire handled", EOutputLevel.USEFUL);
+end;
+
+function TCJTempoross.WalkToStormFreeTile(stormATPA : T2DPointArray) : Boolean;
+var
+  msTiles, validTiles : TRectArray;
+  lastPos : TPoint;
+  i, j : Integer;
+begin
+
+   msTiles := Self.GetMSWalkGrid(2);
+
+  for i := 0 to High(msTiles) do
+  begin
+    for j := 0 to High(stormATPA) do
+    begin
+      if msTiles[i].Contains(stormATPA[j]) then
+        continue;
+
+      validTiles += msTiles[i];
+    end;
+  end;
+
+  validTiles.Shuffle();
+
+  for i := 0 to High(validTiles) do
+  begin
+    Mouse.Move(validTiles[i].Bounds());
+    if Mainscreen.IsUpText(['Walk', 'alk here', 'ere']) then
+    begin
+      lastPos := Self.RSW.GetMyPos();
+      Mouse.Click(MOUSE_LEFT);
+      Wait(1200, 1600);
+
+      if lastPos.InRange(Self.RSW.GetMyPos(), 1) then
+      begin
+        Self.Debugln("Had to click safe spot again!!", EOutputLevel.ALL);
+        Mouse.Click(MOUSE_LEFT);
+      end;
+
+      Exit(true);
+    end;
+  end;
+end;
+
+procedure TCJTempoross.HandleStorm(stormATPA : T2DPointArray = []);
+var
+  tempTPA : TPointArray;
+  searchArea : TBox;
+  i, j, spotIndex : Int32;
+  waveInterrupt : Boolean;
+  otherCrate : TRSObject;
+
+begin
+
+  Self.Debugln("Handling storm!", EOutputLevel.USEFUL);
+
+  XPBar.EarnedXP(false);
+
+  if not Self.isLoading
+    and ((Self.state = EScriptState.FISHING)
+          or (Self.state = EScriptState.HANDLING_HAZARD)) then
+  begin
+    //Get the storms on the mainscreen.
+    if stormATPA = [] then
+      stormATPA := Self.GetStormATPA(Mainscreen.Bounds);
+
+    //if we have less than 6 raw fish we should just find a spot that doesn't have a storm near it.
+    if not CJTempCook or (Inventory.CountItem("Raw harpoonfish") < 6) then
+    begin
+      tempTPA := Self.GetSingleSpotWrapper(200, Self.GetMSFishRects(Mainscreen.Bounds));
+
+      Self.Debugln("Storm handle: Attempting to find fish spot", EOutputLevel.ALL);
+      //If there's spots then find the first one that's far from a storm.
+      if tempTPA.Len() > 0 then
+      begin
+        for i := 0 to High(stormATPA) do
+        begin
+          searchArea := stormATPA[i].Bounds.Expand(35);
+          for j := 0 to High(tempTPA) do
+          begin
+            if searchArea.Contains(tempTPA[j]) then
+              continue;
+
+            if not Self.ClickFishingSpot([tempTPA[j]], spotIndex) then
+              continue;
+
+            Self.Debugln("Clicked fishing spot from storm state!", EOutputLevel.USEFUL);
+
+            if WaitUntil(XPBar.EarnedXP(true), 100, 9000) then
+            begin
+              Self.isFishing := true;
+              break;
+            end;
+          end;
+        end;
+      end;
+
+      //If we failed to get to a fish spot then get the grid and click a tile that doesn't have a shadow
+      if not Self.isFishing then
+      begin
+        Self.Debugln("Didn't find a fish spot, doing a regular move instead.", EOutputLevel.USEFUL);
+
+        if Self.WalkToStormFreeTile(stormATPA)
+           and WaitUntil(Self.FirePresent(stormATPA, Mainscreen.Bounds) or (waveInterrupt := Self.IsWavePresent()), 100, 10500) then
+        begin
+          if not waveInterrupt then  //Rare case where we false positived on the shadow produced when a fire tries to spread.
+            Self.HandleFire(stormATPA)
+          else
+            Self.TetherPlayer();
+        end;
+      end;
+    end
+    else
+      if RSObjects.TemporossShrines.WalkClick(true, 3) then
+      begin
+        Self.Debugln("Storm Handler, going to shrine to cook", EOutputLevel.USEFUL);
+        Self.isCooking := true;
+      end;
+
+    Self.Debugln("Storm handler: Fishing state handled", EOutputLevel.USEFUL);
+    Exit;
+  end;
+
+  if (Self.state = EScriptState.COOKING)
+    or Self.isCooking then
+  begin
+    Self.Debugln("Handling storm in cooking state", EOutputLevel.USEFUL);
+
+    if Inventory.CountItem("Raw harpoonfish") > 3 then
+      if RSObjects.TemporossShrines.WalkClick(true, 3) then
+      begin
+        Self.isCooking := true;
+        Exit;
+      end;
+
+    if Inventory.IsFull() then
+      Exit;
+
+    if Self.WalkToStormFreeTile(stormATPA)
+      and WaitUntil(Self.FirePresent(stormATPA, Mainscreen.Bounds), 100, 10500) then
+    begin
+      Self.HandleFire(stormATPA);
+      Exit;
+    end;
+  end;
+
+  //If we're loading and there's a storm on us then we should go to the other crate.
+  if Self.isLoading then
+  begin
+    Self.Debugln("Handling LOADING state, switching crate", EOutputLevel.USER);
+
+    otherCrate := RSObjects.TemporossCrates;
+
+    repeat
+      Antiban.SmallRandomMouse();
+    until not Mainscreen.IsUpText(otherCrate.UpText);
+
+    if Self.crateCoordIndex = 0 then
+      otherCrate.Coordinates := [RSObjects.TemporossCrates.Coordinates[1]]
+    else
+      otherCrate.Coordinates := [RSObjects.TemporossCrates.Coordinates[0]];
+
+    if otherCrate.Click(true, 3) then
+      Self.isLoading := WaitUntil(XPBar.EarnedXP(true), 300, 2300);
+  end;
+end;
+
+procedure TCJTempoross.HandleHazard(hazard : THazard);
+begin
+  if Self.handlingHazard then
+  begin
+    Self.Debugln("Already handling hazard!", EOutputLevel.USEFUL);
+    Exit;
+  end;
+
+  Self.handlingHazard := true;
+  case hazard.hazardType of
+    //ETemporossHazard.CANNON_ELECTRIC :
+    ETemporossHazard.FIRE : Self.HandleFire(hazard.ATPA);
+    ETemporossHazard.STORM : Self.HandleStorm(hazard.ATPA);
+    ETemporossHazard.WAVE : Self.TetherPlayer();
+  end;
+
+  Self.handlingHazard := false;
+end;
+
+function TCJTempoross.DoEarlyLoading() : Boolean;
+const
+  SHRINE_TRAVEL_TIME : Int32 := 5000;
+  CANNON_TRAVEL_TIME : Int32 := 12000;
+  ENERGY_DEPLETION_RATE : Extended := 0.75;
+  COOK_TIME : Int32 := 2000;
+  LOAD_TIME : Int32 := 2000;
+var
+  raw, cooked, timeNeeded, bossEnergy : Int32;
+  energyZero : Extended;
+begin
+
+  //This function only matters if we're dealing with a mass world boss who has already taken damage
+  if CJTempSoloMode
+    or (Self.GetBossHealth() > 40) then
+    Exit(false);
+
+  //Boss Energy in a mass world lowers at a rate of about 0.75% per second
+  //If the boss has 49 energy we'd have almost 65 seconds to fish and cook.
+  //Cooking takes 2 seconds per fish + 5 seconds to get to the shrine.
+  raw := Inventory.CountItem("Raw harpoonfish");
+  cooked := Inventory.CountItem("Harpoonfish");
+
+  if CJTempHarpoonType = EHarpoonType.CRYSTAL_HARPOON then
+    cooked += Inventory.CountItem("Crystallised harpoonfish");
+
+  if (raw + cooked) = 0 then
+    Exit(false);
+
+  bossEnergy := Self.GetBossEnergy();
+  energyZero := (bossEnergy / ENERGY_DEPLETION_RATE) * 1000; //How many seconds until the boss is able to be attacked
+
+  //Minimum timeNeeded
+  timeNeeded := ( (raw + cooked) * LOAD_TIME) + CANNON_TRAVEL_TIME;
+
+  //If the minimum time needed to load our stuff is higher or equal to when the boss hits 0 we should go now.
+  if(timeNeeded >= energyZero) then
+  begin
+    Self.Debugln("Minimum time needed to cook " + ToStr(raw) + " fish and load " + ToStr(raw + cooked) + " is: " + ToStr(timeNeeded) + "ms boss at energy: " + ToStr(bossEnergy) + " projected to 0 in " + ToStr(energyZero) + "ms returning true", EOutputLevel.ALL);
+    Exit(true);
+  end;
+end;
+
+function TCJTempoross.ShouldLeaveLoading() : Boolean;
+  function GetLoadXP(level : Int32) : Double;
+  begin
+    if level < 70 then
+      Result := Floor((450 + (1000 - 450) * (level - 35) / (99 - 35))) / 10
+    else
+      Result := Floor((890 + (1000 - 890) * (level - 70) / (99 - 70))) / 10;
+  end;
+
+  function GetAttackXP(level : Int32) : Double;
+  begin
+    if level < 70 then
+      Result := Floor((450 + (1000 - 450) * (level - 35) / (99 - 35))) * 11 / 100
+    else
+      Result := Floor((890 + (1000 - 890) * (level - 70) / (99 - 70))) * 11 / 100;
+  end;
+const
+  RAW_FISH_POINTS : Int32 := 20;
+  COOKED_FISH_POINTS : Int32 := 65;
+  ATTACK_POINTS : Int32 := 55;
+  TRAVEL_TIME : Int32 := 10000;
+  LOAD_TIME : Int32 := 1800;
+  ATTACK_TIME : Int32 := 2400;
+  DRAIN_RATE : Double := 3.25;
+var
+  fishingLevel, bossHP, numAttacks, attackXP,
+  rawFishCount, crystalFishCount, cookedFishCount, loadFishPoints : Int32;
+  loadFishXP : Double;
+
+begin
+  fishingLevel := Self.GetEstimatedFishLevel();
+
+  rawFishCount := Inventory.CountItem("Raw harpoonfish");
+
+  if CJTempCook then
+    cookedFishCount := Inventory.CountItem("Harpoonfish");
+
+  if CJTempHarpoonType = EHarpoonType.CRYSTAL_HARPOON then
+    crystalFishCount := Inventory.CountItem("Crystallised harpoonfish");
+
+  //Sum how much xp we have in our inventory.
+  loadFishXP := GetLoadXP(fishingLevel);
+  loadFishXP := loadFishXP * (rawFishCount + cookedFishCount + (1.2 * crystalFishCount));
+
+  //Sum how many points we have in our inventory
+  loadFishPoints := (RAW_FISH_POINTS * (rawFishCount + crystalFishCount)) + (COOKED_FISH_POINTS * cookedFishCount);
+
+  bossHP := Self.GetBossHealth();
+  numAttacks := Floor(bossHP / DRAIN_RATE) - 1; //We never get full value
+  attackXP := Floor(GetAttackXP(fishingLevel));
+
+  Self.Debugln("Load points: " + ToStr(loadFishPoints) + " xp amount: " + ToStr(loadFishXP), EOutputLevel.USEFUL);
+  Self.Debugln("Num attacks: " + ToStr(numAttacks) + " xp amount: " + ToStr(attackXP * numAttacks) + " attack points: " + ToStr(numAttacks * ATTACK_POINTS), EOutputLevel.USEFUL);
+
+  if CJTempCook
+    and ((numAttacks * ATTACK_POINTS) > loadFishPoints) then
+  begin
+    Self.Debugln("Could exit loading early, more points for hitting boss! " + ToStr(numAttacks * ATTACK_POINTS) + " > " + ToStr(loadFishPoints), EOutputLevel.USEFUL);
+    Exit(true);
+  end
+  else if not CJTempCook
+    and ((numAttacks * ATTACK_POINTS) > loadFishPoints)
+    and ((numAttacks * attackXP) > loadFishXP) then
+  begin
+    Self.Debugln("Could exit loading early, more points for hitting boss! " + ToStr(numAttacks * ATTACK_POINTS) + " > " + ToStr(loadFishPoints), EOutputLevel.USEFUL);
+    Self.Debugln("Could exit loading early, more xp for hitting boss! " + ToStr(numAttacks * attackXP) + " > " + ToStr(loadFishXP), EOutputLevel.USEFUL);
+    Exit(true);
+  end;
+end;
+
+function TCJTempoross.ShouldAttackBoss() : Boolean;
+var
+  bossEnergy : Int32 := Self.GetBossEnergy();
+  attackAtEnergy : Int32;
+begin
+  if Self.isLoading then
+    attackAtEnergy := 3
+  else
+    attackAtEnergy := 2;
+
+  Result := (bossEnergy <= attackAtEnergy)
+    or ( (bossEnergy < 30) and (Self.GetIntensity() = 0) );
+end;
+
+//For use in our per state while loops
+//To prioritize and interrupt when needed.
+//Less copy pasting
+//If game is done we leave
+//If hazard is up handle if required
+//If we're in end game state we should go to loading
+//If we should attack then do that
+//If we're stuck we unstuck.
+function TCJTempoross.CheckPriorityInterrupt(out hazard : THazard) : EInterruptReason;
+var
+  inventFull : Boolean;
+
+begin
+  if not Self.IsGameRunning()
+  or (Self.GetIntensity() = 100) then
+  begin
+    Self.Debugln("PriorityInterrupt: Game over", EOutputLevel.USER);
+    Exit(EInterruptReason.GAME_OVER);
+  end;
+
+  hazard := Self.ScanForHazards();
+
+  if hazard.hazardType <> ETemporossHazard.NONE then
+  begin
+    Self.Debugln("PriorityInterrupt: Hazard detected: " + ToStr(hazard.hazardType), EOutputLevel.USEFUL);
+    Exit(EInterruptReason.HAZARD);
+  end;
+
+  inventFull := Inventory.IsFull();
+
+  if not inventFull
+    and CJTempNeedRope
+    and not Inventory.ContainsItem("rope") then
+  begin
+    Self.Debugln("Missing rope!!", EOutputLevel.USEFUL);
+    Self.needTools := true;
+    Exit(EInterruptReason.MISSING_TOOL);
+  end;
+
+  if not inventFull
+    and CJTempNeedHammer
+    and not Inventory.ContainsItem("Hammer")
+    and Self.TetherObjectNeedsRepairs(Self.GetTetherObject()) then
+  begin
+    Self.Debugln("Missing hammer!!", EOutputLevel.USEFUL);
+    Self.needTools := true;
+    Exit(EInterruptReason.MISSING_TOOL);
+  end;
+
+  if Self.DoEarlyLoading() then
+  begin
+    Self.Debugln("PriorityInterrupt: Early Loading possible", EOutputLevel.USEFUL);
+    Exit(EInterruptReason.LOAD);
+  end;
+
+  if Self.state <>EScriptState.ATTACKING then
+    if Self.ShouldAttackBoss() then
+    begin
+      Self.Debugln("PriorityInterrupt: Boss vulnerable!", EOutputLevel.USEFUL);
+      Exit(EInterruptReason.ATTACK);
+    end;
+
+  if Self.UnTether() then
+    Self.Debugln("Fixed tethering!", EOutputLevel.USER);
+
+end;
+
+function TCJTempoross.FindEndgameText() : Boolean;
+var
+  gameText : string;
+begin
+  gameText := OCR.Recognize(Chat.Bounds, TOCRColorFilter.Create([0], [60]), RS_FONT_QUILL_8);
+  Exit(gameText.ContainsAny(['Victorious', 'Tempoross', 'Unkah', 'Anglers']));
+end;
+
+function TRSWalker.WebWalk(Destination: TPoint; WaitUntilDistance: Int32 = 0; PathRandomness: Double = 0): Boolean; override;
+var
+  Path: TPointArray;
+begin
+  if not InRange(PathRandomness, 0, 1) then
+    Self.Fatal('TRSWalker.WebWalk `PathRandomness` must be within 0..1');
+  try
+    Path := Self.WebGraph.PathBetween(Self.GetMyPos, Destination, PathRandomness);
+  except
+    Self.Enabled := false;
+    Writeln("Points don't connect disabling walker to fix");
+    Exit(false);
+  end;
+  Result := Self.WalkPath(Path, WaitUntilDistance);
+end;
+
+procedure TRSMinimap.RotateWithinAngles(min, max: Int32; currentAngle : Int32 = -1);
+var
+  endAngle, midAngle: Int32;
+  preferredAngle: Int32;
+begin
+
+  if currentAngle = -1 then
+  currentAngle := Floor(Minimap.GetCompassAngle(true));
+
+  endAngle := max - currentAngle;
+
+  if endAngle < 0 then
+    endAngle += 360;
+
+  midAngle := min - currentAngle;
+
+  if midAngle < 0 then
+    midAngle += 360;
+
+  if min > max  then
+    preferredAngle := SRL.TruncatedGauss(min - 360, max)
+  else
+    preferredAngle := SRL.TruncatedGauss(min, max);
+
+  Minimap.SetCompassAngle(preferredAngle);
+  MainScreen.SetHighestPitch();
+end;
+
+procedure TCJTempoross.SetCookingAngle();
+var
+  currentAngle : Int32;
+begin
+  currentAngle := Floor(Minimap.GetCompassAngle(true));
+
+ if Self.isNorthSide then
+  begin
+    if InRange(currentAngle, 0, 14) then
+      Exit;
+
+    Minimap.RotateWithinAngles(330, 19, currentAngle)
+  end
+  else
+  begin
+    if InRange(currentAngle, 36, 70) then
+      Exit;
+
+    Minimap.RotateWithinAngles(36, 70, currentAngle)
+  end;
+end;
+
+procedure TCJTempoross.SetFishingAngle();
+var
+  currentAngle : Int32;
+begin
+  currentAngle := Floor(Minimap.GetCompassAngle(true));
+
+  if Self.isNorthSide then
+  begin
+    if InRange(currentAngle, 355, 19) then
+      Exit;
+
+    Minimap.RotateWithinAngles(355, 19, currentAngle)
+  end
+  else
+  begin
+    if InRange(currentAngle, 106, 142) then
+      Exit;
+
+    Minimap.RotateWithinAngles(106, 142, currentAngle)
+  end;
+end;
+
+//I hate it but I'm just barely off with MakeSpotsVisibleNew so I'm just using these gathered ranges instead.
+procedure TCJTempoross.RotateForFishCoord(nearest : TPoint);
+begin
+    if Self.isNorthSide then
+    begin
+      case nearest of
+        [7584, 4444] : //North, North
+          //if SRL.Dice(50) then
+            Minimap.RotateWithinAngles(333, 37);
+          //else
+            //Minimap.RotateWithinAngles(143, 262);
+        //North, East
+        [7596, 4474] : Minimap.RotateWithinAngles(74, 209);
+        //NORTH, WEST
+        [7543, 4460] : Minimap.RotateWithinAngles(355, 24);
+      end;
+    end
+    else
+    begin
+      case nearest of
+        [7539, 4596] : //South, North
+          Minimap.RotateWithinAngles(117, 157);
+
+        [7585, 4620] : //South, East
+          Minimap.RotateWithinAngles(47, 161);
+
+        [7577, 4628] : //South, South
+          Minimap.RotateWithinAngles(25, 182);
+      end;
+    end;
+end;
+
+
+function TCJTempoross.TestWaterPercentage(rect : TRectangle; pct : Double) : Boolean;
+var
+  waterTPA : TPointArray;
+begin
+  Result := (SRL.FindColors(waterTPA, CTS2(9009005, 9, 0.14, 0.42), rect) > 0)
+        and (Length(waterTPA) >= Round(rect.Area() * pct));
+end;
+
+function TCJTempoross.RectOnMainscreen(rect : TRectangle) : Boolean;
+begin
+  Result := Mainscreen.Bounds.Contains(rect);
+end;
+
+function TCJTempoross.TestTreePercentage(rect : TRectangle) : Boolean;
+var
+  treeTPA : TPointArray;
+begin
+  Result := ((SRL.FindColors(treeTPA, CTS2(2644815, 13, 0.04, 0.90), rect) > 0)
+             and  (Length(treeTPA) > Round(rect.Area() * 0.50)));
+end;
+
+function TPointArray.FurthestPoint(other: TPoint): TPoint;
+begin
+  if Length(Self) <= 0 then
+    Exit;
+  Result := Self.Sorted(other)[High(Self)];
+end;
+
+procedure TCJTempoross.RotateToFurthestFishSpot();
+var
+  myPos, furthestSpot, furthestMM, center : TPoint;
+  dist : Double;
+  i : Int32;
+  zrTPA : TPointArray;
+  endedLoop : Boolean;
+begin
+  myPos := RSW.GetMyPos();
+  furthestSpot := Self.fishBoxLocations.FurthestPoint(myPos);
+  furthestMM := RSW.WorldToMM(myPos, furthestSpot, Minimap.GetCompassAngle(false));
+
+  zrTPA := Minimap.GetZoomRectangle().ToTPA();
+  if SRL.PointInPoly(furthestMM, zrTPA) then
+    Exit;
+
+  center := Minimap.Center;
+  dist := center.DistanceTo(furthestMM);
+
+  for i := 0 to High(zrTPA) do
+  if endedLoop := dist <= center.DistanceTo(zrTPA[i]) then
+    Break;
+
+  if not endedLoop then
+    Exit;
+
+  Minimap.SetCompassAngle(center.AngleBetween(zrTPA[i]) - center.AngleBetween(furthestMM));
+end;
+
+procedure TCJTempoross.MakeSpotsVisibleNew();
+var
+  msFishSpotRects : TRectArray;
+  testRect : TRectangle;
+  i : Int32;
+  rotateTimeout : TCountdown;
+  rotateLeft : Boolean;
+  rotateAngle : Double;
+begin
+  rotateLeft := SRL.Dice(50);
+
+  RotateToFurthestFishSpot();
+  rotateTimeout.Init(1500);
+  while not rotateTimeout.IsFinished() do
+  begin
+    msFishSpotRects := GetMSFishRectsNew();
+    for i := 0 to High(msFishSpotRects) do
+    begin
+      rotateAngle := Random(15, 30);
+
+      if rotateLeft then
+        rotateAngle *= -1;
+
+      testRect := msFishSpotRects[i];
+
+	    if CJDebugLevel = EOutputLevel.ALL then
+	      RSClient.Image().DrawRect(testRect, DEBUG_COLORS[i mod Length(DEBUG_COLORS)]);
+
+      if not RectOnMainscreen(testRect)
+        or not TestWaterPercentage(testRect, 0.25)
+        or TestTreePercentage(testRect) then
+      begin
+        Minimap.SetCompassAngle(Minimap.GetCompassAngle(true) + rotateAngle);
+        break;
+      end;
+
+      if i = High(msFishSpotRects) then
+      begin
+        if CJDebugLevel = EOutputLevel.ALL then
+			    RSClient.Image().Clear();
+
+        Exit;
+      end;
+    end;
+  end;
+
+  if CJDebugLevel = EOutputLevel.ALL then
+	  RSClient.Image().Clear();
+
+  Writeln("Timed out!");
+end;
+
+function TCJTempoross.WaitFish(testSpots : TPointArray; waitTime : UInt32; out hazard : THazard; out interruptReason : EInterruptReason) : Boolean;
+var
+  spotIndex, navTime : Int32;
+  clicked, checkNav : Boolean;
+  fishTimer, navTimer : TCountdown;
+  prevPos, currPos, fishSpotWorld : TPoint;
+  spots : TPointArray;
+  dist, height : Double;
+begin
+
+  interruptReason := EInterruptReason.NONE;
+
+  if testSpots.Len() < 1 then
+  begin
+    Exit(false);
+  end;
+
+  spots := Copy(testSpots, 0, Length(testSpots));
+  spots.Remove(Point(0,0), true);
+  spots.ClearDuplicates();
+
+  if spots.Len() < 1 then
+  begin
+    Self.Debugln("NO SPOTS", EOutputLevel.ALL);
+    Self.RotateForFishCoord(Self.fishBoxLocations.NearestPoint(Self.RSW.GetMyPos()));
+    //Self.MakeSpotsVisibleNew();
+    Exit(false);
+  end;
+
+  Self.Debugln("Spots: " + ToStr(spots), EOutputLevel.ALL);
+  currPos := Self.RSW.GetMyPos(height);
+  clicked := Self.ClickFishingSpot(spots, spotIndex);
+  if not clicked then
+  begin
+    Self.Debugln("WaitFish: failed to click", EOutputLevel.USEFUL);
+    Exit(false);
+  end;
+
+  //debugPoint := Self.fishBoxLocations.NearestPoint(Self.RSW.GetMyPos());
+  fishSpotWorld := Self.fishBoxLocations.NearestPoint(Self.RSW.MSToWorld(spots[spotIndex], 0));
+
+  Self.Debugln("Waitfish fish world: " + ToStr(fishSpotWorld), EOutputLevel.ALL);
+  navTimer.Init(Random(1000, 1400));
+
+  dist := Mainscreen.Center.DistanceTo(spots[spotIndex]);
+  checkNav := dist >= MainScreen.NormalizeDistance(50);
+  XPBar.EarnedXP(false);
+
+  //navTime := 2000; //Just a regular buffer for close spots.
+
+  //If we need to navigate, change the time to be fishing + travel time
+  if checkNav then
+  begin
+    Self.Debugln("WaitFish: WaitTime changed from: " + ToStr(waitTime), EOutputLevel.ALL);
+    navTime := ((Round(dist / Mainscreen.NormalizeDistance(33))) * 1000) + 1800;
+    Self.Debugln("WaitFish: To: " + ToStr(waitTime + navTime) + " for distance: " + ToStr(dist), EOutputLevel.ALL);
+    //fishSpotWorld := Self.fishBoxLocations.NearestPoint(Self.RSW.MSToWorld(spots[spotIndex], 0));
+  end;
+
+  fishTimer.Init(waitTime + navTime);
+  Self.Debugln("WaitFish: Need nav check? " + ToStr(checkNav) + " Distance: " + ToStr(dist) + " Spot Index: " + ToStr(spotIndex), EOutputLevel.USEFUL);
+
+  Self.RotateForFishCoord(fishSpotWorld);
+
+  while not fishTimer.IsFinished() do
+  begin
+    interruptReason := Self.CheckPriorityInterrupt(hazard);
+
+    case interruptReason of
+      EInterruptReason.HAZARD,
+      EInterruptReason.GAME_OVER,
+      EInterruptReason.ATTACK,
+      EInterruptReason.LOAD :
+      begin
+        Self.Debugln("Waitfish interrupted for reason: " + ToStr(interruptReason), EOutputLevel.USEFUL);
+        Exit(false);
+      end;
+    end;
+
+    //If we're further than about 1 tile of our click point check the navigation
+    if checkNav then
+    begin
+      if navTimer.IsFinished then
+      begin
+
+        if XPBar.EarnedXP(true) then
+          Exit(true);
+
+        prevPos := currPos;
+        currPos := Self.RSW.GetMyPos();
+        Self.Debugln("PrevPos: " + ToStr(prevPos) + " CurrPos: " + ToStr(currPos), EOutputLevel.ALL);
+        if currPos.InRange(prevPos, 4, true) then
+        begin
+          dist := currPos.DistanceTo(fishSpotWorld);
+          Self.Debugln("Waitfish dist: " + ToStr(dist) + " Fish spot loc: " + ToStr(fishSpotWorld), EOutputLevel.ALL);
+          if (dist < 6) then
+          begin
+            fishTimer.Init(waitTime + 600);
+
+            while not fishTimer.IsFinished() do
+            begin
+
+              Self.Debugln("PROCESSING CLOSE WAITFISH", EOutputLevel.ALL);
+
+              interruptReason := Self.CheckPriorityInterrupt(hazard);
+
+              case interruptReason of
+                EInterruptReason.HAZARD,
+                EInterruptReason.GAME_OVER,
+                EInterruptReason.ATTACK,
+                EInterruptReason.LOAD :
+                begin
+                  Self.Debugln("Waitfish interrupted for reason: " + ToStr(interruptReason), EOutputLevel.USEFUL);
+                  Exit(false);
+                end;
+              end;
+
+              if XPBar.EarnedXP(true) then
+                Exit(true);
+
+              Wait(300);
+            end;
+          end;
+
+          Self.Debugln("We're not moving!", EOutputLevel.USEFUL);
+          Exit(false);
+        end;
+
+        navTimer.Restart();
+      end;
+    end;
+
+    if XPBar.EarnedXP(true) then
+      Exit(true);
+
+    Wait(100);
+  end;
+
+  Self.Debugln("WaitFish: timed out", EOutputLevel.USEFUL);
+end;
+
+function TCJTempoross.DestinationHasFire(isMastClosest : Boolean) : Boolean;
+var
+  fireDTM, x, y : Int32;
+begin
+
+  fireDTM := DTMFromString('mLgAAAHicY2JgYLgPxHeA2AuIXYF4hZIokGRkgAFGOA8AbjADLw==');
+
+  if Self.isNorthSide then
+  begin
+    if isMastClosest then //West
+      Result := FindDTM(fireDTM, x, y, FIRE_BOXES[1])
+    else //North
+      Result := FindDTM(fireDTM, x, y, FIRE_BOXES[0]);
+  end
+  else if isMastClosest then //Not North but mast, so east box
+    Result := FindDTM(fireDTM, x, y, FIRE_BOXES[2])
+  else //Not North and not mast, south box.
+    Result := FindDTM(fireDTM, x, y, FIRE_BOXES[3]);
+
+  if Result then
+    Writeln("Fire found!", " North? ", Self.isNorthSide, " Mast? ", isMastClosest);
+
+  FreeDTM(fireDTM);
+end;
+
+function TCJTempoross.HandleObjectFire() : Boolean;
+var
+  j : Int32;
+  fireATPA, fireClickATPA : T2DPointArray;
+  pathRect : TRectangle;
+
+begin
+  fireATPA := Self.GetFireATPA(Mainscreen.Bounds);
+
+  if Length(fireATPA) > 0 then
+    fireATPA.FilterSize(120, EComparator.__GT__)
+  else
+    Exit(false);
+
+  pathRect := pathRect.RectFromLine(Mainscreen.Center, Mouse.Position(), Mainscreen.NormalizeDistance(150));
+  fireClickATPA := fireATPA.FilterRect(pathRect);
+
+  //Gather any potentially culled fires.
+  for j := 0 to High(fireATPA) do
+  begin
+    if (fireATPA[j].Mean().DistanceTo(Mouse.Position()) < Mainscreen.NormalizeDistance(80))
+      and not fireClickATPA.Contains(fireATPA[j]) then
+        fireClickATPA += fireATPA[j];
+  end;
+
+  if Length(fireClickATPA) < 1 then
+    Exit(false);
+
+  Writeln("FIRE AROUND OUR OUR OBJECT!");
+  Self.HandleFire(fireClickATPA);
+  Writeln("DONE HANDLING OBJECT FIRE!");
+  Result := true;
+end;
+
+//Customized to untether if we clicked it.
+function TRSWalkerObject._SelectHelper(action: TStringArray): Boolean; override;
+begin
+
+  Bot.Debugln("In SelectHelper", EOutputLevel.ALL);
+
+  TRSWalkerObject.CurrentUpText := [];
+  TRSWalkerObject.CurrentActionUpText := [];
+
+  if Bot.isGameStarted then
+  begin
+
+    Bot.Debugln("Checking tethererd", EOutputLevel.ALL);
+
+    if not Bot.handlingHazard
+    and Bot.UnTether() then
+      Exit;
+  end;
+
+  if TRSWalkerObject.RedClicked then
+  begin
+    TRSWalkerObject.RedClicked := False;
+    Exit(True);
+  end;
+
+  if ChooseOption.IsOpen() and ChooseOption.Select(action) then
+    Exit(True);
+
+  if MainScreen.IsUpText(action) then
+  begin
+    Mouse.Click(MOUSE_LEFT);
+    Exit(MainScreen.DidRedClick());
+  end;
+
+  Result := ChooseOption.Select(action);
+end;
+
+//Customized to handle fires between.
+function TRSWalkerObject._ClickHelper(leftClick: Boolean): Boolean; override;
+
+begin
+  TRSWalkerObject.CurrentUpText := [];
+  TRSWalkerObject.CurrentActionUpText := [];
+
+  Bot.Debugln("In Clickhelper", EOutputLevel.ALL);
+
+  if TRSWalkerObject.RedClicked then
+  begin
+    TRSWalkerObject.RedClicked := False;
+    Exit(True);
+  end;
+
+  if ChooseOption.IsOpen() then
+  begin
+    if Self.Filter.UpText and ChooseOption.Select(Self.UpText) then
+      Exit(True);
+    ChooseOption.Close();
+    Exit;
+  end;
+
+  //Adding some fire handling here for on screen things
+  if Bot.isGameStarted then
+  begin
+    Bot.Debugln("Checking fire: " + Self.UpText[0], EOutputLevel.ALL);
+    if Bot.DestinationHasFire(Self.UpText.Contains("mast")) then
+    begin
+      Bot.Debugln("Fire found: ", EOutputLevel.ALL);
+      if Bot.HandleObjectFire() then
+        Exit;
+    end;
+
+    Bot.Debugln("Done checking fire: ", EOutputLevel.ALL);
+    if not Bot.handlingHazard
+    and Bot.UnTether() then
+      Exit;
+  end;
+
+  if leftClick then
+    Mouse.Click(MOUSE_LEFT);
+
+  Result := MainScreen.DidRedClick() or
+            (not leftClick and Self.Filter.UpText and ChooseOption.Select(Self.UpText));
+
+  if Result and SRL.Dice(0.5 - (0.5 * BioHash)) then
+  begin
+    case Random of
+      0.000..0.899: Antiban.SmallRandomMouse();
+      else Antiban.RandomMouse();
+    end;
+  end;
+end;
+
+function TCJTempoross.OnChain() : Boolean;
+const
+  CHAIN_COL : TCTS2Color := CTS2(11908522, 19, 0.03, 0.03);
+
+var
+  tpa : TPointArray;
+  mmPB : TBox;
+begin
+  mmPB := Box(Minimap.Center, 2, 2);
+  Result := SRL.FindColors(tpa, CHAIN_COL, mmPB) < 1;
+end;
+
+procedure OnWalkEvent(Sender: PRSWalker; Position: TPoint; Destination: TPoint);
+var
+  hazard : THazard;
+  msPoints : TPointArray;
+  msPathRect : TRectangle;
+  compassAngle : Single;
+
+begin
+
+  if not Bot.isGameStarted then
+    Exit;
+
+  if Bot.UnTether() then
+    Exit;
+
+  if Bot.handlingHazard then
+    Exit;
+
+  if (Bot.state = EScriptState.ATTACKING)
+   and (not Bot.IsGameRunning()) then
+  begin
+    Sender^.Enabled := false;
+    Bot.Debugln("Exiting walking event, game not running", EOutputLevel.USER);
+    Exit;
+  end;
+
+  hazard := Bot.ScanForHazardsWalker();
+  if (hazard.hazardType <> ETemporossHazard.NONE) then
+  begin
+
+    if ( (Bot.state = EScriptState.COOKING) or (Bot.state = EScriptState.LOADING_FISH))
+       and (hazard.hazardType = ETemporossHazard.STORM) then
+      Exit;
+
+    if hazard.hazardType = ETemporossHazard.FIRE then
+    begin
+  	  compassAngle := Minimap.GetCompassAngle(False);
+
+  	  msPoints := [Minimap.PointToMS(Sender^.WorldToMM(Position, Position, compassAngle), compassAngle),
+  				   Minimap.PointToMS(Sender^.WorldToMM(Position, Destination, compassAngle), compassAngle)];
+
+  	  msPathRect := msPathRect.RectFromLine(msPoints[0], msPoints[1], Mainscreen.NormalizeDistance(140));
+
+  	  hazard.ATPA := hazard.ATPA.FilterRect(msPathRect);
+
+  	  if hazard.ATPA.Len() < 1 then
+  	    Exit;
+    end;
+
+    //If we're attacking then ignore storms and waves.
+    if Bot.state = EScriptState.ATTACKING then
+  	  Exit;
+
+    Bot.Debugln("Handling hazard: " + ToStr(hazard.hazardType) + " from walker START", EOutputLevel.ALL);
+    Bot.HandleHazard(hazard);
+    Sender^.Enabled := false;
+    Exit;
+  end;
+end;
+
+procedure OnWalkingEvent(Sender: PRSWalker; Position: TPoint; Destination: TPoint);
+var
+  hazard : THazard;
+  msPoints : TPointArray;
+  msPathRect : TRectangle;
+  compassAngle : Single;
+
+begin
+
+  {if CJDebugLevel = EOutputLevel.ALL then
+  begin
+    compassAngle := Minimap.GetCompassAngle(False);
+    RSClient.Image().Clear();
+    msPoints := [Minimap.PointToMS(Sender^.WorldToMM(Position, Position, compassAngle), compassAngle),
+                   Minimap.PointToMS(Sender^.WorldToMM(Position, Destination, compassAngle), compassAngle)];
+
+    msPathRect := msPathRect.RectFromLine(msPoints[0], msPoints[1], Mainscreen.NormalizeDistance(140));
+
+    RSClient.Image().DrawRect(msPathRect, clAqua);
+  end;}
+
+  if not Bot.isGameStarted then
+    Exit;
+
+  if Bot.UnTether() then
+    Exit;
+
+  if (Bot.state = EScriptState.ATTACKING)
+   and (not Bot.IsGameRunning()) then
+  begin
+    Sender^.Enabled := false;
+    Bot.Debugln("Exiting walking event, game not running", EOutputLevel.USER);
+    Exit;
+  end;
+
+  if Bot.handlingHazard then
+    Exit;
+
+  hazard := Bot.ScanForHazardsWalker();
+
+  if (hazard.hazardType <> ETemporossHazard.NONE)
+    and not (hazard.hazardType = ETemporossHazard.STORM) then
+  begin
+
+    if hazard.hazardType = ETemporossHazard.FIRE then
+    begin
+      compassAngle := Minimap.GetCompassAngle(False);
+
+      msPoints := [Minimap.PointToMS(Sender^.WorldToMM(Position, Position, compassAngle), compassAngle),
+                   Minimap.PointToMS(Sender^.WorldToMM(Position, Destination, compassAngle), compassAngle)];
+
+      msPathRect := msPathRect.RectFromLine(msPoints[0], msPoints[1], Mainscreen.NormalizeDistance(140));
+
+      hazard.ATPA := hazard.ATPA.FilterRect(msPathRect);
+
+      if hazard.ATPA.Len() < 1 then
+        Exit;
+
+    end;
+
+    //If we're attacking then ignore storms and waves.
+    if Bot.state = EScriptState.ATTACKING then
+      Exit;
+
+    Bot.Debugln("Handling hazard: " + ToStr(hazard.hazardType) + " from walker", EOutputLevel.USEFUL);
+    Bot.HandleHazard(hazard);
+    Sender^.Enabled := false;
+    Exit;
+  end;
+
+  if (Bot.state = EScriptState.FISHING) then
+  begin
+    if Bot.ShouldAttackBoss() then
+    begin
+      Bot.Debugln("WALKER: Interrupting navigation to fight boss", EOutputLevel.USEFUL);
+      Bot.attackOverride := true;
+      Sender^.Enabled := false;
+      Exit;
+    end;
+  end;
+
+  //IF we're running to the crates but should be attacking instead
+  if (Bot.state = EScriptState.LOADING_FISH)
+    and Bot.ShouldAttackBoss()
+    and ( (Bot.GetBossHealth() > 70) or Bot.ShouldLeaveLoading() ) then
+    begin
+      Bot.Debugln("WALKER: Interrupting navigation to fight boss", EOutputLevel.USEFUL);
+      Bot.attackOverride := true;
+      Sender^.Enabled := false;
+      Exit;
+    end;
+
+  Position := [];
+  Destination := [];
+end;
+
+function TBoxArray.GetBoxesOutsideRect(rect : TRectangle) : TIntegerArray;
+var
+  i : Int32;
+begin
+  for i := 0 to High(Self) do
+    if not rect.Contains(TPAFromBox(Self[i])) then
+      Result += i;
+end;
+
+function TCircle.Contains(tpa : TPointArray) : Boolean; overload;
+var
+  i : Integer;
+begin
+
+  for i := 0 to High(tpa) do
+  begin
+    if Self.Contains(tpa[i]) then
+      Exit(true);
+  end;
+end;
+
+function TCJTempoross.AnyFishSpot(searchDur : Int32; out dSpotFound : Boolean; out sSpotFound : Boolean) : TPointArray;
+var
+  fishParams : TFishSearchParams;
+begin
+
+  with fishParams do
+  begin
+    fishParams.searchTime := searchDur;
+    findDouble := true;
+    findSingle := true;
+  end;
+
+  if Self.GetFishingSpots(fishParams, Self.GetMSFishRects(Mainscreen.Bounds)) then
+  begin
+    if Length(fishParams.doubleTPA) > 0 then
+    begin
+      dSpotFound := true;
+      Result := fishParams.doubleTPA;
+    end
+    else if Length(fishParams.singleTPA) > 0 then
+    begin
+      sSpotFound := true;
+      Result := fishParams.singleTPA;
+    end;
+  end;
+end;
+
+procedure TCJTempoross._UpdateSpot(sender: PMouse; var x, y: Double; {$H-} var done: Boolean); {$H+}
+var
+  i: Int32;
+  tpa : TPointArray;
+  p, destination: TPoint;
+  single, d : Boolean;
+  mBox : TBox;
+
+begin
+
+  destination := [Round(x), Round(y)];
+  p := sender^.Position();
+  if p.DistanceTo(destination) > 5 then
+    Exit;
+
+  sender^.OnMovingEx := nil;
+
+  if Self.ConfirmUptext(Self.GetFishingUptext()) then
+  begin
+    done := true;
+    Exit;
+  end;
+
+  tpa := Self.AnyFishSpot(10, d, single);
+
+  if Length(tpa) < 1 then
+    Exit;
+
+  for i := 0 to High(tpa) do
+  begin
+    mBox := Box(destination, 10, 10);
+
+    if mBox.Contains(tpa[i]) then
+    begin
+      //done := true;
+      Exit;
+    end;
+  end;
+
+  p := tpa[0];
+  x := p.X;
+  y := p.Y;
+end;
+
+function TCJTempoross.FishHover(attempts : Int32) : Boolean;
+var
+  attempt : Int32;
+  rects : TRectArray;
+  fishParams : TFishSearchParams;
+  targetTPA : TPointArray;
+begin
+
+  with fishParams do
+  begin
+    searchTime := 40;
+    findDouble := true;
+    findSingle := true;
+  end;
+
+  for attempt := 0 to attempts do
+  begin
+    Writeln("Hover attempt: ", attempt);
+    rects := Self.GetMSFishRects(Mainscreen.Bounds);
+
+    if Length(rects) < 1 then
+    begin
+      Self.SetFishingAngle();
+      continue;
+    end;
+
+    if Self.GetFishingSpots(fishParams, rects) then
+    begin
+      if Length(fishParams.doubleTPA) > 0 then
+        targetTPA := fishParams.doubleTPA
+      else if Length(fishParams.singleTPA) > 0 then
+        targetTPA := fishParams.singleTPA;
+
+      if Length(targetTPA) < 1 then
+        continue;
+
+      Mouse.OnMovingEx := @Self._UpdateSpot;
+      Mouse.Move(targetTPA.NearestPoint(Mouse.Position()));
+
+      if Self.ConfirmUptext(Self.GetFishingUptext()) then
+      begin
+        Mouse.Click(MOUSE_LEFT);
+        Exit(true);
+        //Exit(Self.ClickFishingSpot([Mouse.Position()], spotInd));
+
+        {
+        Mouse.Click(MOUSE_LEFT);
+
+        if Mainscreen.DidRedClick(400) then
+          Exit(true);
+          }
+      end;
+    end;
+  end;
+end;
+
+//Modeled after object walk clicks
+function TCJTempoross.WalkFish(out clickedFish : Boolean) : Boolean;
+begin
+  if not Self.isFishing then
+    Self.SetFishingAngle();
+
+  if not Self.RSW.WalkBlind(Self.fishingWalkpath[Random(0, High(Self.fishingWalkpath))].Random(0, 2, false), 43) then
+  begin
+    Self.Debugln("WalkFish failed!", EOutputLevel.USEFUL);
+    Exit;
+  end;
+
+  clickedFish := Self.FishHover(4);
+  Self.Debugln("WalkFish clicked? " + ToStr(clickedFish), EOutputLevel.USEFUL);
+  Result := true;
+end;
+
+procedure TCJTempoross.HandleFishing();
+var
+  fishingSpots : TPointArray;
+  fishTimer : TCountdown;
+  timerExpiry, cookLeaveLimit : Int32;
+  interruptReason : EInterruptReason;
+  hazard : THazard;
+  spotRects : TRectArray;
+  navTimeout : TCountDown;
+  clickedFish : Boolean;
+begin
+
+  navTimeout.Init(20000);
+
+  //Check if we're in the fishing area and if not get there
+  //Self.RSW.AdaptiveWalk := true;
+
+  while not Self.currFishingArea.Contains(Self.RSW.GetMyPos())
+    and not navTimeout.IsFinished() do
+  begin
+    Self.Debugln("Start nav!", EOutputLevel.ALL);
+
+    if not Self.WalkFish(clickedFish) then
+    begin
+      Self.RSW.AdaptiveWalk := false;
+      Exit;
+    end;
+
+    Self.Debugln("Done nav!", EOutputLevel.ALL);
+    break;
+  end;
+
+  if navTimeout.IsFinished() then
+  begin
+    Self.RSW.AdaptiveWalk := false;
+    Exit;
+  end;
+
+  if clickedFish then
+    Self.isFishing := WaitUntil(XPBar.EarnedXP(true), 300, Self.GetFishingTime() + 1200);
+
+  Self.RSW.AdaptiveWalk := false;
+  case Self.lastState of
+    EScriptState.LOADING_FISH,
+    EScriptState.ATTACKING:
+      XPBar.EarnedXP(true);
+    else
+      XPBar.EarnedXP(false);
+  end;
+
+  Self.Debugln("Done getting to fishing area", EOutputLevel.USEFUL);
+
+  while not Self.isFishing
+    and not Inventory.IsFull() do
+  begin
+    interruptReason := Self.CheckPriorityInterrupt(hazard);
+
+    if hazard.hazardType <> ETemporossHazard.NONE then
+    begin
+      Self.Debugln("Fishing interrupted by hazard: " + ToStr(hazard.hazardType), EOutputLevel.USER);
+      Self.atDoubleFish := false;
+      Self.isFishing := false;
+      XPBar.EarnedXP(true);
+      Wait(Random(130, 370));
+      Self.HandleHazard(hazard);
+      Exit;
+    end;
+
+    case interruptReason of
+      EInterruptReason.GAME_OVER,
+      EInterruptReason.ATTACK,
+      EInterruptReason.MISSING_TOOL,
+      EInterruptReason.LOAD :
+      begin
+        Self.Debugln("Fishing interrupted for: " + ToStr(interruptReason), EOutputLevel.USER);
+        Self.isFishing := false;
+        Self.atDoubleFish := false;
+        XPBar.EarnedXP(true);
+        Exit;
+      end;
+    end;
+
+    spotRects := Self.GetMSFishRects(Mainscreen.Bounds);
+
+    if Length(spotRects) < 2 then
+    begin
+      Self.Debugln("HandleFishing: No spot rects in view!", EOutputLevel.ALL);
+      Self.RotateForFishCoord(Self.fishBoxLocations.NearestPoint(Self.RSW.GetMyPos()));
+      continue;
+    end;
+
+    fishingSpots := Self.DoubleSpotWrapper(390, spotRects);
+
+    if Self.WaitFish(fishingSpots, Self.GetFishingTime(), hazard, interruptReason) then
+    begin
+      Self.isFishing := true;
+      Self.atDoubleFish := true;
+      Self.Debugln("Waitfish: Double spot clicked!", EOutputLevel.USER);
+      break;
+    end;
+
+    //Check for a hazard from our WaitFish
+    if hazard.hazardType <> ETemporossHazard.NONE then
+    begin
+      Self.Debugln("Fishing interrupted by hazard: " + ToStr(hazard.hazardType), EOutputLevel.USER);
+      Self.atDoubleFish := false;
+      Self.isFishing := false;
+      XPBar.EarnedXP(true);
+      Wait(Random(130, 370));
+      Self.HandleHazard(hazard);
+      Exit;
+    end;
+
+    case interruptReason of
+      EInterruptReason.GAME_OVER,
+      EInterruptReason.ATTACK,
+      EInterruptReason.MISSING_TOOL,
+      EInterruptReason.LOAD :
+      begin
+        Self.Debugln("Fishing interrupted for: " + ToStr(interruptReason), EOutputLevel.USER);
+        Self.isFishing := false;
+        Self.atDoubleFish := false;
+        XPBar.EarnedXP(true);
+        Exit;
+      end;
+    end;
+
+    timerExpiry := Self.GetFishingTime();
+    fishingSpots := Self.GetSingleSpotWrapper(240, spotRects);
+
+    if Self.WaitFish(fishingSpots, timerExpiry, hazard, interruptReason) then
+    begin
+      Self.isFishing := true;
+      break;
+    end;
+
+    //Check for a hazard from our WaitFish
+    if hazard.hazardType <> ETemporossHazard.NONE then
+    begin
+      Self.Debugln("Fishing interrupted by hazard: " + ToStr(hazard.hazardType), EOutputLevel.USER);
+      Self.atDoubleFish := false;
+      Self.isFishing := false;
+      XPBar.EarnedXP(true);
+      Wait(Random(130, 370));
+      Self.HandleHazard(hazard);
+      Exit;
+    end;
+
+    case interruptReason of
+      EInterruptReason.GAME_OVER,
+      EInterruptReason.ATTACK,
+      EInterruptReason.MISSING_TOOL,
+      EInterruptReason.LOAD :
+      begin
+        Self.Debugln("Fishing interrupted for: " + ToStr(interruptReason), EOutputLevel.USER);
+        Self.isFishing := false;
+        Self.atDoubleFish := false;
+        XPBar.EarnedXP(true);
+        Exit;
+      end;
+    end;
+
+    Wait(175);
+  end;
+
+  if (CJTempHarpoonType >= EHarpoonType.DRAGON_HARPOON)
+    and (Self.GetEstimatedFishLevel() >= 87) then
+    cookLeaveLimit := Random(7, 8)
+  else
+    cookLeaveLimit := Random(6, 7);
+
+  if Self.isFishing then
+  begin
+    Self.Debugln("HandleFishing: Fishing started.", EOutputLevel.USER);
+    timerExpiry := Self.GetFishingTime();
+
+    if clickedFish then
+      timerExpiry += 500;
+
+    fishTimer.Init(timerExpiry);
+
+    while not fishTimer.IsFinished() do
+    begin
+
+      if XPBar.EarnedXP(true) then
+		    fishTimer.Restart();
+
+      interruptReason := Self.CheckPriorityInterrupt(hazard);
+
+      case interruptReason of
+        EInterruptReason.HAZARD :
+        begin
+          Self.Debugln("Fishing interrupted by hazard: " + ToStr(hazard.hazardType), EOutputLevel.USER);
+          Self.isFishing := false;
+          Self.atDoubleFish := false;
+          XPBar.EarnedXP(true);
+          Wait(Random(130, 370));
+          Self.HandleHazard(hazard);
+          Exit;
+        end;
+        EInterruptReason.GAME_OVER,
+        EInterruptReason.ATTACK,
+        EInterruptReason.MISSING_TOOL,
+        EInterruptReason.LOAD :
+        begin
+          Self.Debugln("Fishing interrupted for: " + ToStr(interruptReason), EOutputLevel.USER);
+          Self.isFishing := false;
+          Self.atDoubleFish := false;
+          XPBar.EarnedXP(true);
+          Exit;
+        end;
+      end;
+
+      if Inventory.IsFull() then
+      begin
+        Self.isFishing := false;
+        Self.atDoubleFish := false;
+        XPBar.EarnedXP(true);
+        Self.Debugln("Fishing, inventory full", EOutputLevel.ALL);
+        Exit;
+      end;
+
+      //If we're not at a double fish point we should be trying to find one
+      //Or Leave to go cook if we've got enough fish.
+      if not Self.atDoubleFish
+        and (Inventory.CountEmptySlots() >= 4) then
+      begin
+
+        spotRects := Self.GetMSFishRects(Mainscreen.Bounds);
+        fishingSpots := Self.DoubleSpotWrapper(380, spotRects);
+
+        fishTimer.Pause();
+
+        if Self.WaitFish(fishingSpots, timerExpiry, hazard, interruptReason) then
+        begin
+          Self.Debugln("Moved to double fish", EOutputLevel.USEFUL);
+          fishTimer.Resume();
+          fishTimer.Restart();
+          Self.atDoubleFish := true;
+        end
+        else
+          fishTimer.Resume();
+
+        //Check for a hazard from our WaitFish
+        if hazard.hazardType <> ETemporossHazard.NONE then
+        begin
+          Self.Debugln("Fishing interrupted by hazard: " + ToStr(hazard.hazardType), EOutputLevel.USER);
+          Self.atDoubleFish := false;
+          Self.isFishing := false;
+          Wait(Random(130, 370));
+          Self.HandleHazard(hazard);
+          Exit;
+        end;
+
+        case interruptReason of
+          EInterruptReason.GAME_OVER,
+          EInterruptReason.ATTACK,
+          EInterruptReason.MISSING_TOOL,
+          EInterruptReason.LOAD :
+          begin
+            Self.Debugln("Fishing interrupted for: " + ToStr(interruptReason), EOutputLevel.USER);
+            Self.isFishing := false;
+            Self.atDoubleFish := false;
+            Exit;
+          end;
+        end;
+
+        if CJTempCook
+          and not Self.atDoubleFish
+          and (Inventory.CountItem("Raw harpoonfish") >= cookLeaveLimit) then
+        begin
+          Self.Debugln("Enough fish to leave early for cooking", EOutputLevel.USEFUL);
+          Self.isFishing := false;
+          Self.atDoubleFish := false;
+          Exit;
+        end;
+      end;
+
+      fishTimer.Pause();
+      Antiban.DoAntiban(false, false);
+      fishTimer.Resume();
+      Wait(200);
+    end;
+  end;
+
+  Self.Debugln("Fishing timer expired", EOutputLevel.USER);
+  Self.isFishing := false;
+  Self.atDoubleFish := false;
+end;
+
+function TCJTempoross.IsHazardWithinRange(hazardATPA : T2DPointArray; fishSpots : TPointArray; dist : Int32) : Boolean;
+var
+  i, j, normDist : Int32;
+
+begin
+  if (Length(hazardATPA) < 1)
+    or (Length(fishSpots) < 1) then
+    Exit(false);
+
+  normDist := Mainscreen.NormalizeDistance(dist);
+
+  for i := 0 to High(HazardATPA) do
+    for j := 0 to High(fishSpots) do
+    begin
+      if Distance(hazardATPA[i].Mean(), fishSpots[j]) <= normDist then
+      begin
+        fishSpots := [fishSpots[j], hazardATPA[i].Mean()];
+        Exit(true);
+      end;
+    end;
+end;
+
+procedure TCJTempoross.HandleCooking();
+var
+  hazard : THazard;
+  fishingSpots : TPointArray;
+  leftToCook, emptySlots : Int32;
+  cookTimer : TCountdown;
+  interruptReason : EInterruptReason;
+begin
+  if not RSObjects.TemporossShrines.WalkClick() then
+  begin
+    Self.Debugln("Left cooking failed to nav", EOutputLevel.USEFUL);
+    Exit;
+  end;
+
+  case Self.lastState of
+    EScriptState.LOADING_FISH,
+    EScriptState.ATTACKING,
+    EScriptState.FISHING :
+      XPBar.EarnedXP(true);
+    else
+      XPBar.EarnedXP(false);
+  end;
+
+  Self.isCooking := true;
+  leftToCook := Inventory.CountItem("Raw harpoonfish");
+  Self.SetCookingAngle();
+
+  cookTimer.Init(4200);
+
+  Self.Debugln("COOK LOOP START", EOutputLevel.ALL);
+
+  while (leftToCook > 0)
+        and (not cookTimer.IsFinished()) do
+  begin
+
+    if Self.UnTether() then
+      Exit;
+
+    interruptReason := Self.CheckPriorityInterrupt(hazard);
+
+    case interruptReason of
+      EInterruptReason.HAZARD :
+      begin
+        case hazard.hazardType of
+          ETemporossHazard.WAVE,
+          ETemporossHazard.FIRE :
+          begin
+            Self.Debugln("Exiting cooking to handle: " + ToStr(hazard.hazardType), EOutputLevel.USER);
+            Self.isCooking := false;
+            Self.HandleHazard(hazard);
+            Exit;
+          end;
+        end;
+      end;
+
+      EInterruptReason.GAME_OVER,
+      EInterruptReason.ATTACK,
+      EInterruptReason.LOAD,
+      EInterruptReason.MISSING_TOOL :
+      begin
+        Self.Debugln("Cooking interrupted for: " + ToStr(interruptReason), EOutputLevel.USER);
+        Self.isCooking := false;
+        Exit;
+      end;
+    end;
+
+    if XPbar.EarnedXP(false) then
+      cookTimer.Restart();
+
+    leftToCook := Inventory.CountItem("Raw harpoonfish");
+
+    if cookTimer.IsFinished()
+      and (leftToCook > 0) then
+    begin
+      Self.Debugln("Cook timer elapsed! Clicking again!", EOutputLevel.USEFUL);
+      if not RSObjects.TemporossShrines.WalkClick() then
+        Exit;
+
+      cookTimer.Restart();
+    end;
+
+    //If the inventory isn't full then see if we should go to the double spot early.
+    if not Inventory.IsFull() then
+    begin
+      emptySlots := Inventory.CountEmptySlots(); //If block here so we don't need to count emptySlots twice
+
+      if (emptySlots >= 4) then
+      begin
+
+        fishingSpots := Self.DoubleSpotWrapper(380, Self.GetMSFishRects(Mainscreen.Bounds));
+
+        if (fishingSpots.Len() > 0)
+          and Self.WaitFish(fishingSpots, Self.GetFishingTime(), hazard, interruptReason) then
+        begin
+          Self.isFishing := true;
+          Self.atDoubleFish := true;
+          Self.Debugln("Set fishing to true from cook state", EOutputLevel.USEFUL);
+          Self.isCooking := false;
+          Exit;
+        end;
+
+         //Check for a hazard from our WaitFish
+        if hazard.hazardType <> ETemporossHazard.NONE then
+        begin
+          Self.Debugln("Cooking interrupted by hazard: " + ToStr(hazard.hazardType), EOutputLevel.USER);
+          Self.isCooking := false;
+          Wait(Random(130, 250));
+          Self.HandleHazard(hazard);
+          Exit;
+        end;
+
+        case interruptReason of
+          EInterruptReason.GAME_OVER,
+          EInterruptReason.ATTACK,
+          EInterruptReason.MISSING_TOOL,
+          EInterruptReason.LOAD :
+          begin
+            Self.Debugln("Cooking interrupted for: " + ToStr(interruptReason), EOutputLevel.USER);
+            Self.isCooking := false;
+            Exit;
+          end;
+        end;
+      end;
+    end;
+
+    Wait(150);
+  end;
+
+  Self.isCooking := false;
+end;
+
+procedure TCJTempoross.HandleLoading();
+const
+  DOCK_TRAVEL_TIME : Int32 := 12000;
+
+var
+  hazard : THazard;
+  xpTimer : TCountDown;
+  clickCrate : TRSObject;
+  inventoryFish : TRSItemArray := ["Raw harpoonfish", "Harpoonfish"];
+  checkedLeaveEarly : Boolean;
+begin
+
+  if CJTempHarpoonType = EHarpoonType.CRYSTAL_HARPOON then
+    inventoryFish += "Crystallised harpoonfish";
+
+  if not Inventory.ContainsAny(inventoryFish) then
+  begin
+    Self.isLoading := false;
+    Self.Debugln("LOADING: No fish", EOutputLevel.USEFUL);
+    Exit;
+  end;
+
+  if Inventory.CountEmptySlots() < 6 then
+      Self.isLoading := true;
+
+  //Override the crate we click so we can switch easily later.
+  if RSObjects.TemporossCrates.Coordinates.NearestPoint(Self.RSW.GetMyPos()) = RSObjects.TemporossCrates.Coordinates[0] then
+    Self.crateCoordIndex := SRL.SkewedRand(0, 0, High(RSObjects.TemporossCrates.Coordinates))
+  else
+    Self.crateCoordIndex := SRL.SkewedRand(1, 0, High(RSObjects.TemporossCrates.Coordinates));
+
+  Self.Debugln("CrateCoordIndex: " + ToStr(Self.crateCoordIndex), EOutputLevel.USEFUL);
+  clickCrate := RSObjects.TemporossCrates;
+  clickCrate.Coordinates := [clickCrate.Coordinates[Self.crateCoordIndex]];
+
+  //If we've got fire then we shouldn't adaptive walk.
+  RSW.AdaptiveWalk := not Self.DestinationHasFire(false);
+
+  if not clickCrate.WalkClick() then
+  begin
+    Self.Debugln("LOADING: Failed to click crates", EOutputLevel.USER);
+
+    if not Self.handlingHazard then
+      Self.UnTether();
+
+    RSW.AdaptiveWalk := false;
+      Exit;
+  end;
+  case Self.lastState of
+    EScriptState.ATTACKING,
+    EScriptState.FISHING :
+      XPBar.EarnedXP(true);
+    else
+      XPBar.EarnedXP(false);
+  end;
+
+  Self.Debugln("Arrived at and clicked crates!", EOutputLevel.USEFUL);
+  RSW.AdaptiveWalk := false;
+  while Inventory.CountAll(inventoryFish) > 0 do
+  begin
+
+    if not Self.isGameRunning() then
+    begin
+      Self.Debugln("Game not running!", EOutputLevel.USER);
+      Exit;
+    end;
+
+    hazard := Self.ScanForHazards();
+
+    if hazard.hazardType <> ETemporossHazard.NONE then
+    begin
+      Self.Debugln("Exiting loading, need to handle hazard: " + ToStr(hazard), EOutputLevel.USER);
+      Self.isLoading := Inventory.ContainsAny(inventoryFish);
+      XPBar.EarnedXP(true);
+      Wait(450, 700);
+      Self.HandleHazard(hazard);
+      Exit;
+    end;
+
+    //start timer
+    if xpTimer.Timeout = 0 then
+      xpTimer.Init(4000);
+
+    if (xpTimer.TimeRemaining() > 0)
+       and (xpBar.EarnedXP(true)) then
+    begin
+        xpTimer.Restart();
+
+      if not CJTempSoloMode
+        and not checkedLeaveEarly
+        and Self.ShouldAttackBoss() then
+      begin
+        checkedLeaveEarly := true;
+        //We only check this one time when the boss reaches the energy threshold.
+        //We don't need this to spam after we've checked once
+        if not Self.ShouldLeaveLoading() then
+          continue;
+
+        Self.Debugln("Exiting loading, going to attack boss", EOutputLevel.USER);
+        XPBar.EarnedXP(true);
+        Self.attackOverride := true;
+        Self.isLoading := false;
+        Exit;
+      end;
+    end;
+
+    if XPTimer.IsFinished() then
+    begin
+      Self.Debugln("XP Timer elapsed clicking crates again!", EOutputLevel.ALL);
+      Self.UnTether();
+      clickCrate.WalkClick();
+      xpTimer.Restart();
+    end;
+
+    xpTimer.Pause();
+    Antiban.DoAntiban(false, false);
+    xpTimer.Resume();
+    Wait(175);
+  end;
+
+  if (Self.GetIntensity() <> 0) and (Self.GetBossEnergy() > 10) then
+    Self.HandleTools();
+
+  Self.isLoading := false;
+end;
+
+procedure TCJTempoross.HandleAttacking();
+begin
+  //Go to the dock
+  if not Self.RSW.WebWalk(RSObjects.TemporossPools.Coordinates[0], 15) then
+    Exit;
+
+  case Self.lastState of
+    EScriptState.LOADING_FISH,
+    EScriptState.FISHING :
+      XPBar.EarnedXP(true);
+    else
+      XPBar.EarnedXP(false);
+  end;
+  //If we can't attack then fill buckets while we wait
+  if (Random(0, 10) > 4)
+    and not RSObjects.TemporossPools.Hover(1, true) then
+  begin
+    Self.Debugln("Can't hover pool, filling buckets", EOutputLevel.USEFUL);
+    Self.FillBuckets();
+  end;
+
+  Self.Debugln("Attempting to hover pool!", EOutputLevel.USEFUL);
+
+  if Self.IsGameRunning() then
+    if WaitUntil(RSObjects.TemporossPools.Hover(1, true), 100, 4700) then
+  begin
+      //if RSObjects.TemporossPools.WalkClick(true, 2) then
+      Mouse.Click(MOUSE_LEFT);
+      Self.Debugln("Clicked pool!", EOutputLevel.USEFUL);
+
+      if not WaitUntil(XPBar.EarnedXP(true), 300, 3400) then
+        RSObjects.TemporossPools.Click(true);
+
+      while (Self.GetIntensity() = 0)
+        and (Self.GetBossEnergy() < 98)
+        and (Self.IsGameRunning()) do
+      begin
+        XPBar.EarnedXP(true);
+        Antiban.DoAntiban(false, false);
+        Wait(200);
+    end;
+  end;
+
+  Self.Debugln("HandleAttacking: Done!", EOutputLevel.USER);
+
+  if Self.IsGameRunning()
+    or (Inventory.CountItem('Bucket of Water') < CJTempReqBuckets) then
+    Self.FillBuckets();
+end;
+
+function TRSChat.GetAllMessages(Colors: TIntegerArray = CHAT_MESSAGE_COLORS): TStringArray;
+var
+  i : Int32;
+
+begin
+  for i := 0 to High(CHAT_MESSAGE_LINES) do
+  begin
+    Result += Self.GetMessage(i, colors) + #13 #10;
+  end;
+end;
+
+function TCJTempoross.GetGamePermits() : Int32;
+var
+  messages : TStringArray := Chat.GetAllMessages();
+  message : string;
+begin
+  Result := -1;
+  for message in messages do
+  begin
+    if message.Contains('Reward') then
+    begin
+      message := message.Before(".");
+      Result := Round(message.ExtractNumbers()[0]);
+      Exit;
+    end;
+  end;
+end;
+
+function TCJTempoross.GetXPHr(xpAmount : Int32; timeRunning : Uint64) : Int32;
+begin
+  Result := Round(xpAmount / (timeRunning / 1000 / 60 / 60));
+end;
+
+//by Flight
+function String.ReplicateConst(count: Integer; separator: String = ''): String; constref;
+var
+  i: Int32;
+begin
+ Result := Self;
+
+ for i := 1 to count do
+   Result += separator + Self;
+end;
+
+function TCJTempoross.GetReportStrings() : TStringArray;
+const
+  spacingStart : string := "[";
+  spacingEnd : string := "|]";
+  headerFooter : string := "=";
+var
+  listOfStrings : TStringArray;
+  i : Int32;
+
+begin
+  listOfStrings += spacingStart + headerFooter.ReplicateConst(41) + spacingEnd;
+  listOfStrings += "Tempoross by CJ";
+  listOfStrings += "Runtime: " + SRL.MsToTime(GetTimeRunning(), TTimeFormat.Time_Abbrev);
+  listOfStrings += "Total XP Earned: " + ToStr(Self.totalXP);
+  listOfStrings += "Fish XP (Actual): " + ToStr(Self.fishXPGained) + "(" + ToStr(Self.GetXPHr(Self.fishXPGained, GetTimeRunning())) + ")/hr" ;
+  listOfStrings += "Fish XP (Active): " + ToStr(Self.fishXPGained) + "(" + ToStr(Self.GetXPHr(Self.fishXPGained, Self.actualXPTimer.ElapsedTime())) + ")/hr" ;
+  listOfStrings += "Fish XP This Game: " + ToStr(Self.fishXPGained - Self.fishXPThisGame);
+
+  if CJTempCook then
+  begin
+    listOfStrings += "Cooking XP (Actual): " + ToStr(Self.cookingXPGained) + "(" + ToStr(Self.GetXPHr(Self.cookingXPGained, GetTimeRunning())) + ")/hr" ;
+    listOfStrings += "Cooking XP (Active): " + ToStr(Self.cookingXPGained) + "(" + ToStr(Self.GetXPHr(Self.cookingXPGained, Self.actualXPTimer.ElapsedTime())) + ")/hr" ;
+  end;
+
+  listOfStrings += "GP From Permits: " + ToStr(Self.GPEarned) + "(" + ToStr(Self.GetXPHr(Self.permitsReceived, Self.actualXPTimer.ElapsedTime()) * Self.GetFishingPermitValue(Self.GetEstimatedFishLevel())) + ")/hr";
+  listOfStrings += "Permits (Actual): " + ToStr(Self.permitsReceived) + "(" + ToStr(Self.GetXPHr(Self.permitsReceived, GetTimeRunning())) + ")/hr" ;
+  listOfStrings += "Permits (Active): " + ToStr(Self.permitsReceived) + "(" + ToStr(Self.GetXPHr(Self.permitsReceived, Self.actualXPTimer.ElapsedTime())) + ")/hr" ;
+  listOfStrings += "Wins/Losses: " + ToStr(Self.Wins) + "/" + ToStr(Self.Losses);
+  listOfStrings += spacingStart + headerFooter.ReplicateConst(41) + spacingEnd;
+
+  //Header text
+  Result += listofStrings[0];
+  Result += spacingStart + PadL(" ", 2, " ") + PadR(listofStrings[1], 40, " ") + spacingEnd;
+  Result += Result[0];
+
+  for i := 2 to High(listOfStrings) - 1 do
+  begin
+    Result += spacingStart + PadL(" ", 2, " ") + PadR(listOfStrings[i], 40, " ") + spacingEnd;
+  end;
+
+  Result += listOfStrings[High(listOfStrings)];
+end;
+
+procedure TCJTempoross.DisplayReport();
+var
+  report : TStringArray;
+  i : Int32;
+begin
+  report := Self.GetReportStrings();
+  for i := 0 to High(report) do
+  begin
+    Writeln(report[i]);
+    Self.LogLine(report[i], true);
+  end;
+end;
+
+procedure TCJTempoross.HandleGameEnd();
+var
+  xpRead : Int32 := XpBar.Read();
+  gamePermits, gp : Int32;
+begin
+  Self.totalXP += xpRead - Self.startXP;
+  Self.startXP := xpRead;
+
+  if Chat.HasContinue() then
+  begin
+    Chat.ClickContinue(Antiban.BioDice());
+  end;
+
+  gamePermits := Self.GetGamePermits();
+
+  if gamePermits > 0 then //Win
+  begin
+    Self.permitsReceived += gamePermits;
+    Inc(Self.wins);
+    Self.Debugln("Adding win!", EOutputLevel.USEFUL);
+	  while Self.RSW.GetMyPos().InBox(RSRegions.TEMPOROSS_COVE) do
+    begin
+      try
+        if RSNpcs.SpiritAngler.WalkSelectOption(['eave', 'orfeit'], 2) then
+        begin
+          Wait(1300); //Wait for game to lose the HasContinue screen so we can check it later.
+        end;
+      except
+        begin
+          Self.Debugln("Web walker caused an exception, recovering...", EOutputLevel.USER);
+          if WaitUntil(Chat.HasContinue(), 150, 25000) then
+          begin
+            Self.Debugln("Recovered!", EOutputLEvel.USER);
+			      break;
+          end;
+        end;
+      end;
+
+      Wait(300);
+    end;
+  end;
+
+  if WaitUntil(Chat.HasContinue(), 300, 30000) then
+    if Chat.GetChat().Contains('Argh') then
+    begin
+      Inc(Self.losses);
+      Self.Debugln("Adding loss!", EOutputLevel.USEFUL);
+    end;
+
+  case Self.lastState of
+    EScriptState.LOADING_FISH,
+    EScriptState.ATTACKING:
+      XPBar.EarnedXP(true);
+    else
+      XPBar.EarnedXP(false);
+    end;
+
+  if gamePermits > 0 then
+    gp := Self.GetFishingPermitValue(Self.GetEstimatedFishLevel()) * gamePermits;
+
+  Self.gpEarned += gp;
+
+  if APIClient.IsSetup and not APIClient.Disabled then
+  begin
+    APIClient.UpdatePayload(Self.fishXPGained - Self.fishXPThisGame, gp, 0);
+    APIClient.SubmitStats(APIClient.GetUUID());
+  end;
+
+  Self.isGameStarted := false;
+  Self.DisplayReport();
+end;
+
+procedure TCJTempoross.SetupAB();
+begin
+  if CJTempUseBreaks then
+  begin
+    Antiban.SetupBreaks();
+    Antiban.OnStartBreak := @Self.OnBreakStart;
+    Antiban.OnFinishBreak := @Self.OnBreakFinish;
+  end;
+
+  Antiban.Skills := [ERSSkill.FISHING, ERSSkill.CONSTRUCTION];
+
+  if CJTempCook then
+    Antiban.Skills += ERSSkill.COOKING;
+
+  Antiban.AddTask(ONE_MINUTE * 2,   @Mouse.RandomMovement);
+  Antiban.AddTask(ONE_MINUTE * 6,   @Antiban.HoverMSPlayers);
+  Antiban.AddTask(ONE_MINUTE * 7,   @Antiban.DoLoseFocus);
+  Antiban.AddTask(ONE_MINUTE * 10,  @Antiban.RandomGameTabTask);
+  Antiban.AddTask(ONE_MINUTE * Random(15, 22),  @Antiban.HoverSkills);
+end;
+
+procedure TCJTempoross.AttemptLogin();
+var
+  attempts : Int8;
+begin
+  if not RSClient.IsLoggedIn() then
+  begin
+    Self.ResetGame();
+
+    for attempts := 0 to 4 do
+    begin
+      if Login.LoginPlayer() or RSCLient.IsLoggedIn() then
+        break;
+    end;
+
+    if RSClient.IsLoggedIn() then
+    begin
+      Wait(Random(3000, 5000));
+    end
+    else
+      TerminateScript("Could not log in!!");
+  end;
+end;
+
+//Override to actually use the waitTime.
+function TRSStats.GetSkillInfo(skill: ERSSkill; waitTime: Int32 = 1000): TRSSkillInfo; override;
+var
+  TPA: TPointArray;
+  Lines: TStringArray;
+  T: UInt64;
+  B: TBox;
+  I: Int32;
+  found : Boolean;
+begin
+  if not Self.MouseOver(skill) then
+    Exit();
+
+  T := GetTickCount() + waitTime;
+  repeat
+    if not found
+      and (SRL.FindColors(TPA, CTS0($A0FFFF), Self.Bounds) >= 1) then
+    begin
+      B := TPA.Bounds;
+      SetLength(Lines, B.Height div 12);
+      for I := 0 to High(Lines) do
+        Lines[I] := OCR.Recognize([B.X1, B.Y1 + (I * 12), B.X2, B.Y1 + ((I+1) * 12) + 3],  TOCRColorFilter.Create([0]), RS_FONT_PLAIN_12);
+
+      if Length(Lines) = 0 then
+        Continue;
+      if not (SKILLNAMES[Skill] in Lines[0]) then
+        Continue;
+
+      Result.XP := StrToIntDef(ExtractFromStr(Lines[0], Numbers), 0);
+      Result.Level := SRL.GetLevelAtXP(Result.XP);
+
+      if Length(Lines) = 3 then
+      begin
+        Result.Next := StrToIntDef(ExtractFromStr(Lines[1], Numbers), 0);
+        Result.Remainder := StrToIntDef(ExtractFromStr(Lines[2], Numbers), 0);
+        found := true;
+      end;
+    end;
+
+    Wait(50);
+  until GetTickCount() >= T;
+end;
+
+procedure TCJTEmpoross.CreateLogFile();
+const
+  BASE_LOGS : string := WL_DATAPATH + 'logs';
+  BASE_TEMPOROSS_LOGS : string := BASE_LOGS + DIRECTORYSEPARATOR + "CJTempoross";
+  OWN_CREATE : string := "Consider creating this folder yourself at the listed folder path";
+var
+  f : Int32;
+
+begin
+  if not DirectoryExists(WL_DATAPATH) and not CreateDirectory(WL_DATAPATH) then
+    TerminateScript("Could not create Data Path at: " + WL_DATAPATH + STR_NEW_LINE + OWN_CREATE);
+
+  if not DirectoryExists(BASE_LOGS) and not CreateDirectory(BASE_LOGS) then
+    TerminateScript("Could not create Base Logs folder at: " + BASE_LOGS + STR_NEW_LINE + OWN_CREATE);
+
+  if not DirectoryExists(BASE_TEMPOROSS_LOGS) and not CreateDirectory(BASE_TEMPOROSS_LOGS) then
+    TerminateScript("Could not create Base Tempoross Logs at: " + BASE_TEMPOROSS_LOGS + STR_NEW_LINE + OWN_CREATE);
+
+  Self.logPath := BASE_TEMPOROSS_LOGS + DIRECTORYSEPARATOR + "CJTempoross" + '_' + FormatDateTime('yyyy-mm-dd_hh-mm-ss', Now()) + ".txt";
+
+  if not FileExists(Self.logPath) then
+  begin
+    f := CreateFile(Self.logPath);
+    if f = -1 then
+      TerminateScript("Failed to create log path! " + Self.logPath)
+    else
+      CloseFile(f);
+  end;
+end;
+
+procedure TCJTempoross.Init();
+var
+  newZoom : Int8;
+  fishInfo : TRSSkillInfo;
+begin
+
+  Self.Name := "CJ Tempoross";
+
+  Login.Players[Login.PlayerIndex].Worlds := [422];
+
+  Self.AttemptLogin();
+
+  Self.CreateLogFile();
+
+  if RSClient.Mode <> ERSClientMode.FIXED then
+    TerminateScript("Script requires Fixed-Classic mode, please check your display options");
+
+  ChatButtons.ChangeState(ERSChatButton.PUBLIC_CHAT, ERSChatButtonState.DISABLED);
+
+  //No sense checking first because this function already does that.
+  ChatButtons.ChangeState(ERSChatButton.GAME_CHAT, ERSChatButtonState.ENABLED);
+  ChatButtons.Open(ERSChatButton.GAME_CHAT);
+
+  if Options.GetZoomLevel() > 10 then
+  begin
+    newZoom := Random(0, 9);
+    Self.Debugln("Adjusted zoom to: " + ToStr(newZoom), EOutputLevel.ALL);
+    Options.SetZoomLevel(newZoom);
+  end;
+
+  Minimap.EnableRun();
+  fishInfo := Stats.GetSkillInfo(ERSSkill.FISHING, Random(795, 1100));
+  Self.startFishXP := fishInfo.XP;
+
+  Self.wikiPermitValue := Self.ExtractWikiPermitInfo();
+
+  if (CJTempHarpoonType = EHarpoonType.BARE_HANDED) then
+    if (fishInfo.Level < 55) then
+    begin
+      Self.Debugln("Ending script, user expects to Barbarian fish without required level!", EOutputLevel.USER);
+      TerminateScript();
+    end;
+
+  WL.GameSettings.MouseWheel := false;
+
+  Mouse.Speed := SRL.NormalRange(Random(18, 22), Random(25, 30));
+  Mouse.MissChance := Random(2, 6);
+  Mouse.Distribution := MOUSE_DISTRIBUTION_GAUSS;
+
+  Self.SetupAB();
+
+  //If we're less than these we screenwalk when adaptive walking is on.
+  RSW_ADAPTIVE_SCREEN_TOGGLE_DISTANCES := [10, 45];
+
+  if CJTempUseSleeps then
+  begin
+    Antiban.AddSleep(CJTempSleepTime, CJTempSleepLength, 0.15, Random(0.7, 1));
+    Antiban.OnStartSleep := @Self.OnSleepStart;
+    Antiban.OnFinishSleep := @Self.OnSleepFinish;
+  end;
+
+  with Self do
+  begin
+    startXp := XPBar.Read();
+    totalXP := 0;
+    closeDangerbox := Mainscreen.GetPlayerBox(3, 3, 10, 10).Expand(3);
+
+    chatToggleTimer.Init(1500);
+
+    RSW.SetupRegions([RSRegions.RUINS_OF_UNKAH, RSRegions.TEMPOROSS_COVE]);
+    RSW.OnWalkEvent := @OnWalkEvent;
+    RSW.OnWalkingEvent := @OnWalkingEvent;
+    //RSW.AdaptiveWalk := true;
+   // RSW_ADAPTIVE_SCREEN_TOGGLE_DISTANCES := Point(Random(4, 10), Random(10, 15));
+
+    //Cache all this so we can easily filter out what we don't need depending on side
+    cachedMastCoords := RSObjects.TemporossMasts.Coordinates;
+    cachedTotemCoords := RSObjects.TemporossTotems.Coordinates;
+    cachedShrineCoords := RSObjects.TemporossShrines.Coordinates;
+    cachedCrateCoords := RSObjects.TemporossCrates.Coordinates;
+    cachedRopeCrateCoords := RSObjects.TemporossRopes.Coordinates;
+    cachedHammerCrateCoords := RSObjects.TemporossHammers.Coordinates;
+    cachedHarpoonCrateCoords := RSObjects.TemporossHarpoons.Coordinates;
+    cachedBucketCrateCoords := RSObjects.TemporossBuckets.Coordinates;
+    cachedPumpCoords := RSObjects.TemporossPump.Coordinates;
+    cachedTemporossPoolCoords := RSObjects.TemporossPools.Coordinates;
+
+    RSObjects.TemporossPools.Filter.UpText := false;
+  end;
+
+  Self.actualXPTimer.Start();
+end;
+
+function TCJTempoross.GetState() : EScriptState;
+var
+  isInventoryFull : Boolean;
+  rawCount : Int32;
+
+begin
+  if not Self.isGameStarted then
+  begin
+    Self.isGameStarted := Self.IsGameRunning();
+    Self.needTools := true;
+
+    //In case the GAME_START exited without setting our object stuff.
+    if Self.isGameStarted and not Self.areGameObjectsSet then
+    begin
+      Self.InitialiseSide();
+    end;
+
+    if not Self.isGameStarted then
+      Exit(EScriptSTate.GAME_START);
+  end;
+
+  if Self.noXPTimer.IsFinished() then
+  begin
+    Logout.ClickLogout(3);
+    TerminateScript("CHECK YOUR SETTINGS WE HAVEN'T EARNED ANY XP IN OVER A MINUTE");
+  end;
+
+  if Self.needTools
+     or (CJTempNeedRope and not Inventory.ContainsItem('rope')) then
+  begin
+    Self.HandleTools();
+    Self.needTools := false;
+  end;
+
+  if Self.isCooking then
+    Exit(EScriptState.COOKING);
+
+  if Self.attackOverride then
+  begin
+    Self.attackOverride := false;
+    Exit(EScriptState.ATTACKING);
+  end;
+  //Game started now what?
+  currentHazard := Self.ScanForHazards();
+  if currentHazard.hazardType <> ETemporossHazard.NONE then
+  begin
+    Self.Debugln("Detected hazard: " + ToStr(Self.currentHazard.hazardType), EOutputLevel.USER);
+    Exit(EScriptState.HANDLING_HAZARD);
+  end;
+
+  if not Self.IsGameRunning()
+    or (Self.GetIntensity() = 100) then
+  begin
+    Exit(EscriptState.GAME_END);
+  end;
+
+   //End game inventory deposit
+  if Self.isLoading
+    or Self.DoEarlyLoading() then
+      Exit(EScriptState.LOADING_FISH);
+
+  if Self.ShouldAttackBoss() then
+    Exit(EScriptState.ATTACKING);
+
+  if Self.isFishing then
+  begin
+    Self.Debugln("GetState: Returning to fishing", EOutputLevel.USEFUL);
+    Exit(EScriptState.FISHING);
+  end;
+
+  rawCount := Inventory.CountItem('Raw harpoonfish');
+  isInventoryFull := Inventory.IsFull();
+
+  //Inventory is full and we don't need to cook or we have no raw fish
+  if isInventoryFull and (not CJTempCook or (rawCount < 1)) then
+    Exit(EScriptState.LOADING_FISH);
+
+  if CJTempCook then
+    if (isInventoryFull and (rawCount > 0))
+        or (rawCount >= 6) then
+      Exit(EScriptState.COOKING);
+
+  if not isInventoryFull then
+  begin
+    Self.Debugln("GetState: Inventory not full returning to fishing", EOutputLevel.USEFUL);
+    Exit(EScriptState.FISHING);
+  end;
+end;
+
+function TCJTempoross.MainLoop() : Boolean;
+begin
+  while true do
+  begin
+
+    Self.AttemptLogin();
+
+    if (CJTempStopTime > 0)
+      and not Self.IsGameRunning()
+      and (GetTimeRunning() >= CJTempStopTime) then
+      begin
+        Logout.ClickLogout();
+        TerminateScript("Run time has elapsed!");
+      end;
+
+    if (CJTempStopPermits > 0)
+      and (Self.permitsReceived >= CJTempStopPermits) then
+      begin
+        Logout.ClickLogout();
+        TerminateScript("Permit limit reached!");
+      end;
+
+    if Self.chatToggleTimer.IsFinished() then
+    begin
+      //No sense checking first because this function already does that.
+      ChatButtons.ChangeState(ERSChatButton.GAME_CHAT, ERSChatButtonState.ENABLED);
+
+      if not ChatButtons.IsActive(ERSChatButton.GAME_CHAT) then
+        ChatButtons.Open(ERSChatButton.GAME_CHAT);
+
+      Self.chatToggleTimer.Restart();
+    end;
+
+    Self.lastState := Self.state;
+    Self.state := Self.GetState();
+    Self.Debugln("State: " + ToStr(Self.state), EOutputLevel.USER);
+    case Self.state of
+      EScriptState.GAME_START :
+      begin
+        if not Antiban.DoBreak() then
+          Antiban.DoSleep();
+
+        Self.AttemptLogin();
+        Self.HandleGameStart();
+      end;
+
+      EScriptState.HANDLING_HAZARD :  Self.HandleHazard(Self.currentHazard);
+      EScriptState.FISHING         :  Self.HandleFishing();
+      EScriptState.COOKING         :  Self.HandleCooking();
+      EScriptState.LOADING_FISH    :  Self.HandleLoading();
+      EScriptState.GET_TOOLS       :  Self.HandleTools();
+      EScriptState.ATTACKING       :  Self.HandleAttacking();
+      EScriptState.GAME_END        :  Self.HandleGameEnd();
+    end;
+  end;
+
+  Result := true;
+end;
+
+{GUI SETUP STARTS HERE}
+type
+  TOnSelectorChangedEvent = procedure(sender : TObject) of object;
+
+  TCJTemporossGUI = record (TScriptForm)
+    ropeCB, hammerCB, cookCB, useSleeps, usesBreaks : TLabeledCheckBox; //TODO: Support Solo Mode
+    harpoonCombo : TLabeledComboBox;
+    bucketInput, SleepTimeInput, SleepLengthInput, RunTimeInput, PermitLimitInput: TLabeledEdit;
+    oldSelectorOnChanged : TOnSelectorChangedEvent;
+    amCombo : TComboBox;
+  end;
+
+//Where we map our GUI values to our script's values.
+procedure TCJTemporossGUI.StartScript(sender: TObject); override;
+begin
+  CJTempCook := Self.cookCB.IsChecked();
+  CJTempNeedRope := Self.ropeCB.IsChecked();
+  CJTempNeedHammer := Self.hammerCB.IsChecked();
+  CJTempHarpoonType := EHarpoonType(Self.harpoonCombo.GetItemIndex());
+  CJTempReqBuckets := StrToInt(bucketInput.Edit.getCaption());
+  CJTempUseSleeps := Self.useSleeps.IsChecked();
+  CJTempUseBreaks := Self.usesBreaks.IsChecked();
+  CJTempSleepTime := Self.SleepTimeInput.Edit.getCaption();
+  CJTempSleepLength := StrToInt(Self.SleepLengthInput.Edit.getCaption()) * ONE_HOUR;
+  CJTempStopTime := StrToInt(Self.RunTimeInput.Edit.getCaption()) * ONE_MINUTE;
+  CJTempStopPermits := StrToINt(Self.PermitLimitInput.Edit.getCaption());
+  Bot.WriteUserConfig();
+  inherited;
+end;
+
+procedure TScriptForm._SelectorOnChange(sender: TObject); override;
+begin
+  inherited;
+  Bot.ImportUserConfig();
+end;
+
+function TFont.GetWidth(text : string) : Integer; constref;
+var
+  bmp : TBitmap;
+begin
+  bmp.Init();
+  bmp.getCanvas().setFont(Self);
+  Result := bmp.getCanvas().TextWidth(text);
+  bmp.Free();
+end;
+
+procedure TControl.SetAMColors(value: Int32);
+var
+  i: Int32;
+  child: TControl;
+  name : string;
+begin
+
+  name := Self.getName();
+
+  for i := 0 to Self.getComponentCount() - 1 do
+  begin
+    child := Self.GetComponent(i);
+    child.SetAMColors(value);
+  end;
+
+  if not name.ContainsAny(["account_manager", "am_panel", "_edit", "_memo", "_combobox"]) then
+  begin
+    Self.SetColor(value);
+  end;
+end;
+
+procedure TLabeledEdit.Show();
+begin
+  Self.Edit.Show();
+  Self.Panel.Show();
+end;
+
+procedure TLabeledEdit.Hide();
+begin
+  Self.Edit.Hide();
+  Self.Panel.Hide();
+end;
+
+procedure TCJTemporossGUI._OnAccountManagerSelected({$H-}sender: TObject);{$H+}
+begin
+  Bot.WriteUserConfig();
+end;
+
+procedure TCJTemporossGUI._OnScriptSettingsSelected({$H-}sender: TObject);{$H+}
+begin
+  Bot.ImportUserConfig();
+  Self.harpoonCombo.ComboBox.setItemIndex(Ord(CJTempHarpoonType));
+  Self.cookCB.SetChecked(CJTempCook);
+  Self.ropeCB.SetChecked(CJTempNeedRope);
+  Self.hammerCB.SetChecked(CJTempNeedHammer);
+  Self.bucketInput.Edit.setCaption(ToStr(CJTempReqBuckets));
+  Self.useSleeps.SetChecked(CJTempUseSleeps);
+  Self.usesBreaks.SetChecked(CJTempUseBreaks);
+  Self.SleepTimeInput.Edit.setCaption(CJTempSleepTime);
+  Self.SleepLengthInput.Edit.setCaption(ToStr(Round(CJTempSleepLength / ONE_HOUR)));
+  Self.PermitLimitInput.Edit.setCaption(ToStr(CJTempStopPermits));
+  Self.RunTimeInput.Edit.setCaption(ToStr(Round(CJTempStopTime / ONE_MINUTE)));
+
+  if CJTempUseSleeps then
+  begin
+    Self.SleepTimeInput.Show();
+    Self.SleepLengthInput.Show();
+  end
+  else
+  begin
+    Self.SleepTimeInput.Hide();
+    Self.SleepLengthInput.Hide();
+  end;
+end;
+
+procedure TCJTemporossGUI._OnCheckBoxChanged(sender: TObject);
+var
+  check : TCheckBox;
+  name : string;
+  checked : boolean;
+begin
+  check := sender;
+  name := check.getName();
+  checked := check.IsChecked();
+
+  case name of
+    'cookcb_checkbox' : CJTempCook := checked;
+    'ropecb_checkbox' : CJTempNeedRope := checked;
+    'hammercb_checkbox' : CJTempNeedHammer := checked;
+    'usesleepscb_checkbox' :
+    begin
+      CJTempUseSleeps := checked;
+      if CJTempUseSleeps then
+      begin
+        Self.SleepTimeInput.Show();
+        Self.SleepLengthInput.Show();
+      end
+      else
+      begin
+        Self.SleepTimeInput.Hide();
+        Self.SleepLengthInput.Hide();
+      end;
+    end;
+  end;
+end;
+
+procedure TCJTemporossGUI._OnEditBoxChanged(sender: TObject);
+var
+  edit : TEdit;
+  text : string;
+begin
+  edit := sender;
+
+  text := edit.getText();
+
+  if Length(text) < 1 then
+    Exit;
+
+  case edit.getName() of
+    "sleeptimeinput_edit"   : CJTempSleepTime := text;
+    "sleeplengthinput_edit" : CJTempSleepLength := StrToInt(text);
+    "permitlimit_edit"      : CJTempStopPermits := StrToint(text);
+    "runtimeinput_edit"     : CJTempStopTime := StrToInt(text) * ONE_MINUTE;
+    "bucketinput_edit"      : CJTempReqBuckets := StrToint(text);
+  end;
+end;
+
+procedure TCJTemporossGUI._OnComboChanged(sender: TObject);
+var
+  combo : TComboBox;
+begin
+  combo := sender;
+  CJTempHarpoonType := EHarpoonType(combo.getItemIndex());
+  Writeln("COMBO HARPOON: ", CJTempHarpoonType);
+end;
+
+function TCJTemporossGUI.CreateSettingsTab() : TTabSheet;
+var
+  titleShadow : TLabel;
+  scriptHeader : TLabel;
+begin
+  Result.Init(nil);
+  Result.setCaption('Script Settings');
+  Result.SetName('Settings_Tab');
+
+  Self.Start.setOnClick(@Self.StartScript);
+
+  Result.SetFontSize(9);
+  Result.setOnShow(@Self._OnScriptSettingsSelected);
+  Result.setColor(12047830);
+  Result.SetFontColor(0);
+
+  with titleShadow do
+  begin
+    Create(Result);
+    SetCaption("CJ's Tempoross");
+    SetName("shadowLabel");
+    SetFontSize(30);
+    SetLeft(Round(Self.Form.getWidth() / 2) - Round(getFont().GetWidth(getCaption()) / 2));
+    getFont().setColor(0);
+  end;
+
+  with scriptHeader do
+  begin
+    Create(Result);
+    SetCaption("CJ's Tempoross");
+    SetTop(titleShadow.getTop() - TControl.AdjustToDPI(1));
+    SetFontSize(30);
+    SetLeft(titleShadow.getLeft() - TControl.AdjustToDPI(3));
+    getFont().setColor(16758374);
+  end;
+
+  with Self.harpoonCombo do
+  begin
+    Create(Result);
+    SetTop(scriptHeader.GetBottom() + TControl.AdjustToDPI(Abs(scriptHeader.getFont().getHeight()) + 20));
+    SetLeft(TControl.AdjustToDPI(40));
+    SetCaption("Harpoon Type");
+    SetHint("Won't spec if not equipped");
+    Combobox.getFont().setColor(0);
+    Self.harpoonCombo.ComboBox.setItemIndex(Ord(CJTempHarpoonType));
+    Combobox.setOnChange(@Self._OnComboChanged);
+    AddItemArray(GetHarpoonStrings());
+    SetItemIndex(Ord(CJTempHarpoonType));
+  end;
+
+  with Self.bucketInput do
+  begin
+    Create(Result);
+    Edit.getFont().setColor(0);
+    SetName("bucketinput");
+    SetTop(Self.harpoonCombo.GetBottom() + TControl.AdjustToDPI(10));
+    SetLeft(Self.harpoonCombo.GetLeft());
+    SetCaption("Number of Buckets:");
+    Edit.setCaption(ToStr(CJTempReqBuckets));
+    Edit.setMaxLength(2);
+    Edit.setOnChange(@Self._OnEditBoxChanged);
+    Edit.setOnKeyPress(@Edit.NumberField);
+  end;
+
+  with Self.cookCB do
+  begin
+    Create(Result);
+    SetTop(Self.harpoonCombo.GetTop() + TControl.AdjustToDPI(0));
+    SetLeft(Self.harpoonCombo.GetRight() + TControl.AdjustTODPI(100));
+    SetCaption("Cook Fish? (Good for permits)");
+    SetName("cookCB");
+    CheckBox.SetChecked(CJTempCook);
+    CheckBox.setOnChange(@Self._OnCheckBoxChanged);
+    SetChecked(CJTempCook);
+  end;
+
+  with Self.ropeCB do
+  begin
+    Create(Result);
+    SetCaption("Need rope? (Leave unchecked if you have full Spirit Angler)");
+    SetName("ropeCB");
+    CheckBox.SetChecked(CJTempNeedRope);
+    CheckBox.setOnChange(@Self._OnCheckBoxChanged);
+    SetTop(Self.cookCB.GetBottom() + TControl.AdjustToDPI(10));
+    SetLeft(Self.cookCB.GetLeft());
+  end;
+
+  with Self.hammerCB do
+  begin
+    Create(Result);
+    SetCaption("Need hammer? (Leave unchecked if you have Imcando Hammer)");
+    SetName("hammerCB");
+    CheckBox.SetChecked(CJTempNeedHammer);
+    CheckBox.setOnChange(@Self._OnCheckBoxChanged);
+    SetTop(Self.ropeCB.GetBottom() + TControl.AdjustToDPI(10));
+    SetLeft(Self.cookCB.GetLeft());
+  end;
+
+  with Self.PermitLimitInput do
+  begin
+    Create(Result);
+    SetCaption("Set Permit Limit (0 is no limit)");
+    SetName("permitLimit");
+    Edit.setCaption(ToStr(CJTempStopPermits));
+    Edit.setOnChange(@Self._OnEditBoxChanged);
+    Edit.setMaxLength(5);
+    SetTop(Self.hammerCB.GetBottom() + TControl.AdjustToDPI(15));
+    SetLeft(Self.hammerCB.GetLeft());
+  end;
+
+  with Self.RunTimeInput do
+  begin
+    Create(Result);
+    SetName("runtimeinput");
+    SetCaption("Set Runtime Minutes (0 is forever)");
+    Self.RunTimeInput.SetWidth(Self.RunTimeInput.GetWidth() + 10);
+    Edit.setMaxLength(6);
+    Edit.setCaption(ToStr(CJTempStopTime));
+    SetTop(Self.PermitLimitInput.GetTop());
+    Edit.setOnChange(@Self._OnEditBoxChanged);
+    SetLeft(Self.PermitLimitInput.GetRight() + TControl.AdjustToDPI(10));
+  end;
+
+  with Self.useSleeps do
+  begin
+    Create(Result);
+    SetCaption("Use sleeps?");
+    SetName("useSleepsCB");
+    CheckBox.SetChecked(CJTempUseSleeps);
+    CheckBox.setOnChange(@Self._OnCheckBoxChanged);
+    SetTop(Self.bucketInput.GetBottom() + TControl.AdjustToDPI(20));
+    SetLeft(Self.bucketInput.GetLeft());
+  end;
+
+  with Self.usesBreaks do
+  begin
+    Create(Result);
+    SetCaption("Use breaks?");
+    SetName("useBreaksCB");
+    CheckBox.SetChecked(CJTempUseBreaks);
+    CheckBox.setOnChange(@Self._OnCheckBoxChanged);
+    SetTop(Self.useSleeps.GetTop());
+    SetLeft(Self.useSleeps.GetRight() + TControl.AdjustToDPI(20));
+  end;
+
+  with Self.SleepTimeInput do
+  begin
+    Create(Result);
+    Self.SleepTimeInput.SetWidth(Self.SleepTimeInput.GetWidth() + 20);
+    SetCaption("Sleep at: (Time is in 24 hour format)");
+    SetText(CJTempSleepTime);
+    SetName("sleeptimeinput");
+    SetLeft(useSleeps.GetLeft());
+    Edit.setMaxLength(8);
+    Edit.setOnKeyPress(@Edit.TimeField);
+    SetTop(Self.useSleeps.GetBottom() + TControl.AdjustToDPI(12));
+    Edit.setOnChange(@Self._OnEditBoxChanged);
+  end;
+
+  with Self.SleepLengthInput do
+  begin
+    Create(Result);
+    SetCaption("Sleep length (hours): ");
+    SetName("sleeplengthinput");
+    SetText(IntToStr(CJTempSleepLength div ONE_HOUR));
+    SetLeft(Self.SleepTimeInput.GetLeft());
+    SetTop(Self.SleepTimeInput.GetBottom() + TControl.AdjustToDPI(12));
+    Edit.setOnChange(@Self._OnEditBoxChanged);
+  end;
+
+  if not CJTempUseSleeps then
+  begin
+    Self.SleepTimeInput.Hide();
+    Self.SleepLengthInput.Hide();
+  end;
+end;
+
+procedure TCJTemporossGUI.Setup(caption: String = 'Script Form'; size: TPoint = [750, 500]; allowResize: Boolean = False); override;
+const
+  IMG_PATH : string := AppPath+'\Resources\CJTempoross.jpg';
+
+var
+  Img: TPicture;
+  BGImg: TImage;
+  gotPic : Boolean;
+  bgPanel : TPanel;
+  tab : TTabsheet;
+begin
+  inherited;
+
+  if not DirectoryExists(AppPath+'\Resources\') then
+    CreateDirectory(AppPath+'\Resources');
+
+  if not FileExists(IMG_PATH) then
+    DownloadToFile('https://i.imgur.com/jSvFW04.jpeg', IMG_PATH);
+
+  Self.Form.setShowHint(true);
+
+  with bgPanel do
+  begin
+    Create(Self.PageControl);
+    SetColor(0);
+    bgPanel.setWidth(size.X);
+    bgPanel.setHeight(size.Y);
+  end;
+
+  gotPic := FileExists(IMG_PATH);
+
+  if gotPic then
+  begin
+    Img.Init();
+    Img.LoadFromFile(IMG_PATH);
+
+    with BGImg do
+    begin
+     Init(Self.PageControl);
+
+     SetParent(Self.PageControl);
+     SetBounds(0, 0, Self.Form.getWidth(), Self.Form.getHeight() - 50);
+     SetStretch(true);
+
+     SetPicture(Img);
+    end;
+  end;
+
+  Self.AddTab(Self.CreateSettingsTab());
+  Self.CreateAccountManager();
+
+  tab := Self.Tabs[High(Self.Tabs)];
+  tab.SetAMColors(12047830);
+  tab.setOnShow(@Self._OnAccountManagerSelected);
+
+  Self.CreateAPISettings();
+  tab := Self.Tabs[High(Self.Tabs)];
+  tab.SetAMColors(12047830);
+
+  Self.Form.SetChildsFontColor(0);
+end;
+
+//Scoped to a procedure so the GUI object doesn't sit in memory.
+//Object based to eliminate name clashes.
+procedure TCJTempoross.ProcessGUI();
+var
+  CJTempGUI : TCJTemporossGUI;
+begin
+  CJTempGUI.Setup("CJPoross", Point(725, 600), false);
+  CJTempGUI.Run();
+end;
+
+begin
+  Bot.SetDefaultScriptSettings();
+  Bot.ImportUserConfig();
+  Bot.ProcessGUI();
+  Bot.Init();
+  if not Bot.MainLoop() then
+    Exit;
+end.

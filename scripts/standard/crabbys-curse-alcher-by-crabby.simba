@@ -1,0 +1,264 @@
+{$UNDEF SCRIPT_ID}{$DEFINE SCRIPT_ID := '641d824f-4a05-4760-b479-17c68844adf7'}
+{$UNDEF SCRIPT_REVISION}{$DEFINE SCRIPT_REVISION := '4'}
+program cursealch;
+
+var
+  HighAlch, Curse, MagicTab, SkillTab, MagicLvl: Integer;
+  Ready: Boolean;
+
+const
+
+(*USER SETUP*)
+  ENEMYCOLOR = 4739249; //Main CTS2 Color
+  COLTOL = 4; //Color tolerance
+  COLHUE = 0.06;  //Hue from CTS2 Color
+  COLSAT = 0.64;  //Sat from CTS2 Color
+  ALCH = True;  //If set to false will cast curse only
+  ANTIBAN = True; //Does antiban stuff
+  CAST = 100;  //Number of casts
+  ABORTKEY =  VK_F2; //Hold this key down to abort the script!
+
+(*Interface coords, don't modify!*)
+
+  IX1 = 530;
+  IY1 = 169;
+  IX2 = 758;
+  IY2 = 493;
+
+
+procedure FREEDTMS;
+begin
+  FreeDTM(HighAlch);
+  FreeDTM(Curse);
+  FreeDTM(MagicTab);
+  FreeDTM(SkillTab);
+  FreeDTM(MagicLvl);
+end;
+
+procedure LOADDTM;
+begin
+  HighAlch := DTMFromString('mQwAAAHicY2ZgYLjMxMBwAohvALEJIwODD' + 'RDbA/GeQwcYfn3jAWNkwIiEgQAAiZAJaA==');
+  Curse := DTMFromString('mQwAAAHicY2ZgYJjHxMAwHYjnA/EnIP8rEL8C4vDw9' + 'Qwr2d6CMTJgRMJAAACM3QlH');
+  MagicTab := DTMFromString('mQwAAAHicY2ZgYHjJxMDwHIifAPF2IP8gEK8H4va8U' + 'IaD22czbF0xgwEZMCJhIAAAuh4KOg==');
+  SkillTab := DTMFromString('mQwAAAHicY2ZgYHBgYmAwA2IPIN4B5O8H4gNAbN/qyr' + 'BQV5fBLWgZAzJgRMJAAAAEOQZE');
+  MagicLvl := DTMFromString('mQwAAAHicY2ZgYDBhYmCwBWJtIK5hZGBoBeIWIJZmm8T' + 'AwPYPQiMBRiQMBAC+ngSb');
+  AddOnTerminate(@ FREEDTMS);
+end;
+
+Procedure Abort;
+begin
+  if IsKeyDown(ABORTKEY) then
+  TerminateScript();
+end;
+
+procedure Check;
+(*We're looking for the Curse spell DTM to make sure we are ready to go!*)
+var
+  x, y, x2, y2: Integer;
+begin
+  if FindDtm(Curse, x, y, IX1, IY1, IX2, IY2) then
+  begin
+    Ready := true;
+  end else
+  begin
+    if FindDTM(MagicTab, x, y, IX1, IY1, IX2, IY2) then
+    begin
+      MoveMouse(x + (RandomRange(- 10, 10)), y + (RandomRange(- 10, 10)));
+      GetMousePos(x2, y2);
+      Sleep(RandomRange(150, 350));
+      ClickMouse(x2, y2, MOUSE_LEFT);
+      Ready := True;
+      Sleep(RandomRange(150, 350));
+    end;
+  end;
+end;
+
+procedure CastCurse;
+var
+  x, y, x2, y2: Integer;
+begin
+  if Ready and FindDTM(Curse, x, y, IX1, IY1, IX2, IY2) then //Looking for the curse spell
+  begin
+    //If it finds move to the spell
+    MoveMouse(x + (RandomRange(- 5, 5)), y + (RandomRange(- 5, 5)));
+    //Getting mouse position so it doesn't move when we click!
+    GetMousePos(x2, y2);
+    Sleep(RandomRange(150, 350));
+    //Then finally click the spell
+    ClickMouse(x2, y2, MOUSE_LEFT);
+    Sleep(RandomRange(300, 350));
+  end else
+  begin
+    WriteLn('Could not find Curse Spell');
+    TerminateScript();
+  end;
+
+  if not alch then
+    Sleep(RandomRange(850, 925));
+end;
+
+procedure FindEnemy;
+var
+  x, y: Integer;
+  tpa: tPointarray;
+  atpa: t2DPointArray;
+  ClickPoint: tPoint;
+begin
+  // Set colors to CTS2
+  setColorToleranceSpeed(2);
+  //Set CTS2 Hue and Saturation
+  setToleranceSpeed2Modifiers(COLHUE, COLSAT);
+  //            The array|Color we want|Top Left/Bottom Right of box we're looking in|CTS2 Color Tolerance
+  findColorsTolerance(tpa, ENEMYCOLOR, 1, 1, 515, 337, COLTOL);
+
+  //If the array has no points (no colors found) then the script terminates
+  if Length(tpa) = 0 then
+  begin
+    WriteLn('Could not locate color');
+    TerminateScript();
+  end;
+
+
+  atpa := tpaToATPA(TPA, 5);  // Choose how big (pixels) your object is
+  SortATPASize(ATPA, true);   //Sorts the points in the array by size on the screen
+  ClickPoint := middleTPA(atpa[0]);  //Getting the coordinates of the middle of the first point in the array.
+
+  //Moving mouse to the point (with randomization) and clicking
+  MoveMouse(ClickPoint.x + (RandomRange(- 5, 5)), ClickPoint.y + (RandomRange(- 5, 5)));
+  GetMousePos(x, y);
+  Sleep(randomRange(400, 800));
+  ClickMouse(x, y, MOUSE_LEFT);
+end;
+
+procedure Alchemy;
+var
+  x, y, x2, y2: Integer;
+  UpText: String;
+begin
+
+  if Ready and FindDTM(HighAlch, x, y, IX1, IY1, IX2, IY2) then //Looking for High Alch
+  begin
+    //If it finds move to the spell
+    MoveMouse(x + (RandomRange(1, 6)), y + (RandomRange(- 2, 7)));
+    //Getting mouse position so it doesn't move when we click!
+    GetMousePos(x2, y2);
+    Sleep(RandomRange(150, 350));
+    //We click the spell first!
+    ClickMouse(x2, y2, MOUSE_LEFT);
+    Wait(RandomRange(500, 700));
+
+    {UpText := rs_GetUpText(); }
+
+    //Then the item!
+    ClickMouse(x2, y2, MOUSE_LEFT);
+    Sleep(500);
+
+
+   { UpText := rs_GetUpText();
+
+    if UpText = '' then  //If there is no uptext we didn't alch an item, terminate script
+      begin
+        WriteLn('Nothing to alch');
+        TerminateScript;
+      end; }
+
+    MoveMouse((RandomRange(-50,50)),(RandomRange(-50,50)));
+
+    Sleep(RandomRange(800, 1300));
+
+
+
+
+  end else
+  begin
+    WriteLn('Could not find Alch Spell');
+    TerminateScript();
+  end;
+end;
+
+procedure CheckMagic;
+var
+  x, y, x2, y2: Integer;
+begin
+  if FindDTM(SkillTab, x, y, IX1, IY1, IX2, IY2) then
+  begin
+    MoveMouse(x + (RandomRange(- 5, 5)), y + (RandomRange(- 5, 5)));
+    GetMousePos(x2, y2);
+    Sleep(RandomRange(150, 350));
+    ClickMouse(x2, y2, MOUSE_LEFT);
+    Sleep(RandomRange(300, 400));
+  end;
+
+  if FindDTM(MagicLvl, x, y, IX1, IY1, IX2, IY2) then
+  begin
+    MoveMouse(x + (RandomRange(- 2, 7)), y + (RandomRange(- 10, 3)));
+    Sleep(RandomRange(1000, 3500));
+  end;
+
+  if FindDTM(MagicTab, x, y, IX1, IY1, IX2, IY2) then
+  begin
+    MoveMouse(x + (RandomRange(- 10, 10)), y + (RandomRange(- 10, 10)));
+    GetMousePos(x2, y2);
+    Sleep(RandomRange(150, 350));
+    ClickMouse(x2, y2, MOUSE_LEFT);
+    Ready := true;
+    Sleep(RandomRange(150, 350));
+  end;
+end;
+
+procedure ShortBreak;
+begin
+  WriteLn('Taking a short break');
+  Sleep(RandomRange(5000,15000));
+end;
+
+procedure LongBreak;
+begin
+  WriteLn('Taking a longer break');
+  Sleep(RandomRange(30000,200000));
+end;
+
+procedure DoAntiban;
+var
+SORANDOM: Integer;
+begin
+  //Getting a random number
+  SORANDOM := RandomRange(1, 800);
+
+  case (SORANDOM) of
+    2..10 : CheckMagic;
+    11..19: ShortBreak;
+    20..22: LongBreak;
+  end;
+end;
+
+
+procedure MainLoop;
+var
+  Counter: Integer;
+begin
+
+  Counter := 0;
+
+  while Counter < Cast do
+  begin
+    Abort;
+    Check;
+    CastCurse;
+    FindEnemy;
+    if ALCH then
+      Alchemy;
+    if ANTIBAN then
+      DoAntiban;
+    inc(Counter);
+    Ready:=False;
+    Abort;
+  end;
+
+end;
+
+begin
+  LoadDTM;
+  MainLoop;
+  WriteLn('thanksbruh');
+end.

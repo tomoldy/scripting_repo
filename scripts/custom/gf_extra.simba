@@ -1,0 +1,3950 @@
+{$DEFINE SCRIPT_ID := '207740d3-c22b-4209-bbe3-81fc93bd0e53'}
+{$UNDEF SCRIPT_REVISION}
+{$DEFINE SCRIPT_REVISION := '17'}
+program GiantsFoundry;
+{$IFDEF WINDOWS}
+{$DEFINE SCRIPT_GUI}
+{$ENDIF}
+{$I SRL-T/OSR.simba}
+{$I WaspLib/osr.simba}
+
+// ================================================================
+// BigAussie-style Breaks integration
+//  - #1 Mini breaks (hard-coded)
+//  - #2 Planned breaks (GUI-editable "every X min for ~Y min")
+//  - #3 Sleep (existing long break at a certain time)
+// Also includes a per-sword micro-break chance (10–25s)
+// ================================================================
+
+type
+  EBar = (BRONZE, IRON, STEEL, MITHRIL, ADAMANT, RUNE);
+  //=============EDIT WITHOUT A GUI==============
+var
+  EnableGui: Boolean := true;
+  ExportMoulds: Boolean := true;
+  AlloyOne: EBar := EBar.MITHRIL;
+  AlloyOneAmount: Int32 := 9;
+  AlloyTwo: EBar := EBar.STEEL;
+  AlloyTwoAmount: Int32 := 19;
+  BankTab: Int32 := 2;
+  WriteDebug: Boolean := true;
+  SleepLength: UInt64 := 8 * ONE_HOUR;
+  SleepTime: String := "00:00:00"; // "00:00:00" sleeps at midnight; "22:00:00" sleeps at 10pm
+
+// ---------- Planned break (GUI) defaults ----------
+var
+  PlannedBreaksEnabled: Boolean := True; // #2 planned breaks on by default
+  PlannedEveryMinutes: Int32 := 90;      // every X minutes
+  PlannedForMinutes: Int32 := 15;        // for ~Y minutes
+
+const
+  // per-sword micro break chance (%) and duration (ms)
+  PER_SWORD_MICRO_BREAK_CHANCE_PCT = 35; // 35% chance
+  PER_SWORD_MICRO_BREAK_MIN_MS = 10000;  // 10s
+  PER_SWORD_MICRO_BREAK_MAX_MS = 25000;  // 25s
+
+  // mini break defaults (hard-coded #1)
+  MINI_BREAK_CHANCE_PCT_DEFAULT = 40; // when due
+  MINI_GAP_MIN_MS_DEFAULT = 25 * ONE_MINUTE;
+  MINI_GAP_MAX_MS_DEFAULT = 55 * ONE_MINUTE;
+  MINI_LEN_MIN_MS_DEFAULT = 30000;   // 30s
+  MINI_LEN_MAX_MS_DEFAULT = 120000;  // 120s
+
+  // planned break jitter
+  PLANNED_CADENCE_JITTER_PCT_DEFAULT = 10; // ±10% on cadence
+  PLANNED_LENGTH_JITTER_PCT_DEFAULT  = 20; // ±20% on length
+
+
+type
+  EFoundryState = (
+    GET_COMMISSION,
+    SETUP_MOULD,
+    DO_BANK,
+    FILL_CRUCIBLE,
+    POUR_CRUCIBLE,
+    GET_SWORD_MOULD,
+    HEAT_FAST,
+    HEAT_SLOW,
+    COOL_FAST,
+    COOL_SLOW,
+    USE_TRIP_HAMMER,
+    USE_GRINDSTONE,
+    USE_POLISH,
+    TURN_IN_SWORD,
+    UNPROCESSABLE
+  );
+
+  EHeatState = (
+    COLD,
+    GREEN,
+    WARM,
+    YELLOW,
+    HOT,
+    RED,
+    BLAZING
+  );
+
+  THeat = record
+    state: EHeatState;
+    percent: Int32;
+  end;
+
+  ESwordAffixType = (
+    HEAVY,
+    FLAT,
+    NARROW,
+    SPIKED,
+    BROAD,
+    LIGHT
+  );
+
+  ESwordSection = (
+    FORTE,
+    BLADES,
+    TIPS
+  );
+
+  TSword = record
+    isSetup: Boolean;
+    prefix: ESwordAffixType;
+    suffix: ESwordAffixType;
+  end;
+
+  TMouldAffix = record
+    affix: ESwordAffixType;
+    points: Int32;
+  end;
+
+  TMould = record
+    LeftAffix: TMouldAffix;
+    CenterAffix: TMouldAffix;
+    RightAffix: TMouldAffix;
+    scrollPosition: Int32;
+  end;
+
+  EMachine = (
+    TRIP_HAMMER,
+    GRINDSTONE,
+    POLISHING_WHEEL,
+    NONE
+  );
+
+    EMeltableItem = (
+              INVALID,
+              PLATEBODY,
+              PLATESKIRT,
+              PLATELEGS,
+              SWORD_2H,
+              KITESHIELD,
+              CHAINBODY,
+              BATTLEAXE,
+              WARHAMMER,
+              CLAWS,
+              SQ_SHIELD,
+              FULL_HELM,
+              LONGSWORD,
+              SCIMITAR,
+              BAR
+  );
+
+  TMeltable = record
+    ItemName: EMeltableItem;
+    BarCount: Int32;
+    Quantity: Int32;
+  end;
+
+  TMeltableArray = array of TMeltable;
+
+  TMachine = record
+    rsObj: TRSObject;
+    doesHeatSword: Boolean;
+    machineType: EMachine;
+    heatNeeded: EHeatState;
+    actionMinPercent: Integer;
+    actionMaxPercent: Integer;
+  end;
+
+  TMachineHUDSection = record
+    machineType: EMachine;
+    bounds: TBox;
+  end;
+
+  TFoundryStats = record
+    numSwordsDamaged: Integer;
+    XPEarned: Integer;
+    goldEarned: Integer;
+    numSwordsMade: Integer;
+    startXP: Integer;
+  end;
+
+  TFoundry = record(TBaseScript)
+    RSW: TRSWalker;
+    State: EFoundryState;
+    Sword: TSword;
+    IsMouldReady: Boolean;
+    IsMouldFilled: Boolean;
+    IsSwordSectionsSet: Boolean;
+    SavedDebugThisRound: Boolean;
+    SwordSections: TBoxArray;
+    PolishingWheel: TMachine;
+    Grindstone: TMachine;
+    TripHammer: TMachine;
+    NoMachine: TMachine;
+    LavaPool: TRSObject;
+    Waterfall: TRSObject;
+    MouldScrollArea: TBox;
+    MouldScrollBar: TRSScrollBar;
+    HaveMouldsBeenCached: Boolean;
+    BladeMoulds: array of TMould;
+    ForteMoulds: array of TMould;
+    TipMoulds: array of TMould;
+    Crucible: record
+      rsObj: TRSObject;
+      alloyOneBars: Int32;
+      alloyTwoBars: Int32;
+      isPouring: Boolean;
+      isPoured: Boolean;
+    end;
+    MouldJig: TRSObject;
+    BankChest: TRSObject;
+    Stats: TFoundryStats;
+    ActivityTimer : TCountDown;
+    HUD: record
+      Bounds: TBox;
+      Machine: record
+        bounds: TBox;
+        sections: array of TMachineHUDSection;
+      end;
+      Heat: record
+        bounds: TBox;
+        sections: TBoxArray;
+      end;
+    end;
+    HUDFails: Int32;
+
+    // -------- BigAussie-style break scheduler fields --------
+    NextMiniBreakAt: UInt64;
+    NextPlannedBreakAt: UInt64;
+    LastTurnInAt: UInt64;
+
+    PlannedEnabled: Boolean;
+    PlannedEveryMin: Int32;
+    PlannedForMin: Int32;
+
+    MiniChancePct: Int32;
+    MiniGapMinMs: UInt64;
+    MiniGapMaxMs: UInt64;
+    MiniLenMinMs: UInt64;
+    MiniLenMaxMs: UInt64;
+
+    PlannedCadenceJitterPct: Int32;
+    PlannedLengthJitterPct: Int32;
+  end;
+
+const
+  MELTABLE_GEAR: TStringArray := [
+    'bar',
+    'scimitar',
+    'longsword',
+    'full helm',
+    'sq shield',
+    'claws',
+    'warhammer',
+    'battleaxe',
+    'chainbody',
+    'kiteshield',
+    '2h sword',
+    'platelegs',
+    'plateskirt',
+    'platebody'
+  ];
+  HUD_INTERSECTION_GREY: TCTS2Color := CTS2(4079166, 8, 0.01, 0.01);
+  HEAT_GREEN: TCTS2Color := CTS2(5423197, 26, 0.36, 0.47);
+  HEAT_YELLOW: TCTS2Color := CTS2(3777008, 10, 0.31, 1.01);
+  HEAT_RED: TCTS2Color := CTS2(2893741, 13, 0.32, 1.16);
+  PROGRESS_BLUE: TCTS2Color := CTS2(15975446, 6, 0.06, 1.93);
+
+var
+  FoundryBot: TFoundry;
+
+
+procedure ScreenShotWrapper();
+var
+  W, H : Int32;
+begin
+  client.GetIOManager().GetDimensions(W,H);
+  SaveScreenshot('seachBoxSwap' + DIRECTORYSEPARATOR + 'searchBoxSwap', Box(0, 0, W - 1, H - 1));
+end;
+
+function TSRL.FindColorsHelper(out TPA: TPointArray; Area: TBox; Color, Tol, CTS: Integer; Hue, Sat: Double = 0.2): Int32; constref; override;
+type
+  TCTSContainer = record CTS: Int32; Hue, Sat: Extended; end;
+var
+  Old: TCTSContainer;
+
+begin
+  Old.CTS := GetToleranceSpeed();
+  if (Old.CTS = 2) then
+    GetToleranceSpeed2Modifiers(Old.Hue, Old.Sat);
+
+  SetColorToleranceSpeed(CTS);
+  SetToleranceSpeed2Modifiers(Hue, Sat);
+
+  if (Area.X1 > Area.X2)
+  or (Area.Y1 > Area.Y2) then
+  begin
+    Writeln("THIS SEARCH WILL FAIL, BOX: ", Area, " Color: ", Color);
+    ScreenShotWrapper();
+  end;
+
+  if FindColorsTolerance(TPA, Color, Area.X1, Area.Y1, Area.X2, Area.Y2, Tol) then
+    Result := Length(TPA);
+
+  SetColorToleranceSpeed(Old.CTS);
+  if (Old.CTS = 2) then
+    SetToleranceSpeed2Modifiers(Old.Hue, Old.Sat);
+end;
+
+function TFoundry.CheckForRandomEventUpText() : Boolean;
+var
+  uptext : string;
+begin
+  upText := Mainscreen.GetUpText();
+  uptext := uptext.Before(' ').Strip();
+  Result := uptext.ContainsAny(['tal', 'Tal', 'to']);
+end;
+
+function MouldAffix(aff: ESwordAffixType; p: Int32): TMouldAffix;
+begin
+    Result.affix := aff;
+    Result.points := p;
+end;
+
+function Mould(mL, mC, mR: TMouldAffix; sp: Int32): TMould;
+begin
+  Result.LeftAffix := mL;
+  Result.CenterAffix := mC;
+  Result.RightAffix := mR;
+  Result.scrollPosition := sP;
+end;
+
+//Included here because the above functions are called within this MouldLibrary file
+//Won't compile without it and can't be at the top either
+{$IFHASFILE Scripts/MouldLibrary.simba}
+  {$I Scripts/MouldLibrary.simba}
+{$ENDIF}
+
+function TRSChat.GetChat(colors: TIntegerArray): String; overload;
+var
+  Option: TRSChatboxOption;
+begin
+  for Option in Self.GetOptions(colors) do
+  begin
+    if Result <> '' then
+      Result += LineEnding;
+
+    Result += Option.Text;
+  end;
+end;
+
+function TBox.IsValid() : Boolean;
+begin
+  Result := (Self.X1 < Self.X2) and (Self.Y1 < Self.Y2);
+end;
+
+procedure TRSMinimap.RotateWithinAngles(min, max: Int32);
+var
+  minMaxAvg: Int32 := Floor ((min + max) div 2);
+  preferredAngle: Int32 := SRL.SkewedRand (minMaxAvg, min, max);
+begin
+  if preferredAngle < 0 then
+    preferredAngle := preferredAngle + 360;
+  Minimap.SetCompassAngle(preferredAngle);
+end;
+
+procedure TRSEquipment.RemoveGearFromSlot(slot: ERSEquipmentSlot);
+var
+  equipBoxes: TBoxArray := self.GetSlotBoxes();
+  button: TBox;
+begin
+  while Equipment.IsSlotUsed(slot) and not Equipment.ContainsItem('Preform') do
+  begin
+    button := equipBoxes[Ord(slot)];
+    Mouse.Click(button, MOUSE_LEFT);
+    Wait(300);
+  end;
+end;
+
+function TFoundry.getBarEquivalentAmount(item: TRSItem): Int32;
+var
+  itemName: String := ToString (item);
+  meltableType: String := itemName.After (' ');
+begin
+  //Self.DebugLn("Checking item: " + item);
+  case meltableType of
+    'bar': Result := 1;
+    'scimitar': Result := 1;
+    'longsword': Result := 1;
+    'full helm': Result := 1;
+    'sq shield': Result := 1;
+    'claws': Result := 1;
+    'warhammer': Result := 2;
+    'battleaxe': Result := 2;
+    'chainbody': Result := 2;
+    'kiteshield': Result := 2;
+    '2h sword': Result := 2;
+    'platelegs': Result := 2;
+    'plateskirt': Result := 2;
+    'platebody': Result := 4;
+    else
+      raise 'passed ' + itemName + ' doesnt have bar amount';
+  end;
+end;
+
+function TFoundry.getSwordAffix(affix: String): ESwordAffixType;
+begin
+  case affix.ToLower().Trim() of
+    'heavy': Result := ESwordAffixType.HEAVY;
+    'flat': Result := ESwordAffixType.FLAT;
+    'narrow': Result := ESwordAffixType.NARROW;
+    'spiked': Result := ESwordAffixType.SPIKED;
+    'broad': Result := ESwordAffixType.BROAD;
+    'light': Result := ESwordAffixType.LIGHT;
+    else
+    begin
+      self.SaveDebug();
+      raise 'passed ' + affix + ' affix doesnt exist';
+    end;
+  end;
+end;
+
+function TFoundry.GetMachineBoxes(): TBoxArray;
+var
+  i: Integer;
+begin
+  SetLength(Result, Length(self.Hud.Machine.sections));
+  for i := 0 to High(self.HUD.Machine.sections) do
+  begin
+    Result[i] := self.HUD.Machine.sections[i].bounds;
+  end;
+end;
+
+function TFoundry.GetClosestHeatBoxToPoint(target: TPoint): EHeatState;
+var
+  heatState: EHeatState;
+  lowestDist: Double := 999999;
+  testDist: Double;
+begin
+  for heatState in EHeatState do
+  begin
+    testDist := Self.HUD.Heat.sections[heatState].Center().DistanceTo(target);
+    if (testDist < lowestDist) then
+    begin
+      lowestDist := testDist;
+      Result := heatState;
+    end;
+  end;
+end;
+
+function TFoundry.GetHeatCursorPosition(): TPoint;
+const
+  CursorColor: TCTS2Color := CTS2(65536, 1, 0.01, 0.01);//CTS2(10066329, 1, 0.01, 0.01);
+var
+  Cursor: Int32 := DTMFromString ('mfgEAAHicrc5LCoBQCIVh20LLi97RYqIu0WtXrkn6A2nQoOCS8KEcB5qKyPwQMGHE4D34bsGGA7vPq+c1SuTIfL6yFv2LDg0qFFDVm5mRJJH+qdjr39+c8dsbQw==');
+  x, y: Int32;
+  createdTBox: TBox;
+begin
+  createdTBox := Self.HUD.Heat.sections.Merge.Expand(4, 0);
+  if createdTBox.X1 < 0 then
+  begin
+    createdTBox.X1 := 0;
+    Self.DebugLn("GetHeatCursorPosition fixed X1 value");
+  end;
+
+  if FindDTM(Cursor, x, y, createdTBox) then
+  begin
+    x += 1;
+    Result := [x, y];
+  end;
+  FreeDTM(Cursor);
+end;
+
+function TFoundry.GetMachineCursorPosition(): TPoint;
+const
+  CursorColor: TCTS2Color := CTS2(65536, 1, 0.01, 0.01);//CTS2(10066329, 1, 0.01, 0.01);
+var
+  Cursor: Int32 := DTMFromString ('mfgEAAHicrc5LCoBQCIVh20LLi97RYqIu0WtXrkn6A2nQoOCS8KEcB5qKyPwQMGHE4D34bsGGA7vPq+c1SuTIfL6yFv2LDg0qFFDVm5mRJJH+qdjr39+c8dsbQw==');
+  x, y: Int32;
+  createdTBoxArray: TBoxArray;
+  createdTBox: TBox;
+  i: Integer;
+begin
+  for i := 0 to High(self.HUD.Machine.sections) do
+  begin
+    createdTBoxArray += self.HUD.Machine.sections[i].bounds;
+  end;
+
+  createdTBox := createdTBoxArray.Merge.Expand(10, 0);
+
+  if createdTBox.X1 < 0 then
+  begin
+    createdTBox.X1 := 0;
+    Self.DebugLn("GetMachineCursorPosition fixed X1 value");
+  end;
+
+  if FindDTM(Cursor, x, y, createdTBox) then
+  begin
+    x += 1;
+    Result := [x, y];
+  end;
+  FreeDTM(Cursor);
+end;
+
+function TFoundry.IsSectionHighlighted(section: TBox): Boolean;
+var
+  WhiteBorderColor: TCTS2Color := CTS2 (16777215, 1, 0.01, 0.01);
+  whiteTPA: TPointArray;
+  testBox: TBox;
+  temp: Int32;
+begin
+  //Part of the cursor is also the same colour so instead just search the top row of the box
+  testBox := Box(section.X1, section.Y1 - 2, section.X2 - 4, section.Y1 + 2);
+
+  if testBox.X1 > testBox.X2 then
+  begin
+    temp := testBox.X2;
+    testBox.X2 := testBox.X1;
+    testBox.X1 := temp;
+    Self.DebugLn("Swapped X coord dimensions in section highlighting");
+  end;
+  Result := SRL.FindColors(whiteTPA, WhiteBorderColor, testBox) > 0;
+end;
+
+//How much the pixels move each time an action happens for a specific machine
+function TFoundry.GetMachineActionPixelShift(machine: EMachine): Double;
+begin
+   case machine of
+    EMachine.GRINDSTONE: Result := 4.5;
+    EMachine.POLISHING_WHEEL: Result := 4.5;
+    EMachine.TRIP_HAMMER: Result := 8.5;
+  end;
+end;
+
+//How many pixels the heat moves when an action occurs for a specific machine
+function TFoundry.GetMachineHeatPixelShift(machine: EMachine): Double;
+begin
+   case machine of
+    EMachine.GRINDSTONE: Result := 6;
+    EMachine.POLISHING_WHEEL: Result := - 8;
+    EMachine.TRIP_HAMMER: Result := - 12.5;
+  end;
+end;
+
+function TFoundry.GetCurrentHeat(): THeat;
+var
+  heatType: EHeatState;
+  currSection: TBox;
+  found: Boolean;
+  cursorMiddle: TPoint;
+  closestHeatState: EHeatState;
+begin
+
+  if Length(Self.HUD.Heat.sections) <> 7 then
+  begin
+    Writeln("Catching bad heat setup in GetCurrentHeat");
+    HUDFails += 20;
+    Result.percent := 40;
+    Result.state := EHeatState.COLD;
+    Exit;
+  end;
+
+  cursorMiddle := self.GetHeatCursorPosition();
+  closestHeatState := Self.GetClosestHeatBoxToPoint(cursorMiddle);
+
+  for heatType in EHeatState do
+  begin
+    currSection := self.HUD.Heat.sections[heatType];
+    if currSection.Contains(cursorMiddle) then
+    begin
+      Result.state := heatType;
+      Result.percent := Floor(100 * (cursorMiddle.X - currSection.X1) div (currSection.X2 - currSection.X1));
+      found := True;
+      break;
+    end;
+  end;
+
+  if not found then
+  begin
+    Result.state := closestHeatState;
+    Self.DebugLn("Heat state not found returning: " + ToStr(closestHeatState));
+    Result.percent := 0;
+    self.HUDFails += 1;
+  end
+  else
+    self.HUDFails := 0;
+end;
+
+function TFoundry.GetMachineProgress(): Integer;
+var
+  currSection: TBox;
+  found: Boolean;
+  i: Integer;
+  cursorMiddle: TPoint;
+begin
+  cursorMiddle := self.GetMachineCursorPosition();
+
+  for i := 0 to High(self.Hud.Machine.sections) do
+  begin
+    currSection := self.HUD.Machine.sections[i].bounds;
+    if currSection.Contains(cursorMiddle) and Self.IsSectionHighlighted(currSection) then
+    begin
+      Result := Floor(100 * (cursorMiddle.X - currSection.X1) div (currSection.X2 - currSection.X1));
+      found := True;
+      break;
+    end;
+  end;
+  if not found then
+  begin
+    Result := 0;
+  end;
+end;
+
+function TFoundry.GetActionsLeftForTool(currHUDMachine: TMachineHUDSection): Int32;
+var
+  rawActions: Extended;
+begin
+  rawActions := (currHUDMachine.bounds.X2 - Self.GetMachineCursorPosition().X) / Self.GetMachineActionPixelShift(currHUDMachine.machineType);
+  Result := Round(rawActions);
+end;
+
+function TFoundry.ShouldMachineSwitchTools(currMachine: TMachine; currHUDMachine: TMachineHUDSection; errorBounds: Integer = 5): Boolean;
+var
+  actionsLeft: Integer;
+  heatRequired: Integer;
+  usableHeat: Integer;
+  cursorHeatPos: TPoint;
+begin
+  actionsLeft := Self.GetActionsLeftForTool(currHUDMachine);
+  heatRequired := Abs(Floor(actionsLeft * Self.GetMachineHeatPixelShift(currHUDMachine.machineType)));
+  cursorHeatPos := Self.GetHeatCursorPosition();
+
+  if currMachine.doesHeatSword then
+  begin
+    usableHeat := Self.HUD.Heat.sections[currMachine.heatNeeded].X2 - cursorHeatPos.X;
+  end
+  else
+  begin
+    usableHeat := cursorHeatPos.X - Self.HUD.Heat.sections[currMachine.heatNeeded].X1;
+  end;
+
+  Result := usableHeat > heatRequired + errorBounds;
+end;
+
+function TFoundry.getCurrentMachineSection(): TMachineHUDSection;
+const
+  WhiteBorderColor: TCTS2Color := CTS2 (16777215, 1, 0.01, 0.01);
+
+var
+  section: TMachineHUDSection;
+  whiteTPA: TPointArray;
+begin
+  for section in self.HUD.Machine.sections do
+  begin
+    SRL.FindColors(whiteTPA, WhiteBorderColor, section.bounds.Expand(3));
+
+    if (whiteTPA.Len() > 100) then
+      Exit(section);
+  end;
+end;
+
+// returns empty box if on last machine
+function TFoundry.getNextMachineSection(): TMachineHUDSection;
+const
+  WhiteBorderColor: TCTS2Color := CTS2 (16777215, 1, 0.01, 0.01);
+
+var
+  section: TMachineHUDSection;
+  whiteTPA: TPointArray;
+  i: Int32;
+begin
+  for i := 0 to (High(self.HUD.Machine.sections) - 1) do
+  begin
+    section := self.HUD.Machine.sections[i];
+    SRL.FindColors(whiteTPA, WhiteBorderColor, section.bounds.Expand(3));
+
+    if (whiteTPA.Len() > 100) then
+      Exit(self.HUD.Machine.sections[i + 1]);
+  end;
+end;
+
+function TFoundry.getMachine(machineType: EMachine): TMachine;
+begin
+  case machineType of
+    EMachine.GRINDSTONE: Result := self.Grindstone;
+    EMachine.POLISHING_WHEEL: Result := self.PolishingWheel;
+    EMachine.TRIP_HAMMER: Result := self.TripHammer;
+    EMachine.NONE: Result := self.NoMachine;
+    else
+      raise 'machine not setup';
+  end;
+end;
+
+function TFoundry.getCurrentMachine(): TMachine;
+const
+  WhiteBorderColor: TCTS2Color := CTS2 (16777215, 1, 0.01, 0.01);
+
+var
+  section: TMachineHUDSection;
+  whiteTPA: TPointArray;
+  TBA: TBoxArray;
+begin
+  for section in self.HUD.Machine.sections do
+  begin
+    SRL.FindColors(whiteTPA, WhiteBorderColor, section.bounds.Expand(3));
+    TBA += section.bounds;
+
+    if (whiteTPA.Len() > 100) then
+      Exit(self.getMachine(section.machineType));
+  end;
+
+   Result.machineType := EMachine.NONE;
+end;
+
+function TBox.GetRandomPoint(): TPoint; constref;
+begin
+  Result := [Random(Self.X1, Self.X2), Random(Self.Y1, Self.Y2)];
+end;
+
+function TFoundry.HoverObject(rsObject: TRSObject; cuboid: TCuboidEx): Boolean;
+var
+  randomPoint: TPoint;
+  attempts: Integer;
+  upTextFound: Boolean;
+begin
+  upTextFound := Mainscreen.IsUpText(rsObject.UpText);
+
+  if upTextFound then
+    Exit(true);
+
+  if cuboid = [] then
+    cuboid := Self.RSW.GetCuboidArrayMS(Self.RSW.GetMyPos(), rsObject.Coordinates, rsObject.ShapeArray, [2, 2])[0];
+
+  repeat
+    randomPoint := cuboid.Bounds().Expand(-5).GetRandomPoint();
+    Mouse.Move(randomPoint);
+    Inc(attempts);
+    upTextFound := Mainscreen.IsUpText(rsObject.UpText);
+    Wait(10);
+  until upTextFound or (attempts > 2);
+
+  if upTextFound then
+    Exit(true);
+
+  Exit(false);
+end;
+
+function TFoundry.PreHoverObject(rsObject: TRSObject): Boolean;
+var
+  betweenAngle: Double;
+  objectMS, playerMS: TPoint;
+  rotateMin: Integer := 15;
+  rotateMax: Integer := 40;
+  directionMod: Integer := 1;
+  MSCuboids: TCuboidExArray;
+  timeoutTImer: TCountDown;
+begin
+  timeOutTimer.Init(1200);
+  objectMS :=  Minimap.PointToMS(rsw.WorldToMM(rsObject.Coordinates.Mean()));//Minimap.ArrToMs(rsw.WorldToMM(rsObject.Coordinates)).Mean();
+  playerMS := Mainscreen.Center;
+  betweenAngle := ArcTan2(objectMS.Y - playerMS.Y, objectMS.X - playerMS.X);
+
+  if betweenAngle < 0 then
+    directionMod := -1;
+
+  MScuboids := RSW.GetCuboidArrayMS(RSW.GetMyPos(), rsObject.Coordinates, rsObject.ShapeArray, [0, 1]);
+
+  if (MSCuboids = []) or (not MainScreen.IsVisible(MSCuboids[0])) then
+  begin
+    repeat
+      Minimap.SetCompassAngle(Minimap.GetCompassAngle(true) + directionMod * SRL.SkewedRand((rotateMin + rotateMax) div 2, rotateMin, rotateMax));
+      MScuboids := RSW.GetCuboidArrayMS(RSW.GetMyPos(), rsObject.Coordinates, rsObject.ShapeArray, [0, 1]);
+      Self.DebugLn("Rotating");
+    until ((MSCuboids <> []) and Mainscreen.IsVisible(MSCuboids[0]))
+          or timeOutTimer.IsFinished();
+  end;
+
+  if timeOutTimer.IsFinished() then
+  begin
+    Self.DebugLn("Exit timer");
+    Exit;
+  end;
+
+  Result := HoverObject(rsObject, MSCuboids[0]);
+end;
+
+function TFoundry.getNextHeatState(): EHeatState;
+begin
+  Result := self.getMachine(self.getNextMachineSection().machineType).heatNeeded;
+end;
+
+function TFoundry.needsCommission(): Boolean;
+begin
+  Result := not self.Sword.IsSetup;
+end;
+
+function TFoundry.ConvertBarText(meltString : string; alloy : EBar) : string;
+begin
+  if meltString = 'bar' then
+    if alloy = EBar.ADAMANT then
+      Exit("adamantite")
+    else if alloy = EBar.RUNE then
+      Exit("runite");
+
+  Result := ToString(alloy);
+end;
+
+procedure TFoundry.GetAlloyInventoryCounts(out countAlloyOne, countAlloyTwo : Int32);
+var
+  meltableType: String;
+  meltableItem: TRSItem;
+begin
+  for meltableType in MELTABLE_GEAR do
+  begin
+    meltableItem := Self.ConvertBarText(meltableType, AlloyOne).Lower() + ' ' + meltableType;
+    countAlloyOne += Inventory.CountItem(meltableItem) * getBarEquivalentAmount(meltableItem);
+
+    meltableItem := Self.ConvertBarText(meltableType, AlloyTwo).Lower() + ' ' + meltableType;
+    countAlloyTwo += Inventory.CountItem(meltableItem) * getBarEquivalentAmount(meltableItem);
+  end;
+end;
+
+function TFoundry.needsWithdrawBars(): Boolean;
+var
+  inventorySumAlloyOne: Int32;
+  inventorySumAlloyTwo: Int32;
+begin
+  Self.GetAlloyInventoryCounts(inventorySumAlloyOne, inventorySumAlloyTwo);
+
+  Self.DebugLn('Crucible.alloyOneBars: ' + ToStr(self.Crucible.alloyOneBars));
+  Self.DebugLn('inventorySumAlloyOne: ' + ToStr(inventorySumAlloyOne));
+  Self.DebugLn('Crucible.alloyTwoBars: ' + ToStr(self.Crucible.alloyTwoBars));
+  Self.DebugLn('inventorySumAlloyTwo: ' + ToStr(inventorySumAlloyTwo));
+  Result := (self.Crucible.alloyOneBars + inventorySumAlloyOne < AlloyOneAmount)
+         or (self.Crucible.alloyTwoBars + inventorySumAlloyTwo < AlloyTwoAmount);
+end;
+
+function TFoundry.isCrucibleReady(): Boolean;
+const
+  CrucibleLavaColor: TCTS2Color := CTS2 (2264018, 1, 0.10, 0.59);
+var
+  crucibleCuboid: TCuboidEx;
+  lavaTPA: TPointArray;
+begin
+  if not (InRange(Minimap.GetCompassAngle(), 315, 360) or InRange(Minimap.GetCompassAngle(), 0, 45)) then
+    Minimap.RotateWithinAngles(-25, 25);
+
+  crucibleCuboid := self.Crucible.rsObj.GetCuboidArray[0];
+  SRL.FindColors(lavaTPA, CrucibleLavaColor, crucibleCuboid.Bounds());
+  lavaTPA := crucibleCuboid.Filter(lavaTPA);
+  Result := lavaTPA.Len() > 10;
+end;
+
+function TFoundry.isSwordPreformReady(): Boolean;
+const
+  MouldJigLavaColor: TCTS2Color := CTS2 (2264018, 1, 0.10, 0.59);
+
+var
+  mouldJigCuboid: TCuboidEx;
+  lavaTPA: TPointArray;
+begin
+  if not (InRange(Minimap.GetCompassAngle(), 315, 360) or InRange(Minimap.GetCompassAngle(), 0, 45)) then
+    Minimap.RotateWithinAngles(-25, 25);
+
+  mouldJigCuboid := self.MouldJig.GetCuboidArray[0];
+  SRL.FindColors(lavaTPA, MouldJigLavaColor, mouldJigCuboid.Bounds());
+  lavaTPA := mouldJigCuboid.Filter(lavaTPA);
+  Result := lavaTPA.Len() > 10;
+end;
+
+function TFoundry.needsMoreHammer(currentMachine: TMachine; currentHeat: THeat): Boolean;
+begin
+  Result := (currentMachine.machineType = EMachine.TRIP_HAMMER)
+            and (currentHeat.state = currentMachine.heatNeeded)
+            and (currentHeat.percent > 10);
+end;
+
+function TFoundry.needsMoreGrindstone(currentMachine: TMachine; currentHeat: THeat): Boolean;
+begin
+  Result := (currentMachine.machineType = EMachine.GRINDSTONE)
+            and (currentHeat.percent < 90)
+            and (currentHeat.state = currentMachine.heatNeeded);
+end;
+
+function TFoundry.needsMorePolish(currentMachine: TMachine; currentHeat: THeat): Boolean;
+begin
+  Result := (currentMachine.machineType = EMachine.POLISHING_WHEEL)
+            and (currentHeat.percent > 10)
+            and (currentHeat.state = currentMachine.heatNeeded);
+end;
+
+function TFoundry.isSwordFinished(currentMachine: TMachine): Boolean;
+begin
+  Result := currentMachine.machineType = EMachine.NONE;
+end;
+
+procedure TFoundry.DebugHUD();
+var
+  boxes: TBoxArray;
+  section: TBox;
+  machineHUDSection: TMachineHUDSection;
+begin
+  if self.DisableDebugging then
+    Exit;
+
+  for section in self.HUD.Heat.sections do
+    boxes += section;
+
+  for machineHUDSection in self.HUD.Machine.sections do
+    boxes += machineHUDSection.bounds;
+
+  boxes += self.HUD.Bounds;
+  //Debug(boxes);
+end;
+
+function TFoundry.GetExpectedMachineSectionsAmount(): Int32;
+var
+  valueAlloyOne: Double := (10 * (Ord(AlloyOne) + 1) * AlloyOneAmount) / 28;
+  valueAlloyTwo: Double := (10 * (Ord(AlloyTwo) + 1) * AlloyTwoAmount) / 28;
+  combinedValue: Int32;
+begin
+  combinedValue := Floor((Floor(10 * valueAlloyOne) + Floor(10 * valueAlloyTwo) + Floor(valueAlloyOne * valueAlloyTwo)) / 10);
+  if combinedValue < 20 then
+    Exit(3)
+  else if combinedValue < 60 then
+    Exit(4)
+  else if combinedValue < 90 then
+    Exit(5)
+  else if combinedValue < 120 then
+    Exit(6)
+  else
+    Exit(7);
+end;
+
+function TFoundry.ValidateHUD(): Boolean;
+var
+  expectedMachineSections: Int32 := self.GetExpectedMachineSectionsAmount();
+begin
+  Result := (Length(Self.HUD.Heat.sections) = 7) and (Length(Self.HUD.Machine.Sections) = expectedMachineSections);
+  if not Result then
+  begin
+    Self.DebugLn('found ' + ToStr(length(self.HUD.Heat.sections)) + 'heat sections but expected 7');
+    Self.DebugLn('found ' + ToStr(length(self.HUD.Machine.sections)) + 'machine sections but expected ' + ToStr(expectedMachineSections));
+  end;
+end;
+
+function TFoundry.CreateHeatSections4() : TBoxArray;
+begin
+  Result += Box(51, 62, 67, 76);
+  Result += Box(68, 62, 181, 76);
+  Result += Box(182, 62, 214, 76);
+  Result += Box(215, 62, 328, 76);
+  Result += Box(329, 62, 361, 76);
+  Result += Box(362, 62, 473, 76);
+  Result += Box(476, 62, 494, 76);
+end;
+
+function TFoundry.CreateHeatSections5() : TBoxArray;
+begin
+
+  Result += Box(51, 62, 69, 76);
+  Result += Box(70, 62, 179, 76);
+  Result += Box(180, 62, 216, 76);
+  Result += Box(217, 62, 326, 76);
+  Result += Box(327, 62, 363, 76);
+  Result += Box(364, 62, 473, 76);
+  Result += Box(474, 62, 494, 76);
+end;
+
+function TFoundry.CreateHeatSections6() : TBoxArray;
+begin
+  Result += Box(51, 62, 77, 76);
+  Result += Box(78, 62, 170, 76);
+  Result += Box(171, 62, 225, 76);
+  Result += Box(226, 62, 318, 76);
+  Result += Box(319, 62, 372, 76);
+  Result += Box(373, 62, 465, 76);
+  Result += Box(466, 62, 494, 76);
+end;
+
+function TFoundry.CreateHeatSections7() : TBoxArray;
+begin
+  Result += Box(51, 62, 87, 76);
+  Result += Box(88, 62, 160, 76);
+  Result += Box(161, 62, 234, 76);
+  Result += Box(235, 62, 307, 76);
+  Result += Box(308, 62, 382, 76);
+  Result += Box(383, 62, 455, 76);
+  Result += Box(456, 62, 494, 76);
+end;
+
+procedure TFoundry.SetupHeatOld();
+var
+  greenTPA: TPointArray;
+  yellowTPA: TPointArray;
+  redTPA: TPointArray;
+  greyTPA: TPointArray;
+  heatBoxes: TBoxArray;
+
+begin
+  Self.DebugLn('We found a large enough HUD. Lets set it up');
+  // setup heat HUD bounds
+  self.HUD.Heat.bounds := Box(
+    self.HUD.Bounds.X1,
+    Floor((self.HUD.Bounds.Y2 - self.HUD.Bounds.Y1) * 1 div 3) + self.HUD.Bounds.Y1,
+    self.HUD.Bounds.X2,
+    Floor((self.HUD.Bounds.Y2 - self.HUD.Bounds.Y1) * 0.6) + self.HUD.Bounds.Y1
+  );
+
+  Self.DebugLn("Set up heat bounds");
+
+  SRL.FindColors(greenTPA, HEAT_GREEN, self.HUD.Heat.bounds);
+  heatBoxes += greenTPA.Bounds;
+
+  SRL.FindColors(yellowTPA, HEAT_YELLOW, self.HUD.Heat.bounds);
+  heatBoxes += yellowTPA.Bounds; //Cluster(5, 0).Merge().Bounds.Expand(1);
+
+  SRL.FindColors(redTPA, HEAT_RED, self.HUD.Heat.bounds);
+  heatBoxes += redTPA.Bounds; //Cluster(5, 0).Merge().Bounds.Expand(1);
+
+  SRL.FindColors(greyTPA, HUD_INTERSECTION_GREY, self.Hud.Heat.bounds);
+  heatBoxes.Extend(greyTPA.Cluster(5).ToTBA());
+
+  Self.DebugLn("Box sort");
+  heatBoxes.SortByX();
+  heatBoxes[EHeatState.BLAZING].X2 := heatBoxes[EHeatState.BLAZING].X2 + 8;
+
+  Self.DebugLn("Adjusted Blazing bounds");
+  self.HUD.Heat.sections := heatBoxes;
+end;
+
+function TFoundry.SetupHUD(): Boolean;
+var
+  topHalfScreen: TBox; //:= Box(Mainscreen.Bounds.X1, Mainscreen.Bounds.y1, XPBar.Bounds.X1, Floor(Mainscreen.Bounds.Y2 div 2));
+  greenTPA: TPointArray;
+  yellowTPA: TPointArray;
+  redTPA: TPointArray;
+  blueTPA: TPointArray;
+
+  machineBoxes: TBoxArray;
+  greenBoxes: TBoxArray;
+  yellowBoxes: TBoxArray;
+  redBoxes: TBoxArray;
+
+  machineBox: TBox;
+  greybarTPA: TPointArray;
+  barGreyColour: TCTS2Color := CTS2 (4605510, 5, 0.01, 0.01);
+  currentMachineSection: TMachineHUDSection;
+  i: Int32;
+begin
+  Self.DebugLn('Setting up HUD');
+  if SRL.FindColors(greybarTPA, barGreyColour, Mainscreen.Bounds) < 200 then
+  begin
+    Self.DebugLn('HUD is not setup, but we didnt find enough grey so we wont set it up');
+    Exit(False);
+  end;
+
+  topHalfScreen := Box(Mainscreen.Bounds.X1, greyBarTPA.Bounds().Y1, greyBarTPA.Bounds().X2, Floor(Mainscreen.Bounds.Y2 div 3));
+
+  // setup HUD bounds
+  if (SRL.FindColors(greenTPA, HEAT_GREEN, topHalfScreen) < 200) then
+  begin
+    Self.DebugLn('Found grey but no greenTPA: ');
+    Exit(False);
+  end;
+  if (SRL.FindColors(yellowTPA, HEAT_YELLOW, topHalfScreen) < 200) then
+  begin
+    Self.DebugLn('Found grey but no yellowTPA: ');
+    Exit(False);
+  end;
+  if (SRL.FindColors(redTPA, HEAT_RED, topHalfScreen) < 200) then
+  begin
+    Self.DebugLn('Found grey but no redTPA: ');
+    Exit(False);
+  end;
+  if (SRL.FindColors(blueTPA, PROGRESS_BLUE, topHalfScreen) < 200) then
+  begin
+    Self.DebugLn('Found grey but no blueTPA: ');
+    Exit(False);
+  end;
+
+  self.Hud.Bounds := Box(
+    blueTPA.Bounds.X1 - 1,
+    blueTPA.Bounds.Y1,
+    greybarTPA.Bounds.X2 +1,
+    redTpa.Bounds.Y2);
+
+  if (self.HUD.Bounds.Area <= 10000) then
+  begin
+    self.HUD := [];
+    Exit(False);
+  end;
+
+  if not Self.Hud.Bounds.IsValid() then
+  begin
+    Self.DebugLn("Bad initial HUD bounds");
+    Debug(Self.Hud.Bounds);
+    Exit;
+  end;
+
+  Self.HUD.Heat.bounds := Box(52, 61, 493, 75);
+
+  case Self.GetExpectedMachineSectionsAmount() of
+    4: Self.Hud.Heat.sections := Self.CreateHeatSections4();
+    5: Self.Hud.Heat.sections := Self.CreateHeatSections5();
+    6: Self.Hud.Heat.sections := Self.CreateHeatSections6();
+    7: Self.Hud.Heat.sections := Self.CreateHeatSections7();
+    else
+      Self.SetupHeatOld();
+  end;
+
+    // setup machine HUD
+  self.HUD.Machine.Bounds := Box(
+    self.HUD.Bounds.X1,
+    Floor((self.HUD.Bounds.Y2 - self.HUD.Bounds.Y1) * 2 div 3) + self.HUD.Bounds.Y1,
+    self.HUD.Bounds.X2,
+    self.HUD.Bounds.Y2
+  );
+
+  Self.DebugLn("Setup machine HUD");
+
+  if not Self.Hud.Machine.bounds.IsValid() then
+  begin
+    Self.DebugLn("Bad machine bounds");
+    Debug(Self.Hud.Machine.bounds);
+    Exit;
+  end;
+
+  SRL.FindColors(greenTPA, HEAT_GREEN, self.HUD.Machine.Bounds);
+  greenBoxes := greenTPA.Cluster(10, 3).ToTBA();
+  machineBoxes.Extend(greenBoxes);
+
+  SRL.FindColors(yellowTPA, HEAT_YELLOW, self.HUD.Machine.Bounds);
+  yellowBoxes := yellowTPA.Cluster(10, 3).ToTBA();
+  machineBoxes.Extend(yellowBoxes);
+
+  SRL.FindColors(redTPA, HEAT_RED, self.HUD.Machine.Bounds);
+  redBoxes := redTPA.Cluster(10, 3).ToTBA();
+  redBoxes.SortByX();
+  machineBoxes.Extend(redBoxes);
+
+  machineBoxes.SortByX(true);
+
+  Self.DebugLn("Sort machine HUD");
+
+  for machineBox in machineBoxes do
+  begin
+    currentMachineSection.bounds := machineBox;
+
+    if (greenBoxes.Find(machineBox) > -1) then
+      currentMachineSection.machineType := EMachine.POLISHING_WHEEL
+    else if (yellowBoxes.Find(machineBox) > -1) then
+      currentMachineSection.machineType := EMachine.GRINDSTONE
+    else
+      currentMachineSection.machineType := EMachine.TRIP_HAMMER;
+
+    self.HUD.Machine.sections += currentMachineSection;
+  end;
+
+  machineBoxes := Self.GetMachineBoxes();
+  Self.DebugLn("Set machine boxes");
+
+  for i := 0 to High(machineBoxes) do
+  begin
+    if Self.IsSectionHighlighted(machineBoxes[i]) then
+    begin
+      self.HUD.Machine.sections[i].bounds := self.HUD.Machine.sections[i].bounds.Expand(1, 1);
+      Self.DebugLn("Section highlighted: " + ToStr(i));
+      break;
+    end;
+  end;
+
+  if not self.ValidateHUD() then
+  begin
+    //Debug(self.HUD.Bounds);
+    self.HUD := [];
+    Exit(False);
+  end;
+
+  Exit(True);
+end;
+
+function TFoundry.AreHudDTMsVisible() : Boolean;
+var
+  dtms : TIntegerArray;
+  x, y, i : Int32;
+begin
+   Result := true;
+   SetLength(dtms, 3);
+  //Qual, temp, progress
+  dtms[0] := DTMFromString('mggAAAHicY2NgYFAEYiUgloViNSjWBWJNKG0CxXpA/HsuHwLzQzGQjQsw4sAQAAAZ9Qq3');
+  dtms[1] := DTMFromString('mbQAAAHicY2VgYFBEwvJArALELkBsB8ReQOwJxZNlHIAkI5hO3/wcjLEBRiwYDADjBwfw');
+  dtms[2] := DTMFromString('mWAAAAHicY2FgYFAHYiUglgZiRSAOB+IkII4G4lggXnxOnSFlggvD/ZedYDY6YETDIAAAscAIuA==');
+
+  for i := 0 to High(dtms) do
+  begin
+    if not FindDTM(dtms[i], x, y, Mainscreen.Bounds) then
+      Result := false;
+    FreeDTM(dtms[i]);
+  end;
+end;
+
+function TFoundry.isGameStarted(): Boolean;
+begin
+  // already setup
+  if (self.HUD.Bounds.Area > 1) then
+    Exit(True);
+
+  if not Self.AreHudDTMsVisible() then
+    Exit(false);
+
+  Result := self.SetupHUD();
+end;
+
+function TFoundry.HeatUntil(currentMachine: TMachine; currentHeat: THeat; clickThisCycle: Boolean): Boolean;
+var
+  limit: Integer;
+begin
+
+  if clickThisCycle then
+  begin
+    self.LavaPool.Click();
+  end;
+
+  if (currentHeat.state > currentmachine.heatNeeded) then
+  begin
+    Self.DebugLn("Heat higher than needed. Dont heat further");
+    Exit(true);
+  end;
+
+  if (currentHeat.state <> currentMachine.heatNeeded) then
+    Exit(false);
+
+  if Self.ShouldMachineSwitchTools(currentMachine, Self.getCurrentMachineSection(), 10) then
+  begin
+    Self.DebugLn("Heat done early");
+    Exit(true);
+  end;
+
+  if currentMachine.doesHeatSword then
+  begin
+    limit := currentMachine.actionMinPercent;
+  end
+  else
+  begin
+    limit := currentMachine.actionMaxPercent;
+  end;
+
+  Result := (currentHeat.percent >= limit);
+end;
+
+function TFoundry.heatedEnough(currentMachine: TMachine; currentHeat: THeat): Boolean;
+begin
+  if (currentHeat.state > currentMachine.heatNeeded) then
+    Exit(True)
+  else if (currentHeat.state < currentMachine.heatNeeded) then
+    Exit(False)
+  else if (not currentMachine.doesHeatSword)
+          and (currentHeat.percent >= currentMachine.actionMinPercent) then
+    Exit(True)
+  else if currentMachine.doesHeatSword then
+    Exit(True);
+
+  Exit(False);
+end;
+
+function TFoundry.CoolUntil(currentMachine: TMachine; currentHeat: THeat; clickThisCycle: Boolean): Boolean;
+var
+  limit: Integer;
+begin
+  if (currentHeat.state < currentmachine.heatNeeded) then
+  begin
+    Self.DebugLn("Heat lower than needed. Dont cool further");
+    Exit(true);
+  end;
+
+  if clickThisCycle then
+  begin
+    self.Waterfall.Click();
+  end;
+
+  if (currentMachine.heatNeeded <> currentHeat.state) then
+    Exit(false);
+
+  if Self.ShouldMachineSwitchTools(currentMachine, Self.getCurrentMachineSection(), 5) then
+  begin
+    Self.DebugLn("COOL DONE EARLY");
+    Exit(true);
+  end;
+
+  if currentMachine.doesHeatSword then
+  begin
+   limit := currentMachine.actionMinPercent;
+  end
+  else
+  begin
+    Exit(true);
+  end;
+
+  Result := currentHeat.percent <= limit;
+end;
+
+function TFoundry.cooledEnough(currentMachine: TMachine; currentHeat: THeat): Boolean;
+begin
+  if (currentHeat.state < currentMachine.heatNeeded) then
+    Exit(True)
+  else if (currentHeat.state > currentMachine.heatNeeded) then
+    Exit(False)
+  else if (currentMachine.doesHeatSword)
+          and (currentHeat.percent <= currentMachine.actionMaxPercent) then
+      Exit(True)
+  else if not currentMachine.doesHeatSword then
+    Exit(True);
+
+  Exit(False);
+end;
+
+procedure TFoundry.SaveDebug();
+var
+  Bitmap: TMufasaBitmap;
+  filePath: String;
+  i: Integer;
+  heatCursor, machineCursor: TPoint;
+begin
+  Bitmap.FromClient(Mainscreen.Bounds);
+
+  for i := 0 to High(Self.HUD.Heat.sections) do
+  begin
+    Bitmap.DrawBox(Self.HUD.Heat.sections[i], CHAT_COLOR_GREEN);
+    Bitmap.DrawText(ToStr(i), Self.HUD.Heat.sections[i].Center() + [0, 15], CHAT_COLOR_GREEN);
+  end;
+
+  for i := 0 to High(Self.HUD.Machine.sections) do
+  begin
+    Bitmap.DrawBox(Self.HUD.Machine.sections[i].bounds, CHAT_COLOR_PURPLE);
+    Bitmap.DrawText(ToStr(i), Self.HUD.Machine.sections[i].bounds.Center() + [0, 15] , CHAT_COLOR_PURPLE);
+  end;
+
+  heatCursor := Self.GetHeatCursorPosition();
+  machineCursor := Self.GetMachineCursorPosition();
+  Bitmap.DrawTPA([heatCursor, machineCursor], CHAT_COLOR_RED);
+
+  filePath := GetScreenshotPath('FoundryFail');
+  Bitmap.SaveToFile(filePath);
+  Bitmap.Free();
+
+  Self.SavedDebugThisRound := true;
+end;
+
+function TFoundry.IsSwordDamaged(): Boolean;
+const
+  DamagedSwordColor: TCTS2Color := CTS2 (3092328, 7, 0.01, 1.35);
+
+var
+  damagedTPA: TPointArray;
+begin
+  if SRL.FindColors(damagedTPA, DamagedSwordColor, Self.Hud.Bounds) > 1 then
+    Result := true;
+
+  if Result then
+    Self.DebugLn("Damaged sword");
+end;
+
+function TFoundry.getState(): EFoundryState;
+var
+  currentMachine: TMachine;
+  currentHeat: THeat;
+  gameStarted: Boolean := Self.isGameStarted ();
+begin
+  if not gameStarted then
+  begin
+    if (self.needsCommission()) then
+      Exit(EFoundryState.GET_COMMISSION);
+
+    // this is ready after picking optimal mould
+    if (not self.IsMouldReady) then
+      Exit(EFoundryState.SETUP_MOULD);
+
+    if (self.needsWithdrawBars()) then
+      Exit(EFoundryState.DO_BANK);
+
+    if (self.isCrucibleReady()) then
+      Exit(EFoundryState.POUR_CRUCIBLE);
+
+    if (not self.Crucible.isPoured) then
+      Exit(EFoundryState.FILL_CRUCIBLE);
+
+    if (self.isSwordPreformReady()) then
+      Exit(EFoundryState.GET_SWORD_MOULD);
+  end;
+
+  if gameStarted and RSInterface.IsOpen() then
+    RSInterface.Close();
+
+  currentMachine := self.getCurrentMachine();
+  if (self.isSwordFinished(currentMachine)) then
+    Exit(EFoundryState.TURN_IN_SWORD);
+
+  currentHeat := self.getCurrentHeat();
+  if self.HUDFails > 20 then
+  begin
+    self.SetupHUD();
+    self.HUDFails := 0;
+  end;
+
+  if (not self.heatedEnough(currentMachine, currentHeat)) then
+    Exit(EFoundryState.HEAT_FAST);
+
+  if (not self.cooledEnough(currentMachine, currentHeat)) then
+    Exit(EFoundryState.COOL_FAST);
+
+  if (self.needsMoreHammer(currentMachine, currentHeat)) then
+    Exit(EFoundryState.USE_TRIP_HAMMER);
+
+  if (self.needsMoreGrindstone(currentMachine, currentHeat)) then
+    Exit(EFoundryState.USE_GRINDSTONE);
+
+  if (self.needsMorePolish(currentMachine, currentHeat)) then
+    Exit(EFoundryState.USE_POLISH);
+
+  Exit(EFoundryState.UNPROCESSABLE);
+end;
+
+function TFoundry.getGiantBox(): TBox;
+const
+  GiantPoint: TPoint := [256, 250];
+  WaspOffset: TPoint := [4099, 2899];
+begin
+  Result := self.rsw.GetTileMS(GiantPoint.Offset(WaspOffset)).Bounds().Expand(4);
+end;
+
+function TFoundry.handleGetCommission(): Boolean;
+const
+  GiantColor: TCTS2Color := CTS2 (4343133, 2, 0.39, 0.54);
+
+var
+  makeChat: String;
+  giantTPA: TPointArray;
+begin
+  if Chat.GetChatTitle() = 'Receive another commission?' then
+  begin
+    Chat.ClickOption('Yes', True);
+    if not WaitUntil(not (Chat.GetChat([2101487]) = ''), 100, 10000) then
+    begin
+      self.DebugLn("wasnt able to get a chat message while getting commission");
+      self.SaveDebug();
+      Exit;
+    end;
+    makeChat := Chat.GetChat([2101487]);
+    Self.DebugLn("Commision chat string is: " + makeChat);
+    if makeChat.Contains(' ') then
+    begin
+      self.Sword.prefix := getSwordAffix(makeChat.Before(' '));
+      self.Sword.suffix := getSwordAffix(makeChat.After(' '));
+    end
+    else
+    begin
+      self.Sword.prefix := getSwordAffix(makeChat.Before(#10));
+      self.Sword.suffix := getSwordAffix(makeChat.After(#10));
+    end;
+    self.Sword.isSetup := True;
+  end
+  else
+  begin
+    if not SRL.FindColors(giantTPA, GiantColor, self.getGiantBox()) > 0 then
+      Exit(False);
+
+    Mouse.Move(giantTPA.Mean());
+    if not Mainscreen.IsUpText('Kovac') then
+    begin
+      Antiban.RandomRotate();
+      Exit(False);
+    end;
+
+    Mouse.Click(MOUSE_RIGHT);
+    if not ChooseOption.Select('Commission') then
+      Exit(False);
+
+    WaitUntil(not (Chat.GetChat([2101487]) = ''), 100, 10000);
+    makeChat := Chat.GetChat([2101487]);
+    Self.DebugLn("Commision chat string is: " + makeChat);
+    if makeChat.Contains(' ') then
+    begin
+      self.Sword.prefix := getSwordAffix(makeChat.Before(' '));
+      self.Sword.suffix := getSwordAffix(makeChat.After(' '));
+    end
+    else
+    begin
+      self.Sword.prefix := getSwordAffix(makeChat.Before(#10));
+      self.Sword.suffix := getSwordAffix(makeChat.After(#10));
+    end;
+    self.Sword.isSetup := True;
+  end;
+end;
+
+function TPointArray.LimitTo(limitBox: TBox): TPointArray; override;
+var
+  i: Int32;
+begin
+  for i := 0 to High(Self) do
+  begin
+    if (Self[i].X > limitBox.X1)
+      and (Self[i].X < limitBox.X2)
+      and (Self[i].Y > limitBox.Y1)
+      and (Self[i].Y < limitBox.Y2) then
+         Result += Self[i];
+  end;
+  Result.ClearDuplicates();
+end;
+
+function TFoundry.SwordTabsFinder(interfaceArea: TBox): TBoxArray;
+var
+  tabBorderColour : TCTS2Color := CTS2(5334130, 1, 0.01, 0.01);
+  insideTabColour : TCTS2Color := CTS2(2766143, 1, 0.80, 1.49);
+  selectedTabColour : TCTS2Color := CTS2(3358280, 1, 0.80, 0.41);
+  hoveredTabColour : TCTS2Color := CTS2(4147796, 1, 0.80, 0.78);
+
+  tabBorders, tabSelected, tabHovered, tabInsides : TPointArray;
+  allTabs: T2DPointArray;
+  swordTabsArea: TBox;
+  i: Integer;
+begin
+  SRL.FindColors(tabBorders, tabBorderColour, interfaceArea);
+  SRL.FindColors(tabInsides, insideTabColour, interfaceArea);
+  SRL.FindColors(tabSelected, selectedTabColour, interfaceArea);
+  SRL.FindColors(tabHovered, hoveredTabColour, interfaceArea);
+  if(tabBorders.Len() < 1)
+    or (tabInsides.Len() < 1)
+    or (tabSelected.Len() < 1) then
+      Exit;
+
+  allTabs := tabInsides.Cluster(5);
+  swordTabsArea := interfaceArea;
+  swordTabsArea.Y1 := tabBorders.Bounds().Y1;
+  swordTabsArea.X2 := allTabs[0].Bounds().X2;
+  tabSelected := tabSelected.FilterBox(swordTabsArea);
+
+  if tabHovered.Len() > 0 then
+    allTabs += tabHovered.Cluster(5);
+
+  allTabs += tabSelected.Cluster(5);
+  allTabs.SortByY(true);
+
+  for i := 0 to High(allTabs) do
+  begin
+    Result += allTabs[i].Bounds();
+  end;
+  Self.DebugLn("Sections size: " + ToStr(allTabs.Len()));
+  if Length(Result) > 0 then
+  begin
+    Self.IsSwordSectionsSet := true;
+    Self.SwordSections := Result;
+    Self.DebugLn("Sword sections set!");
+    Exit;
+  end;
+
+  Self.DebugLn("Sword sections empty!");
+end;
+
+function TFoundry.getSwordSectionsBounds(interfaceBounds: TBox): TBoxArray;
+begin
+
+  if not Self.IsSwordSectionsSet then
+  begin
+    Result := Self.SwordTabsFinder(interfaceBounds);
+    Result := Self.SwordSections;
+    Exit;
+  end;
+
+  Result := Self.SwordSections;
+end;
+
+function TFoundry.ClickSetMould(interfaceBounds: TBox): Boolean;
+const
+  ButtonBG: TCTS2Color := CTS2 (3358280, 1, 0.80, 0.41);
+
+var
+  btnBG: TPointArray;
+  btns: T2DPointArray;
+begin
+  if (SRL.FindColors(btnBG, ButtonBG, interfaceBounds) > 0) then
+  begin
+    btns := btnBg.Cluster(3);
+    btns.FilterDimensions(0, 0, 120, 260);
+    btns.SortByY(true);
+
+    if btns.Len() < 2 then
+    begin
+      Self.DebugLn("Couldnt find the mould button!");
+      Exit;
+    end;
+
+    Mouse.Move(btns[1].RandomValue);
+    if MainScreen.IsUpText('Set M') then
+      Mouse.Click(MOUSE_LEFT);
+
+    Result := WaitUntil(not Mainscreen.IsUpText('Set M'), 200, 10000);
+  end;
+end;
+
+function TFoundry.getSelectedSwordSection(interfaceBounds: TBox): TBox;
+const
+  SelectedSectionColor: TCTS2Color := CTS2(3358280, 1, 0.80, 0.41);
+var
+  section: TBox;
+  sectionTPA: TPointArray;
+begin
+  for section in self.getSwordSectionsBounds(interfaceBounds) do
+    if SRL.FindColors(sectionTPA, SelectedSectionColor, section) > 100 then
+      Exit(section);
+end;
+
+procedure TFoundry.SetScrollPosition(value: Int32);
+var
+  oldPos: Int32;
+  scrollBar: TRSScrollBar;
+begin
+  value := EnsureRange(value, 0, 100);
+
+  scrollBar := Self.GetScrollBar(Self.MouldScrollArea);
+  oldPos := scrollBar.Position;
+
+  if not scrollBar.IsVisible() then
+    Exit;
+
+  if scrollBar.Position = value then
+    Exit;
+
+  if (scrollBar.Position < value) then
+  begin
+    while scrollBar.IsVisible()
+      and (scrollBar.Position < value + 7)
+      and (scrollBar.Position <> 100) do
+    begin
+      Mouse.Scroll(Self.MouldScrollArea, 1, True);
+      scrollBar := Self.GetScrollBar(Self.MouldScrollArea);
+
+      if oldPos = scrollBar.Position then
+        Mouse.Move(Self.MouldScrollArea, True);
+
+      oldPos := scrollBar.Position;
+    end;
+    Exit;
+  end;
+
+  while scrollBar.IsVisible()
+      and (scrollBar.Position >  value + 7 )
+      and (scrollBar.Position <> 0) do
+  begin
+    Mouse.Scroll(Self.MouldScrollArea, 1, False);
+    scrollBar := Self.GetScrollBar(Self.MouldScrollArea);
+
+    if oldPos = scrollBar.Position then
+      Mouse.Move(scrollBar.SliderRegion, True);
+
+    oldPos := scrollBar.Position;
+  end;
+end;
+
+function TFoundry.GetScrollBar(searchArea: TBox): TRSScrollBar;
+const
+  COLOR_ARROW := CTS2 (5206147, 15, 0.03, 0.28);
+  COLOR_BORDER := 65536;
+
+var
+  TPA: TPointArray;
+  Arrows: TBoxArray;
+  Area, B: TBox;
+begin
+  Area := searchArea;
+
+  if SRL.FindColors(TPA, COLOR_ARROW, Area) > 0 then
+  begin
+    for B in TPA.Cluster(1).ToTBA() do
+      if (B.Width = 14) and (B.Height = 14) and (SRL.CountColor(COLOR_BORDER, B.Expand(1, Area)) = 62) then
+        Arrows += B;
+
+    Arrows.SortByX(False);
+
+    if (Length(Arrows) >= 2) and (Arrows[0].X1 = Arrows[1].X1) and (Arrows[1].X2 = Arrows[1].X2) then
+    begin
+      if (Arrows[0].Y1 > Arrows[1].Y1) then
+        Swap(Arrows[0], Arrows[1]);
+
+      B.X1 := Arrows[0].X1;
+      B.Y1 := Arrows[0].Y2 + 2;
+      B.X2 := Arrows[1].X2;
+      B.Y2 := Arrows[1].Y1 - 2;
+
+      if SRL.FindColors(TPA, COLOR_BORDER, B) > 0 then
+      begin
+        Result.SliderRegion := B;
+        Result.Slider := TPA.Bounds;
+        Result.Position := Round((Result.Slider.Y1 - Result.SliderRegion.Y1) * 100 / (Result.SliderRegion.Height - Result.Slider.Height));
+      end;
+    end;
+  end;
+end;
+
+function TFoundry.ExtractMouldInfoLines(searchBox: TBox): array of TMould;
+var
+  ocrFilter: TOCRColorFilter := TOCRColorFilter.Create ([15658734], [0]);
+  turnInText, explodedEntry: TStringArray;
+  foundString: String;
+  left, center, right: TMouldAffix;
+  i: Integer;
+begin
+    turnInText := OCR.RecognizeLines(searchBox, ocrFilter, RS_FONT_PLAIN_11);
+
+    for i := 0 to High(turnInText) do
+    begin
+      foundString := turnInText[i];
+
+      if foundString.Contains(".") then
+        Exit;
+
+      foundString := foundString.Replace("FIat", "Flat");
+      foundString := foundString.Replace("Lioht", "Light");
+      foundString := foundString.Replace("Soiked", "Spiked");
+      foundString := foundString.Replace("Spikeo", "Spiked");
+
+      if(foundString.Contains("Heav")) and not (foundString.Contains("Heavy")) then
+        foundString := foundString.Replace("Heav", "Heavy");
+
+      foundString := foundString.Replace("Broao", "Broad");
+
+      if foundString.Len() < 18 then
+      begin
+        Self.DebugLn("Rejected: " + ToStr(foundString));
+        Exit;
+      end;
+
+      explodedEntry := foundString.Explode(" ");
+
+      if explodedEntry.Len() < 6 then
+        Exit;
+
+      left := MouldAffix(getSwordAffix(explodedEntry[0]), explodedEntry[1].ExtractInteger());
+      center := MouldAffix(getSwordAffix(explodedEntry[2]), explodedEntry[3].ExtractInteger());
+      right := MouldAffix(getSwordAffix(explodedEntry[4]), explodedEntry[5].ExtractInteger());
+
+      Result += Mould(left, center, right, Self.GetScrollBar(Self.MouldScrollArea).Position);
+    end;
+end;
+
+//Because the scroll position doesnt matter with equivalence the mould's affixes matter
+function TFoundry.AreMouldsEqual(mouldOne, mouldTwo: TMould): Boolean;
+begin
+  Result := (mouldOne.CenterAffix = mouldTwo.CenterAffix)
+            and (mouldOne.LeftAffix = mouldTwo.LeftAffix)
+            and (mouldOne.RightAffix = mouldTwo.RightAffix);
+end;
+
+function TFoundry.DoesMouldsArrayContain(mould: TMould; moulds: array of TMould): Boolean;
+var
+  i: Integer;
+begin
+  for i := 0 to High(moulds) do
+  begin
+    if Self.AreMouldsEqual(mould, moulds[i]) then
+      Exit(true);
+  end;
+  Result := false;
+end;
+
+procedure TFoundry.SetUpMouldArea();
+var
+  mouldSelectBorder: TCTS2Color := CTS2 (5334130, 1, 0.01, 0.01);
+  mouldSelectInnerBorder: TCTS2Color := CTS2 (790030, 1, 0.01, 0.01);
+  mouldSelectBorderTPA: TPointArray;
+  mouldSelectInnerBorderTPA: TPointArray;
+begin
+  SRL.FindColors(mouldSelectBorderTPA, mouldSelectBorder, Mainscreen.Bounds);
+  SRL.FindColors(mouldSelectInnerBorderTPA, mouldSelectInnerBorder, mouldSelectBorderTPA.Bounds());
+  Self.MouldScrollArea := mouldSelectBorderTPA.Bounds();
+end;
+
+function TFoundry.WriteMouldLibrary(funcName: string; mouldLib: array of TMould): string;
+var
+  writeMould: TMould;
+begin
+  Result := 'function ' + funcName + '() : array of TMould;' #13 #10 '';
+  Result += 'var' #13 #10 '';
+  Result += '    Left, Center, Right : TMouldAffix;' #13 #10 '';
+  Result += '    ScrollPosition : Int32;' #13 #10 '';
+  Result += 'begin' #13 #10 '';
+
+  for writeMould in mouldLib do
+  begin
+    Result += '  Left := MouldAffix(' + ToStr(writeMould.LeftAffix.affix) + ', ' + ToStr(writeMould.LeftAffix.points) + ');' #13 #10 '';
+    Result += '  Center := MouldAffix(' + ToStr(writeMould.CenterAffix.affix) + ', ' + ToStr(writeMould.CenterAffix.points) + ');' #13 #10 '';
+    Result += '  Right := MouldAffix(' + ToStr(writeMould.RightAffix.affix) + ', ' + ToStr(writeMould.RightAffix.points) + ');' #13 #10 '';
+    Result += '  ScrollPosition := ' + ToStr(writeMould.scrollPosition) + ';' #13 #10 '';
+    Result += '  Result += Mould(Left, Center, Right, ScrollPosition);' #13 #10 '';
+    Result += #13 #10;
+  end;
+
+  Result := Copy(Result, 0, Result.Len() - 2);
+  Result += 'end;' #13 #10 #10 '';
+end;
+
+procedure TFoundry.WriteAllMouldLibraries();
+var
+  fileContents: string;
+  MOULD_LIBRARY_FILE: string := ScriptPath + 'MouldLibrary.simba';
+begin
+  fileContents += WriteMouldLibrary("GetForteMoulds", self.ForteMoulds);
+  fileContents += WriteMouldLibrary("GetBladeMoulds", self.BladeMoulds);
+  fileContents += WriteMouldLibrary("GetTipMoulds", self.TipMoulds);
+  WriteFileContents(MOULD_LIBRARY_FILE, fileContents);
+end;
+
+procedure TFoundry.BuildMouldLibraryWithLines();
+var
+  swordSections: TBoxArray;
+  moulds, newMoulds: array of TMould;
+  i, j: Integer;
+begin
+  Self.SetUpMouldArea();
+  swordSections := Self.getSwordSectionsBounds(Self.MouldScrollArea);
+
+  Self.DebugLn("Starting sword iter");
+
+  for i := 0 to High(swordSections) do
+  begin
+
+    moulds := [];
+    //Click the section
+    Mouse.Click(swordSections[i], MOUSE_LEFT);
+    Self.DebugLn("Clicked sword section: " + ToStr(i));
+
+    //Scroll to the top of the section
+    Self.MouldScrollBar := Self.GetScrollBar(Self.MouldScrollArea);
+    Self.DebugLn("Set up scrollbar");
+    Mouse.Move(Self.MouldScrollBar.Slider);
+    Self.DebugLn("Starting drag");
+    Mouse.DragTo(Self.MouldScrollBar.SliderRegion.X1, Self.MouldScrollBar.SliderRegion.Y1);
+
+    //Get the first set of usable moulds
+    moulds := Self.ExtractMouldInfoLines(Self.MouldScrollArea);
+    Self.DebugLn("Got first set of moulds");
+
+    repeat
+      Mouse.Scroll(Self.MouldScrollArea, 1, true);
+      Wait(150);
+
+      newMoulds := Self.ExtractMouldInfoLines(Self.MouldScrollArea);
+
+      for j := 0 to High(newMoulds) do
+      begin
+        if not Self.DoesMouldsArrayContain(newMoulds[j], moulds) then
+        begin
+          Self.DebugLn("Added: " + ToStr(newMoulds[j]));
+          moulds += newMoulds[j];
+        end;
+      end;
+
+    until Self.GetScrollBar(Self.MouldScrollArea).Position >= 100;
+
+    case i of
+      0: Self.ForteMoulds := moulds;
+      1: Self.BladeMoulds := moulds;
+      2: Self.TipMoulds := moulds;
+    end;
+  end;
+
+  Self.DebugLn("Num fortes: " + ToStr(Length(Self.ForteMoulds)));
+  Self.DebugLn("Num blades: " + ToStr(Length(Self.BladeMoulds)));
+  Self.DebugLn("Num tips: " + ToStr(Length(Self.TipMoulds)));
+end;
+
+function TFoundry.GetBestMould(affixOne, affixTwo: ESwordAffixType; moulds: array of TMould; showDebug: Boolean = false): TMould
+var
+  i: Integer;
+  score: Integer;
+  bestScore: Integer;
+  bestIndex: Integer;
+  checkLeft, checkCenter, checkRight: Boolean;
+begin
+
+  if showDebug then
+  begin
+    Self.DebugLn("Processing affixes: " + ToStr(affixOne) + " " + ToStr(affixTwo));
+  end;
+
+  //Commissions are always Broad/Narrow + another column or Heavy/Light + right column
+  if (affixOne = ESwordAffixType.BROAD)
+     or (affixOne = ESwordAffixType.NARROW) then
+  begin
+    checkLeft := true;
+
+    if showDebug then
+    begin
+      Self.DebugLn("Checking left!");
+    end;
+
+    if (affixTwo = ESwordAffixType.HEAVY)
+    or (affixTwo = ESwordAffixType.LIGHT) then
+    begin
+      checkCenter := true;
+
+      if showDebug then
+      begin
+        Self.DebugLn("Checking center!");
+      end;
+    end
+    else
+    begin
+      checkRight := true;
+
+      if showDebug then
+      begin
+        Self.DebugLn("Checking right!");
+      end;
+    end;
+  end
+  else
+  begin
+    checkCenter := true;
+    checkRight := true;
+
+     if showDebug then
+     begin
+        Self.DebugLn("Checking center and right!");
+     end;
+  end;
+
+  for i := 0 to High(moulds) do
+  begin
+
+    score := 0;
+
+    if checkLeft
+    and (moulds[i].LeftAffix.affix = affixOne) then
+    begin
+      score += moulds[i].LeftAffix.points;
+
+      if showDebug then
+      begin
+        Self.DebugLn("Adding " + ToStr(moulds[i].LeftAffix.points) + " for " + ToStr(moulds[i].LeftAffix.affix));
+      end;
+    end;
+
+    if checkCenter
+    and ( (moulds[i].CenterAffix.affix = affixOne) or (moulds[i].CenterAffix.affix = affixTwo) ) then
+    begin
+      score += moulds[i].CenterAffix.points;
+
+      if showDebug then
+      begin
+        Self.DebugLn("Adding " + ToStr(moulds[i].CenterAffix.points) + " for " + ToStr(moulds[i].CenterAffix.affix));
+      end;
+    end;
+
+    if checkRight
+    and ( (moulds[i].RightAffix.affix = affixOne) or (moulds[i].RightAffix.affix = affixTwo) ) then
+    begin
+      score += moulds[i].RightAffix.points;
+
+       if showDebug then
+       begin
+        Self.DebugLn("Adding " + ToStr(moulds[i].RightAffix.points) + " for " + ToStr(moulds[i].RightAffix.affix));
+       end;
+    end;
+
+    if score > bestScore then
+    begin
+      bestScore := score;
+      bestIndex := i;
+
+      if showDebug then
+      begin
+          Self.DebugLn("Best index is now " + ToStr(bestIndex) + " with " + ToStr(bestScore));
+          Self.DebugLn("Mould was : " + ToStr(moulds[bestIndex]));
+      end;
+    end;
+  end;
+
+  //Self.DebugLn("Best index is : " + ToStr(bestIndex));
+  Result := moulds[bestIndex];
+end;
+
+procedure TFoundry.SelectBestMoulds();
+const
+  GREEN_COLOR: TColor := 901389;
+
+var
+  greenTPA: TPointArray;
+  greenClusters: T2DPointArray;
+  optimalMouldTPA: TPointArray;
+  swordSection: ESwordSection;
+  swordSections: TBoxArray;
+  bestMould: TMould;
+  //forteChosen, bladesChosen, tipsChosen: Boolean;
+begin
+
+  // setup mould
+  swordSections := self.getSwordSectionsBounds(Self.MouldScrollArea);
+
+  for swordSection in ESwordSection do
+  begin
+    //Click the section
+    Mouse.Click(swordSections[swordSection], MOUSE_LEFT);
+    Wait(300);
+
+    //Get the best mould
+    case swordSection of
+      ESwordSection.FORTE: bestMould := Self.GetBestMould(self.sword.prefix, self.sword.suffix, Self.ForteMoulds);
+      ESwordSection.BLADES: bestMould := Self.GetBestMould(self.sword.prefix, self.sword.suffix, Self.BladeMoulds);
+      ESwordSection.TIPS: bestMould := Self.GetBestMould(self.sword.prefix, self.sword.suffix, Self.TipMoulds);
+    end;
+
+    Self.DebugLn("BEST MOULD FOR SECTION: " + ToStr(swordSection)+ " " + ToStr(bestMould));
+
+    Self.SetScrollPosition(bestMould.scrollPosition);
+    SRL.FindColors(greenTPA, GREEN_COLOR, Self.MouldScrollArea);
+    greenClusters := greenTPA.Cluster(1000, 1);
+    optimalMouldTPA := greenClusters.Biggest();
+    Mouse.Click(optimalMouldTPA.Mean(), MOUSE_LEFT);
+    Wait(450);
+  end;
+end;
+
+function TFoundry.handleSetupMould(): Boolean;
+const
+  BlackBoundsColor: TCTS2Color := CTS2 (723726, 1, 16.67, 4.31);
+
+var
+  interfaceTPA: TPointArray;
+  interfaceBounds: TBox;
+  interfaceOpenCountdown: TCountdown;
+  importedMoulds: Boolean;
+  //forteChosen, bladesChosen, tipsChosen: Boolean;
+begin
+  // open the setup mould interface
+  // make sure it's not open?
+  SRL.FindColors(interfaceTPA, BlackBoundsColor, Mainscreen.Bounds);
+  interfaceBounds := interfaceTPA.Cluster(1).Biggest().Bounds();
+
+  if not (interfaceBounds.Area() > 150000) and not self.MouldJig.Click() then
+    Exit(False);
+
+  // we can't get here if it's not open so idk if we should find it again
+  interfaceOpenCountdown.Init(Random(4500, 5500));
+  repeat
+    SRL.FindColors(interfaceTPA, BlackBoundsColor, Mainscreen.Bounds);
+    interfaceBounds := interfaceTPA.Cluster(1).Biggest().Bounds();
+  until (interfaceBounds.Area() > 150000) or interfaceOpenCountdown.IsFinished();
+
+  if interfaceOpenCountdown.IsFinished() then
+    Exit(False);
+
+  if not Self.HaveMouldsBeenCached then
+  begin
+
+    {$IFHASFILE Scripts/MouldLibrary.simba}
+      if not ExportMoulds then
+      begin
+        Self.DebugLn("IMPORTING MOULDS FROM FILE");
+        Self.SetUpMouldArea();
+        Self.ForteMoulds := GetForteMoulds();
+        Self.BladeMoulds := GetBladeMoulds();
+        Self.TipMoulds := GetTipMoulds();
+        Self.HaveMouldsBeenCached := true;
+        importedMoulds := true;
+      end;
+    {$ENDIF}
+
+    if ExportMoulds then
+    begin
+      Self.DebugLn("CACHING MOULDS AND EXPORTING");
+      Self.BuildMouldLibraryWithLines();
+      Self.WriteAllMouldLibraries();
+      Self.HaveMouldsBeenCached := true;
+    end
+    else if not importedMoulds then
+    begin
+      Self.DebugLn("CACHING MOULDS");
+      Self.BuildMouldLibraryWithLines();
+      Self.HaveMouldsBeenCached := true;
+      end;
+    end;
+
+  Self.SelectBestMoulds();
+  Self.DebugLn("Finished setting mould trying to click!");
+
+  if self.clickSetMould(interfaceBounds) then
+    self.IsMouldReady := True;
+end;
+
+function Meltable(name: EMeltableItem; barWorth, quant: Int32): TMeltable;
+begin
+  Result.ItemName := name;
+  Result.BarCount := barWorth;
+  Result.Quantity := quant;
+end;
+//Handles storing the new meltable item into our itemsToUse.
+//Searches if we've got the item already and if so bump the quantity. Otherwise add a new item but keep the quantity at 1.
+procedure TMeltableArray.StoreMeltable(newMeltable: TMeltable);
+var
+  i: Int32;
+begin
+  for i := 0 to High(Self) do
+  begin
+    if Self[i].ItemName = newMeltable.ItemName then
+    begin
+      Self[i].Quantity += 1;
+      Exit;
+    end;
+  end;
+
+  Self += Meltable(newMeltable.ItemName, newMeltable.BarCount, 1);
+end;
+
+function TFoundry.GetMeltableArray(numBarsRequired: Int32; items: TMeltableArray; out itemsToWithdraw: TMeltableArray): Boolean;
+
+  function GetMeltableArrayRecur(out alloyTotal, alloyBarReq: Int32; alloyItems, itemsToUse: TMeltableArray): TMeltableArray;
+  var
+    arrayToSearch: TMeltableArray;
+    i: Int32;
+  begin
+    if (alloyItems = [])
+      or (alloyTotal = alloyBarReq) then
+    begin
+      Exit(itemsToUse);
+    end;
+
+    for i := 0 to High(alloyItems) do
+    begin
+
+      if alloyItems[i] = [] then
+        continue;
+
+      if alloyItems[i].Quantity < 1 then
+      begin
+        continue;
+      end;
+
+      if (alloyItems[i].BarCount + alloyTotal) <= alloyBarReq then
+      begin
+        alloyTotal += alloyItems[i].BarCount;
+        itemsToUse.StoreMeltable(alloyItems[i]);
+        alloyItems[i].Quantity -= 1;
+        break;
+      end
+      else
+      begin
+        alloyItems[i] := [];
+        break;
+      end;
+    end;
+
+    //Remove items with no quantity as we iterate.
+    for i := 0 to High(alloyItems) do
+    begin
+      if (alloyItems <> []) and (alloyItems[i].Quantity > 0) and (alloyItems[i].ItemName <> EMeltableItem.INVALID) then
+        arrayToSearch += alloyItems[i];
+    end;
+
+    Result := GetMeltableArrayRecur(alloyTotal, alloyBarReq, arrayToSearch, itemsToUse);
+  end;
+
+var
+  alloyTotal, i: Int32;
+  itemsToUse, tempArray: TMeltableArray;
+begin
+
+  if Length(items) = 0 then
+    Exit(false);
+
+  tempArray := GetMeltableArrayRecur(alloyTotal, numBarsRequired, items, itemsToUse);
+  Self.DebugLn("Materials found : " + ToStr(alloyTotal));
+  if alloyTotal <> numBarsRequired then
+  begin
+    Self.DebugLn("Didnt find enough materials");
+    Exit(false)
+  end;
+
+  for i := 0 to High(tempArray) do
+  begin
+    if tempArray[i].Quantity = 0 then
+      continue;
+
+    itemsToWithdraw += tempArray[i];
+  end;
+
+  Result := true;
+end;
+
+function TFoundry.GetMeltableString(item: EMeltableItem): string;
+begin
+  case item of
+    SWORD_2H : Result := '2h sword';
+    SQ_SHIELD : Result := 'sq shield';
+    FULL_HELM : Result := 'full helm';
+    INVALID : Result := '';
+  else
+    Result := ToStr(item).ToLower();
+  end;
+end;
+
+function TFoundry.HandleWithdrawMaterial(alloy: EBar; numBarsRequired: Int32): Boolean;
+var
+  meltableType: EMeltableItem;
+  meltableItem: TRSItem;
+  inventoryCountInitial, inventoryCount: Int32;
+  barBankItem: TRSBankItem;
+  meltableBankItems, itemsToUse: TMeltableArray;
+  i, itemCount: Int32;
+  foundBox : TBox;
+
+begin
+
+  if numBarsRequired = 0 then
+  begin
+    Self.DebugLn("Num bars needed for: " + ToStr(alloy) + " already reached!");
+    Exit(true);
+  end;
+
+  inventoryCountInitial := Inventory.Count();
+
+    //Go through our items and get the list of items of this alloy type.
+  for meltableType in EMeltableItem do
+  begin
+    if meltableType = EMeltableItem.INVALID then
+      continue;
+
+    if (meltableType = EMeltableItem.BAR) then
+    begin
+      if alloy = EBar.ADAMANT then
+      begin
+        meltableItem := 'adamantite';
+      end
+      else if alloy = EBar.RUNE then
+      begin
+        meltableItem := 'runite';
+      end
+      else
+      begin
+        meltableItem := ToStr(alloy).Lower();
+      end;
+    end
+    else
+      meltableItem := ToStr(alloy).Lower();
+
+    meltableItem += ' ' + Self.GetMeltableString(meltableType);
+    itemCount := Bank.CountItemStack(meltableItem);
+
+    if (itemCount < 1)
+      and (Bank.FindItem(meltableItem, foundBox)) then
+    begin
+      itemCount := 1;
+    end;
+
+    if itemCount < 1 then
+      continue;
+
+    Self.DebugLn('Found ' + ToStr(itemCount) + ' ' + ToStr(meltableItem));
+    meltableBankItems += Meltable(meltableType, getBarEquivalentAmount(meltableItem), itemCount);
+  end;
+
+  //Weve now got our list of banked alloy materials. Determine what to use.
+  if not Self.GetMeltableArray(numBarsRequired, meltableBankItems, itemsToUse) then
+  begin
+    TerminateScript("Didnt find enough materials for alloy: " + ToStr(alloy));
+  end;
+
+  for i := 0 to High(itemsToUse) do
+  begin
+    inventoryCount += itemsToUse[i].Quantity;
+  end;
+
+  Self.DebugLn("Need to withdraw: " + ToStr(inventoryCount) + " items");
+
+  //Actually withdraw the materials
+  for i := 0 to High(itemsToUse) do
+  begin
+
+    Self.DebugLn("Checking: " + ToStr(itemsToUse[i]));
+
+    if itemsToUse[i].ItemName = EMeltableItem.INVALID then
+      continue;
+
+    if (itemsToUse[i].ItemName = EMeltableItem.BAR) then
+    begin
+      if alloy = EBar.ADAMANT then
+      begin
+        meltableItem := 'adamantite';
+      end
+      else if alloy = EBar.RUNE then
+      begin
+        meltableItem := 'runite';
+      end
+      else
+      begin
+        meltableItem := ToStr(alloy).Lower();
+      end;
+    end
+    else
+    begin
+      meltableItem := ToStr(alloy).Lower();
+    end;
+
+    meltableItem += ' ' + Self.GetMeltableString(itemsToUse[i].ItemName);
+    Self.DebugLn("Setting up bank item to withdraw: " + ToStr(meltableItem) + " quantity: " + ToStr(itemsToUse[i].Quantity));
+    barBankItem := TRSBankItem.Setup(meltableItem, itemsToUse[i].Quantity, False);
+
+    if Bank.WithdrawItem(barBankItem, false)  then
+    begin
+      if WaitUntil(Inventory.ContainsItem(meltableItem), 100, 10000) then
+        Self.DebugLn("Successfully got: " + ToStr(meltableItem));
+    end;
+  end;
+
+  if not WaitUntil(Inventory.Count() >= inventoryCountInitial, 150, 10000) then
+  begin
+    Self.DebugLn("Failed to withdraw all items for this alloy: " + ToStr(alloy));
+    Result := false;
+  end;
+
+  Result := true;
+end;
+
+function TFoundry.handleWithdrawBars2(): boolean;
+var
+  alloyOneCount, alloyTwoCount : Int32;
+
+begin
+  if not Bank.WalkOpen(self.BankChest) then
+    Exit(False);
+
+  Bank.OpenTab(BankTab);
+  if Bank.DepositAll() then
+    if not WaitUntil(Inventory.Count() = 0, 200, 10000) then
+      TerminateScript("Something in the inventory isnt able to be deposited; please handle it and rerun script");
+
+  Result := (Self.HandleWithdrawMaterial(AlloyOne, AlloyOneAmount - Self.Crucible.alloyOneBars))
+         and (Self.HandleWithdrawMaterial(AlloyTwo, AlloyTwoAmount - Self.Crucible.alloyTwoBars));
+
+  if not Result then
+  begin
+    Self.DebugLn("HandleWithdrawMaterials failed!");
+    Exit(false);
+  end;
+
+  Self.GetAlloyInventoryCounts(alloyOneCount, alloyTwoCount);
+
+  Result := (alloyOneCount = AlloyOneAmount - Self.Crucible.alloyOneBars) and (alloyTwoCount = AlloyTwoAmount - Self.Crucible.alloyTwoBars);
+
+  if Result then
+  begin
+    Self.DebugLn("Waiting on inventory");
+    Wait(600, 1200);
+    Bank.Close(True);
+  end
+  else
+    Self.DebugLn("Inventory count post withdraw failed! AlloyOneCount: " + ToStr(alloyOneCount) + " AlloyTwoCount: " + ToStr(alloyTwoCount));
+end;
+
+function TFoundry.FillCrucibleBar(alloy : EBar; crucibleATPA: T2DPointArray) : Boolean;
+var
+  crucibleCluster : TPointArray;
+  item : TRSItem;
+begin
+  Self.DebugLn("Filling Crucible Bar: " + ToStr(alloy));
+  crucibleCluster := crucibleATPA.Biggest().Cluster(1).Biggest();
+  Mouse.Move(crucibleCluster.RandomValue());
+
+  if not Mainscreen.IsUpText('Crucible') then
+    Exit(False);
+
+  Mouse.Click(MOUSE_LEFT);
+
+  if not Mainscreen.DidRedClick() then
+    Exit(False);
+
+  Result := WaitUntil(Make.IsOpen(), 100, 10000);
+
+  if not Result then
+    Exit;
+
+  Make.Select(Ord(alloy), Make.QUANTITY_ALL, Antiban.BioDice());
+  item := Self.ConvertBarText("bar", alloy).ToLower() + " bar";
+  Result := WaitUntil(not Inventory.ContainsItem(item), 200, 10000);
+  Self.DebugLn("Filling Crucible Bar success? " + ToStr(Result));
+end;
+
+function TFoundry.FillCrucibleItem(item : TRSItem; crucibleATPA: T2DPointArray) : Boolean;
+var
+  crucibleCluster : TPointArray;
+  slot : Int32;
+  itemCount : Int32;
+begin
+
+  itemCount := Inventory.CountItem(item);
+  Self.DebugLn("Fill Item Count: " + ToStr(itemCount));
+
+  if Inventory.FindItem(item, slot) then
+  begin
+    if Inventory.SetSelectedSlot(slot) then
+    begin
+      crucibleCluster := crucibleATPA.Biggest().Cluster(1).Biggest();
+      Mouse.Move(crucibleCluster.RandomValue());
+
+      if not Mainscreen.IsUpText('Crucible') then
+        Exit(False);
+
+      Mouse.Click(MOUSE_LEFT);
+
+      if not Mainscreen.DidRedClick() then
+        Exit(False);
+
+      if itemCount = 1 then
+      begin
+
+        //Valuable item check should this be for more than rune?
+        if ( (AlloyOne = EBar.RUNE) or (AlloyTwo = EBar.RUNE) )
+        and WaitUntil(Chat.ClickOption("Yes", false, [16711680]), 200, 10000) then
+        begin
+          Self.DebugLn("Selected yes at valuable prompt");
+        end;
+
+        Self.DebugLn("Checking Continue");
+        if not WaitUntil(Chat.ClickContinue(), 200, 8000) then
+        begin
+          Self.DebugLn("Could not find continue");
+          Exit(False);
+        end;
+      end
+      else
+      begin
+        Self.DebugLn("Checking Click Option");
+        if not WaitUntil(Chat.ClickOption('All'), 200, 8000) then
+          Exit(False);
+
+        //Valuable item check should this be for more than rune?
+        if ( (AlloyOne = EBar.RUNE) or (AlloyTwo = EBar.RUNE) )
+        and WaitUntil(Chat.ClickOption("Yes", false, [16711680]), 200, 10000) then
+        begin
+          Self.DebugLn("Selected yes at valuable prompt");
+        end;
+      end;
+
+      Result := WaitUntil(not Inventory.ContainsItem(item), 200, 8000);
+    end;
+  end;
+
+  Self.DebugLn("Filling Crucible Success? " + ToStr(Result));
+end;
+
+function TFoundry.handleFillCrucible(): Boolean;
+var
+  meltableType: String;
+  meltableItem: TRSItem;
+  itemCount: Int32;
+  crucibleATPA: T2DPointArray;
+begin
+
+  if self.Crucible.alloyOneBars < AlloyOneAmount then
+  begin
+    for meltableType in MELTABLE_GEAR do
+    begin
+      meltableItem := Self.ConvertBarText(meltableType, AlloyOne).Lower() + ' ' + meltableType;
+
+      if not Inventory.ContainsItem(meltableItem) then
+        continue;
+
+      self.Crucible.rsObj.Find(crucibleATPA);
+      itemCount := Inventory.CountItem(meltableItem);
+
+      if meltableType = 'bar' then
+      begin
+        if not Self.FillCrucibleBar(AlloyOne, crucibleATPA) then
+          Exit(false);
+      end
+      else if not Self.FillCrucibleItem(meltableItem, crucibleATPA) then
+        Exit(false);
+
+      self.Crucible.alloyOneBars += itemCount * self.getBarEquivalentAmount(meltableItem);
+    end;
+  end;
+
+  if self.Crucible.alloyTwoBars < AlloyTwoAmount then
+        begin
+    for meltableType in MELTABLE_GEAR do
+    begin
+      meltableItem := Self.ConvertBarText(meltableType, AlloyTwo).Lower() + ' ' + meltableType;
+
+      if not Inventory.ContainsItem(meltableItem) then
+        continue;
+
+      self.Crucible.rsObj.Find(crucibleATPA);
+      itemCount := Inventory.CountItem(meltableItem);
+
+      if meltableType = 'bar' then
+          begin
+        if not Self.FillCrucibleBar(AlloyTwo, crucibleATPA) then
+          Exit(false);
+          end
+      else if not Self.FillCrucibleItem(meltableItem, crucibleATPA) then
+        Exit(false);
+
+      self.Crucible.alloyTwoBars += itemCount * self.getBarEquivalentAmount(meltableItem);
+    end;
+  end;
+
+  Exit(True);
+end;
+
+function TFoundry.handlePourCrucible(): Boolean;
+const
+  CrucibleLavaColor: TCTS2Color := CTS2 (2264018, 1, 0.10, 0.59);
+
+var
+  crucibleCuboid: TCuboidEx;
+  lavaTPA: TPointArray;
+begin
+  if not InRange(Minimap.GetCompassAngle(), 315, 360) then
+    Minimap.RotateWithinAngles(-45, 0);
+
+  crucibleCuboid := self.Crucible.rsObj.GetCuboidArray[0];
+  SRL.FindColors(lavaTPA, CrucibleLavaColor, crucibleCuboid.Bounds());
+  lavaTPA := crucibleCuboid.Filter(lavaTPA);
+  Mouse.Move(lavaTPA);
+  if not Mainscreen.IsUpText('Pour') then
+    Exit(False);
+
+  Mouse.Click(MOUSE_LEFT);
+  Result := Mainscreen.DidRedClick();
+  if Result then
+  begin
+    self.Crucible.isPoured := True;
+    self.Crucible.isPouring := True;
+    self.MouldJig.Hover(5);
+
+    if WaitUntil(Mainscreen.IsUpText(['oured']), 100, 12000) then
+      Exit(true);
+  end;
+end;
+
+function TFoundry.handleGetSwordMould(): Boolean;
+begin
+  self.MouldJig.Click();
+  Result := WaitUntil(self.isGameStarted(), 200, 10000);
+  if not Result then
+  begin
+    if WaitUntil(Chat.HasContinue(), 150, 12000) then
+    begin
+      Equipment.RemoveGearFromSlot(ERSEquipmentSlot.WEAPON);
+      Equipment.RemoveGearFromSlot(ERSEquipmentSlot.SHIELD);
+      Self.DebugLn("Removed equipped gear");
+    end;
+  end;
+
+  if Result then
+  begin
+    self.Crucible.isPoured := False;
+    self.Crucible.isPouring := False;
+  end;
+end;
+
+function TFoundry.handleFastHeat(): Boolean;
+var
+  currentMachine: TMachine;
+  currentHeat: THeat;
+  prevCursorPos, currCursorPos, cursorPosDiff, playerPosBeforeMove: TPoint;
+  failTimer: TCountdown;
+  clickThisCycle, finished: Boolean;
+  currHeatAsInt, currMachineHeatAsInt: Int32;
+begin
+
+  playerPosBeforeMove := Self.RSW.GetMyPos();
+
+  if not self.LavaPool.WalkClick() then
+  begin
+    Mouse.Click(Mainscreen.Center, MOUSE_LEFT);
+    Self.DebugLn("Failed to click lava");
+    Exit(False);
+  end;
+
+  Minimap.WaitMoving();
+
+  if playerPosBeforeMove.DistanceTo(Self.RSW.GetMyPos()) < 2 then
+  begin
+    prevCursorPos := Self.GetHeatCursorPosition();
+    Wait(600);
+
+    if (prevCursorPos.X < Self.GetHeatCursorPosition().X) then
+  begin
+    Self.DebugLn("We did not move, exiting heat fast!");
+    Exit;
+    end;
+  end;
+
+  currentMachine := self.getCurrentMachine();
+
+  Result := self.heatedEnough(currentMachine, self.getCurrentHeat());
+  Self.DebugLn("Heated enough? " + ToStr(Result));
+
+  if Result then
+    Exit;
+
+  failTimer.Init(30000);
+
+  prevCursorPos := Self.GetHeatCursorPosition();
+  currCursorPos := prevCursorPos;
+
+  while not finished do
+  begin
+    currentMachine := self.getCurrentMachine();
+    currentHeat := self.getCurrentHeat();
+    currCursorPos := Self.GetHeatCursorPosition();
+    cursorPosDiff := currCursorPos - prevCursorPos;
+    clickThisCycle := false;
+    currHeatAsInt := Ord(currentHeat.state);
+    currMachineHeatAsInt := Ord(currentMachine.heatNeeded);
+
+     //if the heat is within 1 section apply the slow rules
+    if ( (currentHeat.state = currentMachine.heatNeeded)
+         or InRange(currHeatAsInt, currMachineHeatAsInt - 1, currMachineHeatAsInt) )
+      and (Abs(cursorPosDiff.X) >= Random(38, 45)) then
+    begin
+      prevCursorPos := currCursorPos;
+      clickThisCycle := true;
+    end;
+
+    finished := Self.HeatUntil(currentMachine, currentHeat, clickThisCycle)
+                or failTimer.IsFinished();
+
+    if currentHeat.state = currentMachine.heatNeeded then
+      Self.PreHoverObject(currentMachine.rsObj);
+
+    Wait(100);
+  end;
+end;
+
+function TFoundry.handleFastCool(): Boolean;
+var
+  currentMachine: TMachine;
+  currentHeat: THeat;
+  clickThisCycle: Boolean;
+  prevCursorPos, currCursorPos, cursorPosDiff, playerPosBeforeMove: TPoint;
+  failTimer: TCountdown;
+  finished: Boolean;
+  currHeatAsInt, currMachineHeatAsInt: Int32;
+begin
+
+  playerPosBeforeMove := Self.RSW.GetMyPos();
+
+  if not self.Waterfall.WalkClick() then
+  begin
+    Self.DebugLn("Failed to click waterfall");
+    Exit(False);
+  end;
+
+  Minimap.WaitMoving();
+  currentMachine := self.getCurrentMachine();
+  currentHeat := self.getCurrentHeat();
+  Result := self.cooledEnough(currentMachine, currentHeat);
+
+  if playerPosBeforeMove.DistanceTo(Self.RSW.GetMyPos()) < 2 then
+  begin
+    Self.DebugLn("We did not move, exiting cool fast!");
+    Exit;
+  end;
+
+  if Result then
+    Exit;
+
+  failTimer.Init(30000);
+  prevCursorPos := Self.GetHeatCursorPosition();
+  currCursorPos := prevCursorPos;
+
+  while not finished do
+  begin
+    currentMachine := self.getCurrentMachine();
+    currentHeat := self.getCurrentHeat();
+    currCursorPos := Self.GetHeatCursorPosition();
+    cursorPosDiff := currCursorPos - prevCursorPos;
+    clickThisCycle := false;
+    currHeatAsInt := Ord(currentHeat.state);
+    currMachineHeatAsInt := Ord(currentMachine.heatNeeded);
+
+    //if the heat is within 1 section apply the slow rules
+    if ( (currentHeat.state = currentMachine.heatNeeded)
+         or InRange(currHeatAsInt, currMachineHeatAsInt, currMachineHeatAsInt + 1) )
+      and (Abs(cursorPosDiff.X) >= Random(37, 48)) then
+    begin
+      prevCursorPos := currCursorPos;
+      clickThisCycle := true;
+    end;
+
+    finished := Self.CoolUntil(currentMachine, currentHeat, clickThisCycle)
+                or failTimer.IsFinished();
+
+    if not finished
+    and (currCursorPos.X > prevCursorPos.X) then
+    begin
+      Writeln("Somehow cooling is heating. Exiting");
+      Exit(true);
+    end;
+
+    if currentHeat.state = currentMachine.heatNeeded then
+      Self.PreHoverObject(currentMachine.rsObj);
+    Wait(100);
+  end;
+end;
+
+function TFoundry.GetToolTickTime(currentMachine : Tmachine) : Int32;
+begin
+  case currentMachine.machineType of
+    EMachine.GRINDSTONE : Result := 1400;
+    EMachine.POLISHING_WHEEL : Result := 1400;
+    EMachine.TRIP_HAMMER : Result := 2400;
+  end;
+end;
+
+function TFoundry.HandleSweetSpot(currentMachine: TMachine): Boolean;
+const
+  SPOT_COLOUR: TCTS2Color := CTS2 (1029841, 7, 0.03, 1.89);
+  //GREEN_COLOUR : TCTS2Color := CTS2(374022, 8, 0.02, 0.77);
+var
+  sweetSpotTPA: TPointArray;
+  waitTime : Int32 := Self.GetToolTickTime(currentMachine);
+begin
+  if SRL.FindColors(sweetSpotTPA, SPOT_COLOUR, Self.HUD.Bounds.Expand(6)) > 1 then
+  begin
+    Result := currentMachine.rsObj.Click(true, 3);
+    WaitUntil( ((XPBar.EarnedXP()) and (SRL.CountColor(SPOT_COLOUR, Self.HUD.Bounds.Expand(6)) < 1) )
+                or (self.getCurrentHeat().state <> currentMachine.heatNeeded), 10, waitTime);
+
+    if Self.getCurrentMachine().heatNeeded <> Self.GetCurrentHeat().state then
+    begin
+      Self.DebugLn("SWEETSPOT SAFETY CLICK!");
+      if Self.CheckForRandomEventUpText() then
+      begin
+        Self.DebugLn("Avoiding random event in sweet spot!");
+        ChooseOption.Select('Walk here');
+      end
+      else
+      begin
+        Mouse.Click(Mainscreen.Center, MOUSE_LEFT);
+      end;
+    end;
+    if Result then
+      Self.DebugLn("Handled sweetspot!");
+  end;
+end;
+
+function TFoundry.handleHammer(): Boolean;
+var
+  currentMachine: TMachine;
+  currentHeat: THeat;
+  countdown: TCountdown;
+  madeLavaVisible: Boolean;
+  hoveredSelf: Boolean;
+  handledSweetSpot: Boolean;
+
+begin
+  currentMachine := self.getCurrentMachine();
+  currentHeat := self.getCurrentHeat();
+
+  if currentHeat.state <> currentMachine.heatNeeded then
+    Exit;
+
+  self.TripHammer.rsObj.WalkClick();
+
+  Minimap.WaitMoving();
+  currentMachine := self.getCurrentMachine();
+  currentHeat := self.getCurrentHeat();
+
+  if currentHeat.state <> currentMachine.heatNeeded then
+    Exit;
+
+  countdown.Init(Random(30000, 36000));
+  Result := self.needsMoreHammer(currentMachine, currentHeat);
+
+  if not Result then
+    Exit;
+
+  repeat
+    currentMachine := self.getCurrentMachine();
+    currentHeat := self.getCurrentHeat();
+
+    if not handledSweetSpot then
+    begin
+      handledSweetSpot := Self.HandleSweetSpot(currentMachine);
+
+      if handledSweetSpot then
+      begin
+         hoveredSelf := false;
+         currentMachine := self.getCurrentMachine();
+         currentHeat := self.getCurrentHeat();
+      end;
+    end;
+
+    Result := self.needsMoreHammer(currentMachine, currentHeat);
+
+    if not Result
+      and (currentMachine.heatNeeded = currentHeat.state)
+      and (Self.GetActionsLeftForTool(Self.getCurrentMachineSection()) < 2) then
+    begin
+      Self.DebugLn("Attempting to get the final action!");
+      Self.DebugLn("Heat state is: " + ToStr(currentHeat));
+      Result := true;
+    end;
+
+    if not hoveredSelf
+      and Self.ShouldMachineSwitchTools(currentMachine, Self.getCurrentMachineSection()) then
+    begin
+      hoveredSelf := true;
+      Self.DebugLn("SWITCH TOOLS");
+      Mouse.Move(MainScreen.Center);
+    end;
+
+    if (not Result) then
+      break;
+
+    if Result or countdown.IsFinished() then
+    begin
+      if not hoveredSelf
+        and XPBar.EarnedXP() then
+      begin
+        madeLavaVisible := Self.PreHoverObject(Self.LavaPool);
+      end;
+
+      Wait(75, 125);
+    end;
+  until not Result or countdown.IsFinished();
+
+  if hoveredSelf then
+  begin
+    if Self.CheckForRandomEventUpText() then
+    begin
+      Self.DebugLn("Avoiding random event");
+      ChooseOption.Select('Walk here');
+    end
+    else
+    begin
+		  Mouse.Click(MOUSE_LEFT);
+    end;
+  end;
+end;
+
+function TFoundry.handleGrindstone(): Boolean;
+var
+  currentMachine: TMachine;
+  currentHeat: THeat;
+  countdown: TCountdown;
+  madeWaterfallVisible: Boolean;
+  hoveredSelf: Boolean;
+  handledSweetSpot: Boolean;
+
+begin
+  currentMachine := self.getCurrentMachine();
+  currentHeat := self.getCurrentHeat();
+
+  if currentHeat.state <> currentMachine.heatNeeded then
+    Exit;
+
+  self.Grindstone.rsObj.WalkClick();
+  Minimap.WaitMoving();
+
+  currentMachine := self.getCurrentMachine();
+  currentHeat := self.getCurrentHeat();
+
+  if currentHeat.state <> currentMachine.heatNeeded then
+    Exit;
+
+  countdown.Init(Random(30000, 36000));
+  repeat
+    currentMachine := self.getCurrentMachine();
+    currentHeat := self.getCurrentHeat();
+
+    if not handledSweetSpot then
+    begin
+      handledSweetSpot := Self.HandleSweetSpot(currentMachine);
+
+      if handledSweetSpot then
+      begin
+         hoveredSelf := false;
+         currentMachine := self.getCurrentMachine();
+         currentHeat := self.getCurrentHeat();
+      end;
+    end;
+
+    Result := self.needsMoreGrindstone(currentMachine, currentHeat);
+
+    if not Result
+      and (currentMachine.heatNeeded = Self.GetCurrentHeat().state)
+      and (Self.GetActionsLeftForTool(Self.getCurrentMachineSection()) < 2) then
+    begin
+      Self.DebugLn("Attempting to get the final action!");
+      Self.DebugLn("Heat state is: " + ToStr(currentHeat));
+      Result := true;
+    end;
+
+    if not hoveredSelf and Self.ShouldMachineSwitchTools(currentMachine, Self.getCurrentMachineSection()) then
+    begin
+      hoveredSelf := true;
+      Self.DebugLn("SWITCH TOOLS");
+      Mouse.Move(MainScreen.Center);
+    end;
+
+    if not Result then
+      break;
+
+    if Result or countdown.IsFinished() then
+    begin
+      if not hoveredSelf
+        and XPBar.EarnedXP() then
+      begin
+        madeWaterfallVisible := Self.PreHoverObject(Self.Waterfall);
+      end;
+
+      Wait(50, 80);
+    end;
+  until not Result or countdown.IsFinished();
+
+  if hoveredSelf then
+  begin
+    if Self.CheckForRandomEventUpText() then
+    begin
+      Self.DebugLn("Avoiding random event");
+      ChooseOption.Select('Walk here');
+    end
+    else
+    begin
+		  Mouse.Click(MOUSE_LEFT);
+    end;
+  end;
+end;
+
+function TFoundry.handlePolish(): Boolean;
+var
+  currentMachine: TMachine;
+  currentHeat: THeat;
+  countdown: TCountdown;
+  madeLavaVisible: Boolean;
+  hoveredSelf: Boolean;
+  handledSweetSpot: Boolean;
+begin
+  currentMachine := self.getCurrentMachine();
+  currentHeat := self.getCurrentHeat();
+
+  if currentHeat.state <> currentMachine.heatNeeded then
+    Exit;
+
+  self.PolishingWheel.rsObj.WalkClick();
+  Minimap.WaitMoving();
+  currentMachine := self.getCurrentMachine();
+  currentHeat := self.getCurrentHeat();
+
+  if currentHeat.state <> currentMachine.heatNeeded then
+    Exit;
+
+  countdown.Init(Random(30000, 36000));
+  repeat
+    currentMachine := self.getCurrentMachine();
+    currentHeat := self.getCurrentHeat();
+
+    if not handledSweetSpot then
+    begin
+      handledSweetSpot := Self.HandleSweetSpot(currentMachine);
+
+      if handledSweetSpot then
+      begin
+         hoveredSelf := false;
+         currentMachine := self.getCurrentMachine();
+         currentHeat := self.getCurrentHeat();
+      end;
+    end;
+    Result := self.needsMorePolish(currentMachine, currentHeat);
+
+    if not Result
+      and (currentMachine.heatNeeded = Self.GetCurrentHeat().state)
+      and (Self.GetActionsLeftForTool(Self.getCurrentMachineSection()) < 2) then
+    begin
+      Self.DebugLn("Attempting to get the final action!");
+      Self.DebugLn("Heat state is: " + ToStr(currentHeat));
+      Result := true;
+    end;
+
+    if not hoveredSelf
+      and Self.ShouldMachineSwitchTools(currentMachine, Self.getCurrentMachineSection()) then
+    begin
+      hoveredSelf := true;
+      Self.DebugLn("SWITCH TOOLS");
+      Mouse.Move(MainScreen.Center);
+    end;
+
+    if not Result then
+      break;
+
+    if Result or countdown.IsFinished() then
+    begin
+      if not hoveredSelf
+        and XPBar.EarnedXP() then
+      begin
+        madeLavaVisible := Self.PreHoverObject(self.LavaPool);
+      end;
+
+      Wait(50, 80);
+    end;
+  until not Result or countdown.IsFinished();
+
+  if hoveredSelf then
+  begin
+    if Self.CheckForRandomEventUpText() then
+    begin
+      Self.DebugLn("Avoiding random event");
+      ChooseOption.Select('Walk here');
+    end
+    else
+    begin
+		  Mouse.Click(MOUSE_LEFT);
+    end;
+  end;
+end;
+
+procedure TFoundry.ResetGame();
+begin
+  self.Sword.isSetup := False;
+  self.HUD := [];
+  Self.DebugLn('Resetting hud');
+  self.IsMouldFilled := false;
+  self.IsMouldReady := false;
+  self.Sword.isSetup := false;
+  Self.SavedDebugThisRound := false;
+
+  // reset crucible fields
+  self.Crucible.alloyOneBars := 0;
+  self.Crucible.isPouring := False;
+  self.Crucible.isPoured := False;
+  self.Crucible.alloyTwoBars := 0;
+
+  Self.ActivityTimer.Restart();
+end;
+
+procedure TFoundry.AddToStats(searchBox: TBox);
+var
+  ocrFilter: TOCRColorFilter := TOCRColorFilter.Create ([257], [2]);
+  turnInText: TStringArray;
+  stringTest: string;
+   extractedNumbers: TExtendedArray;
+  xpRead: Integer;
+begin
+    xpRead := XPBar.Read();
+    Self.Stats.XPEarned += xpRead - Self.Stats.startXP;
+    Self.Stats.startXP := xpRead;
+
+    turnInText := OCR.RecognizeLines(searchBox, ocrFilter, RS_FONT_QUILL_8);
+    stringTest := turnInText.Merge();
+
+    if not stringTest.Contains("Sword") then
+    begin
+      Self.DebugLn("OCR turn in failed");
+      Exit;
+    end;
+
+    stringTest := stringTest.After("awarded: ");
+    stringTest := stringTest.Before("Total");
+    stringTest := stringTest.Replace(",", "");
+    extractedNumbers := stringTest.ExtractNumbers();
+
+    if Length(extractedNumbers) < 2 then
+    begin
+      Self.DebugLn("OCR extract failed");
+      Exit;
+    end;
+
+    //TODO: Track what we smelted and look up the prices to deduct from the profit.
+    Self.Stats.goldEarned += Floor(extractedNumbers[1]);
+end;
+
+function GetCenterTextPoint(drawArea : TBox; myText : string) : Int32;
+var
+  posOffset : Int32;
+
+begin
+  posOffset := (drawARea.Width() - RSClient.Image().TextWidth(myText)) div 2;
+  Result := drawArea.X1 + posOffset;
+end;
+
+procedure TFoundry.DrawText(drawArea : TBox);
+const
+  Y_PAD : Int8 := 14;
+  spacingStart : string := "[";
+  spacingEnd : string := "|]";
+
+var
+  listOfStrings : TStringArray;
+  temp: string;
+  i : Int32;
+  yCoord : Int32;
+  xpHr: Integer;
+
+begin
+  xpHr := Round(Self.Stats.XPEarned / (GetTimeRunning() / 1000 / 60 / 60));
+
+  listOfStrings += spacingStart + "=================================" + spacingEnd;
+  listOfStrings += "Foundry by Skunkworks and CJ";
+  listOfStrings += spacingStart + "=================================" + spacingEnd;
+  listOfStrings += "Runtime: " + SRL.MsToTime(GetTimeRunning(), TTimeFormat.Time_Abbrev);
+  listOfStrings += "XP Earned: " + ToStr(Self.Stats.XPEarned);
+  listOfStrings += "XP/hr: " + ToStr(xpHr);
+  listOfStrings += "Gold earned: " + ToStr(Self.Stats.goldEarned);
+  listOfStrings += "Swords made: " + ToStr(Self.Stats.numSwordsMade);
+  listOfStrings += "Swords damaged: " + ToStr(Self.Stats.numSwordsDamaged);
+  listOfStrings += spacingStart + "=================================" + spacingEnd;
+
+  {$IFNDEF SRL_DISABLE_REMOTEINPUT}
+    RSCLient.Image().setFontName('Arial');
+    RSClient.Image().setFontSize(14);
+    yCoord := drawArea.Y1 + 7;
+
+    temp := listOfStrings[1];
+    RSClient.Image().DrawText( temp, Point(GetCenterTextPoint(drawArea, temp), yCoord), CHAT_COLOR_WHITE);
+    yCoord := drawArea.Y1 + Y_PAD;
+    RSClient.Image().setFontSize(12);
+  {$ENDIF}
+
+  //Header text
+  Writeln(listofStrings[0]);
+  Writeln(spacingStart + PadL(" ", 3, " ") + PadR(listofStrings[1], 30, " ") + spacingEnd);
+  Writeln(listOfStrings[2]);
+
+  for i := 3 to High(listOfStrings) - 1 do
+  begin
+    {$IFNDEF SRL_DISABLE_REMOTEINPUT}
+      yCoord += Y_PAD;
+      RSClient.Image().DrawText( listOfStrings[i], Point(drawArea.X1 + 15, yCoord), CHAT_COLOR_WHITE);
+    {$ENDIF}
+
+    Writeln(spacingStart + PadL(" ", 3, " ") + PadR(listOfStrings[i], 30, " ") + spacingEnd);
+  end;
+
+  Writeln(listOfStrings[High(listOfStrings)]);
+end;
+
+procedure TFoundry.DrawHUD();
+const
+  BOX_WIDTH : Int32 := 200;
+  BOX_HEIGHT : Int32 := 118;
+var
+    test : TMufasaBitmap;
+    msBox : TBox := Mainscreen.Bounds;
+    drawnBox : TBox;
+    //chatNameBox : TBox := Chat.GetDisplayNameBox([0]);
+begin
+
+  {$IFNDEF SRL_DISABLE_REMOTEINPUT}
+    test.Init();
+    test.LoadFromFile(AppPath+'\Resources\SCJFoundryHUD.png');
+    drawnBox := Box(MSBox.X2 - BOX_WIDTH, MSBox.Y2 - BOX_HEIGHT, msBox.X2, msBox.Y2);
+    RSClient.Image().Clear(drawnBox);
+    RSClient.Image().DrawBitmap(test, Point(drawnBox.X1, drawnBox.Y1));
+  {$ENDIF}
+
+  //Force setup
+  //XPBar.IsOpen();
+
+  //Blur name
+  //RSClient.Image().DrawBoxFilled(chatNameBox.Expand(5, 2), false, 9088962);
+  //Hide HP
+  //RSClient.Image().DrawCircleFilled(Minimap.GetHPCircle().X - 10, Minimap.GetHPCircle().Y, 20, false, 142005);
+  //Hide XP
+  //RSClient.Image().DrawBoxFilled(XPBar.Bounds(), false, 1);
+  //Hide pray
+  //RSClient.Image().DrawCircleFilled(Minimap.GetPrayerCircle().X - 10, Minimap.GetPrayerCircle().Y, 20, false, 6960456);
+
+  DrawText(drawnBox);
+  test.Free();
+end;
+
+procedure TFoundry.PrintProgress();
+begin
+  (*
+  xpHr := Round(Self.Stats.XPEarned / (GetTimeRunning() / 1000 / 60 / 60));
+  Writeln("Skunkworks' and CJ's Foundry!");
+  Writeln("Gold Earned: " + ToStr(Self.Stats.goldEarned));
+  Writeln("XP Earned: " + ToStr(Self.Stats.XPEarned));
+  Writeln("XP/hr: " + ToStr(xpHr));
+  Writeln("Swords Made: " + ToStr(Self.Stats.numSwordsMade));
+  Writeln("Swords Damaged: " + ToStr(Self.Stats.numSwordsDamaged));
+  *)
+  Self.DrawHUD();
+end;
+
+function TFoundry.InteractWithGiant(): Boolean;
+const
+  GiantColor: TCTS2Color := CTS2(3357052, 9, 0.06, 0.23);//CTS2(4343133, 2, 0.39, 0.54);
+  GiantTile : TPoint := [4233, 3116] ;
+var
+  giantTPA: TPointArray;
+begin
+  for 1 to 5 do
+  begin
+    if not SRL.FindColors(giantTPA, GiantColor, Mainscreen.Bounds) > 0 then
+    begin
+      Antiban.RandomRotate();
+      continue;
+    end;
+
+    Mouse.Move(giantTPA.Mean());
+    if not Mainscreen.IsUpText('Kovac') then
+    begin
+      Antiban.RandomRotate();
+      continue;
+    end;
+
+    Mouse.Click(MOUSE_RIGHT);
+    if not ChooseOption.Select('Hand-in') then
+      Exit(False);
+
+    Result := true;
+    break;
+  end;
+end;
+
+function TFoundry.handleTurnInSword(): Boolean;
+const
+  GiantTile : TPoint := [4351, 3153] ;
+begin
+  if not Self.InteractWithGiant() then
+  begin
+    Self.DebugLn("Couldnt find the giant after rotation attempts. Now walking");
+    if not Self.RSW.WalkBlind(GiantTile, 30) then
+    begin
+      Self.DebugLn("Couldnt walk there either??");
+      Exit(false);
+    end;
+
+    if not Self.InteractWithGiant() then
+    begin
+      TerminateScript("Somehow we couldnt walk to the giant or colour find the giant. This is bad. Kill the script");
+    end;
+  end;
+
+  if Self.IsSwordDamaged() then
+  begin
+    Self.DebugLn("This sword has been damaged!");
+    Inc(Self.Stats.numSwordsDamaged);
+    Self.DebugLn("Swords damaged so far: " + ToStr(Self.Stats.numSwordsDamaged));
+  end;
+
+  Self.ResetGame();
+  // sometimes sword can want to turn in
+  if not Chat.ClickOption('Yes') then
+  begin
+    if not WaitUntil(Chat.ClickContinue(True), 200, 10000) then
+      Exit(False);
+
+    if not WaitUntil(Chat.HasContinue(), 150, 10000) then
+      Exit(false);
+  end;
+
+  Self.DebugLn("Incrementing stats");
+  Self.AddToStats(Chat.Bounds);
+
+  // handle xp gain
+  if not WaitUntil(Chat.ClickContinue(True), 200, 10000) then
+    Exit(False);
+
+  Inc(Self.Stats.numSwordsMade);
+  Self.TotalActions := Self.Stats.numSwordsMade;
+
+  Self.PrintProgress();
+
+  // mark last turn-in time for safe break window
+  Self.LastTurnInAt := GetTimeRunning();
+
+  // per-sword micro-break (10–25s) chance
+  if Random(100) < PER_SWORD_MICRO_BREAK_CHANCE_PCT then
+  begin
+    Self.DebugLn('Taking per-sword micro break');
+    Self.ActivityTimer.Pause();
+    Wait(Random(PER_SWORD_MICRO_BREAK_MIN_MS, PER_SWORD_MICRO_BREAK_MAX_MS));
+    Self.ActivityTimer.Resume();
+  end;
+
+  Exit(True);
+end;
+
+// ==========================
+//   BigAussie-style breaks
+// ==========================
+
+function TFoundry.SafeToBreak(): Boolean;
+begin
+  // Between rounds (HUD not up) or just after turn-in window (<=30s)
+  if not Self.isGameStarted() then
+    Exit(True);
+  Result := (GetTimeRunning() - Self.LastTurnInAt) <= 30000;
+end;
+
+procedure TFoundry.ScheduleNextMiniBreak();
+begin
+  Self.NextMiniBreakAt := GetTimeRunning() + Random(Self.MiniGapMinMs, Self.MiniGapMaxMs);
+end;
+
+procedure TFoundry.ScheduleNextPlannedBreak();
+var
+  baseMs: Int64;
+  jitter: Int64;
+begin
+  baseMs := Self.PlannedEveryMin * ONE_MINUTE;
+  jitter := (baseMs * Random(-Self.PlannedCadenceJitterPct, Self.PlannedCadenceJitterPct)) div 100;
+  Self.NextPlannedBreakAt := GetTimeRunning() + baseMs + jitter;
+end;
+
+procedure TFoundry.MaybeDoMiniBreak();
+var
+  lenMs: Int32;
+begin
+  if GetTimeRunning() < Self.NextMiniBreakAt then
+    Exit;
+
+  // always schedule next window first to prevent rapid re-entry
+  Self.ScheduleNextMiniBreak();
+
+  if Random(100) >= Self.MiniChancePct then
+    Exit;
+
+  if not Self.SafeToBreak() then
+    Exit;
+
+  lenMs := Random(Self.MiniLenMinMs, Self.MiniLenMaxMs);
+  Self.DebugLn('Mini break: ' + ToStr(lenMs div 1000) + 's');
+  Self.ActivityTimer.Pause();
+  Wait(lenMs);
+  if Random(100) < 30 then
+    Minimap.RotateWithinAngles(-15, 15);
+  Self.ActivityTimer.Resume();
+end;
+
+procedure TFoundry.MaybeDoPlannedBreak();
+var
+  lenMs: Int64;
+  jitter: Int64;
+begin
+  if not Self.PlannedEnabled then
+    Exit;
+  if GetTimeRunning() < Self.NextPlannedBreakAt then
+    Exit;
+  if not Self.SafeToBreak() then
+    Exit;
+
+  lenMs := Self.PlannedForMin * ONE_MINUTE;
+  jitter := (lenMs * Random(-Self.PlannedLengthJitterPct, Self.PlannedLengthJitterPct)) div 100;
+  lenMs := EnsureRange(lenMs + jitter, ONE_MINUTE, 120 * ONE_MINUTE);
+
+  Self.DebugLn('Planned break (~min): ' + ToStr(lenMs div ONE_MINUTE));
+  Self.ActivityTimer.Pause();
+  Logout.ClickLogout();
+  Wait(lenMs);
+  if not Login.LoginPlayer() then
+  begin
+    TerminateScript('Failed to log in after planned break');
+  end;
+  Self.ActivityTimer.Resume();
+  Self.ScheduleNextPlannedBreak();
+end;
+
+// ==========================
+
+procedure TAntiban.Setup(); override;
+begin
+  // purposefully left blank to remove default wasplib antiban
+end;
+
+procedure TAntiban.SetupBreaks(); override;
+begin
+  // intentionally empty; Foundry manages its own mini/planned breaks
+end;
+
+procedure TFoundry.doAction();
+begin
+
+  // If we are between rounds, try our BigAussie-style breaks first
+  if not Self.isGameStarted() then
+  begin
+    Self.MaybeDoPlannedBreak();
+    Self.MaybeDoMiniBreak();
+
+    if not Antiban.DoBreak() then
+     Antiban.DoSleep();
+  end;
+
+  if Self.ActivityTimer.IsFinished() then
+  begin
+    Self.ActivityTimer.Restart();
+    Logout.ClickLogout();
+    TerminateScript("Activity timer has timed out! Are we stuck somehow? Logging out");
+  end;
+
+  if not RSClient.IsLoggedIn() then
+  begin
+    if not Login.LoginPlayer() then
+    begin
+      TerminateScript("Could not log in player");
+    end;
+  end;
+
+  self.state := self.getState();
+  Self.DebugLn(ToStr(self.state));
+  case self.state of
+    EFoundryState.GET_COMMISSION: handleGetCommission();
+    EFoundryState.SETUP_MOULD: handleSetupMould();
+    EFoundryState.DO_BANK: handleWithdrawBars2();
+    EFoundryState.FILL_CRUCIBLE: handleFillCrucible();
+    EFoundryState.POUR_CRUCIBLE: handlePourCrucible();
+    EFoundryState.GET_SWORD_MOULD: handleGetSwordMould();
+    EFoundryState.HEAT_FAST: handleFastHeat();
+    EFoundryState.COOL_FAST: handleFastCool();
+    EFoundryState.USE_TRIP_HAMMER: handleHammer();
+    EFoundryState.USE_GRINDSTONE: handleGrindstone();
+    EFoundryState.USE_POLISH: handlePolish();
+    EFoundryState.TURN_IN_SWORD: handleTurnInSword();
+  end;
+
+  // Try breaks again right after an action, in case we just turned in
+  if Self.SafeToBreak() then
+  begin
+    Self.MaybeDoPlannedBreak();
+    Self.MaybeDoMiniBreak();
+  end;
+end;
+
+function TFoundry.IsPreformAvailable(): Boolean;
+var
+  ocrFilter: TOCRColorFilter := TOCRColorFilter.Create ([2101487], [20]);
+  message: string;
+begin
+  message := OCR.Recognize(Chat.LineBoxes.Merge(), ocrFilter, RS_FONT_PLAIN_12);
+  Result := message.Contains("preform storage");
+end;
+
+procedure OnBreakStart(Task: PBreakTask);
+var T: PBreakTask;
+begin
+  FoundryBot.ActivityTimer.Pause();
+  T := Task;
+end;
+
+procedure OnBreakFinish(Task: PBreakTask);
+var T: PBreakTask;
+begin
+  FoundryBot.ActivityTimer.Resume();
+  T := Task;
+end;
+
+procedure OnSleepStart(Task: PSleepTask);
+var T: PSleepTask;
+begin
+  FoundryBot.ActivityTimer.Pause();
+  T := Task;
+end;
+
+procedure OnSleepFinish(Task: PSleepTask);
+var T: PSleepTask;
+begin
+  FoundryBot.ActivityTimer.Resume();
+  T := Task;
+end;
+
+procedure TFoundry.Init(MaxActions: UInt32; MaxTime: UInt64); override;
+var
+  waspOffset: TPoint := [4099, 2899];
+  preformRack: TRSObject;
+
+begin
+  inherited;
+
+  ItemFinder.Similarity := 0.99999;
+
+  Mouse.Speed := SRL.NormalRange(21, 35);
+  Mouse.MissChance := 5;
+  Mouse.Distribution := MOUSE_DISTRIBUTION_GAUSS;
+  Self.DisableDebugging := not WriteDebug;
+
+  //This busts our prehovers
+  WLSettings.Antiban.Camera := false;
+  WLSettings.Antiban.Mouse := false;
+
+  // Antiban break hooks, but we don't auto-schedule breaks here
+  Antiban.SetupBreaks();
+  Antiban.OnStartBreak := @OnBreakStart;
+  Antiban.OnFinishBreak := @OnBreakFinish;
+  Antiban.OnStartSleep := @OnSleepStart;
+  Antiban.OnFinishSleep := @OnSleepFinish;
+
+  // Long sleep (#3) remains as-is
+  Antiban.AddSleep(SleepTime, SleepLength, 0.1, 0.8);
+  Self.Stats.startXP := XPBar.Read();
+
+  // -------- Initialize BigAussie-style scheduler --------
+  Self.PlannedEnabled := PlannedBreaksEnabled;
+  Self.PlannedEveryMin := PlannedEveryMinutes;
+  Self.PlannedForMin := PlannedForMinutes;
+
+  Self.MiniChancePct := MINI_BREAK_CHANCE_PCT_DEFAULT;
+  Self.MiniGapMinMs := MINI_GAP_MIN_MS_DEFAULT;
+  Self.MiniGapMaxMs := MINI_GAP_MAX_MS_DEFAULT;
+  Self.MiniLenMinMs := MINI_LEN_MIN_MS_DEFAULT;
+  Self.MiniLenMaxMs := MINI_LEN_MAX_MS_DEFAULT;
+
+  Self.PlannedCadenceJitterPct := PLANNED_CADENCE_JITTER_PCT_DEFAULT;
+  Self.PlannedLengthJitterPct  := PLANNED_LENGTH_JITTER_PCT_DEFAULT;
+
+  Self.ScheduleNextMiniBreak();
+  if Self.PlannedEnabled then
+    Self.ScheduleNextPlannedBreak();
+  Self.LastTurnInAt := 0;
+  // -----------------------------------------------
+
+  self.rsw.SetupRegions([RSRegions.GIANTS_FOUNDRY]);
+  //Equipment.RemoveGearFromSlot(ERSEquipmentButton.WEAPON);
+  //Equipment.RemoveGearFromSlot(ERSEquipmentButton.SHIELD);
+
+  if Self.IsPreformAvailable() then
+  begin
+    //Not offset, grabbed with the Foundry Region.
+    Self.DebugLn("Getting existing preform");
+    preformRack.Setup(2, 0, [Point(4357, 3087)]);
+    preformRack.SetupUpText(['ake-preform']);
+
+    WaitUntil(preformRack.WalkClick(), 150, 7000);
+  end;
+
+  //prefromRack
+  self.LavaPool.Setup(2, 0, [Point(270, 208).Offset(waspOffset)]);
+  self.LavaPool.SetupUpText(['Lava pool']);
+  self.LavaPool.Finder.Colors += CTS2(3311816, 7, 0.13, 1.85);
+
+  self.TripHammer.rsObj.Setup(2, 4, [Point(244, 210).Offset(waspOffset)]);
+  self.TripHammer.rsObj.SetupUpText(['Trip hammer']);
+  self.TripHammer.rsObj.Finder.Colors += CTS2(6577236, 1, 0.93, 1.67);
+  self.TripHammer.doesHeatSword := False;
+  self.TripHammer.machineType := EMachine.TRIP_HAMMER;
+  self.TripHammer.heatNeeded := EHeatState.RED;
+  self.TripHammer.actionMinPercent := 15;
+  self.TripHammer.actionMaxPercent := 85;
+
+  self.Grindstone.rsObj.SetupEx([3, 1, 4], [Point(228, 228).Offset(waspOffset)]);
+  self.Grindstone.rsObj.SetupUpText(['Grindstone']);
+  self.Grindstone.rsObj.Finder.Colors += CTS2(8030099, 9, 0.23, 0.56);
+  self.Grindstone.doesHeatSword := True;
+  self.Grindstone.machineType := EMachine.GRINDSTONE;
+  self.Grindstone.heatNeeded := EHeatState.YELLOW;
+  self.Grindstone.actionMinPercent := 20;
+  self.Grindstone.actionMaxPercent := 85;
+
+  self.Waterfall.SetupEx([2, 3, 4], [Point(212, 240).Offset(waspOffset)]);
+  self.Waterfall.SetupUpText(['Waterfall']);
+  self.Waterfall.Finder.Colors += CTS2(11380870, 4, 0.12, 0.69);//CTS2(8419922, 3, 0.27, 0.61);
+  self.Waterfall.Finder.ClusterDistance := 1;
+  self.WaterFall.Finder.Erode := 2;
+  self.WaterFall.Finder.MinLongSide := 30;
+  self.Waterfall.Finder.MinShortSide := 20;
+  self.Waterfall.Finder.Grow := 10;
+
+  self.PolishingWheel.rsObj.SetupEx([3, 1, 4], [Point(232, 258).Offset(waspOffset)]);
+  self.PolishingWheel.rsObj.SetupUpText(['Polishing']);
+  self.PolishingWheel.rsObj.Finder.Colors += CTS2(7829630, 10, 0.27, 0.14);
+  self.PolishingWheel.doesHeatSword := False;
+  self.PolishingWheel.machineType := EMachine.POLISHING_WHEEL;
+  self.PolishingWheel.heatNeeded := EHeatState.GREEN;
+  self.PolishingWheel.actionMinPercent := 15;
+  self.PolishingWheel.actionMaxPercent := 85;
+
+  self.MouldJig.SetupEx([3, 1, 4], [Point(264, 242).Offset(waspOffset)]);
+  self.MouldJig.SetupUpText(['Mould jig']);
+  self.MouldJig.Finder.Colors += CTS2(7497822, 4, 0.14, 0.19);
+
+  self.Crucible.rsObj.SetupEx([2, 3, 4], [Point(274, 242).Offset(waspOffset)]);
+  self.Crucible.rsObj.SetupUpText(['Crucible']);
+  self.Crucible.rsObj.Finder.Colors += CTS2(5916224, 5, 0.21, 0.25);
+
+  self.BankChest.SetupEx([3, 3, 4], [Point(283, 223).Offset(waspOffset)]);
+  self.BankChest.SetupUpText(['Bank']);
+  self.BankChest.Finder.ColorClusters += [
+    CTS2(5265519, 6, 0.21, 0.12), // brown
+  CTS2(5606825, 4, 0.08, 0.60),// yellow
+  2
+  ];
+
+  self.NoMachine.machineType := EMachine.NONE;
+
+  Options.Open;
+
+  if Options.GetBrightnessLevel < 100 then
+    Options.SetMaxBrightness;
+  if (not InRange(Options.GetZoomLevel, 0, 5)) then
+    Options.SetZoomLevel(SRL.TruncatedGauss(0, 5));
+
+  Self.ActivityTimer.Init(8 * ONE_MINUTE);
+end;
+
+procedure TFoundry.Run(MaxActions: Int32; MaxTime: Int64);
+begin
+  Self.Init(MaxActions, MaxTime);
+  Self.PrintProgress();
+  repeat
+    self.doAction();
+  until self.ShouldStop();
+
+  Self.DebugLn('Done');
+end;
+{$IFDEF SCRIPT_GUI}
+
+type
+  TConfig = record
+     (TScriptForm) AlloyOneAmountInput, AlloyTwoAmountInput, BankTabInput, SleepTimeInput, SleepLengthInput: TLabeledEdit;
+    AlloyOneSelector, AlloyTwoSelector: TLabeledCombobox;
+    ExportMouldsBox: TLabeledCheckBox;
+    // Planned break controls (BigAussie #2)
+    PlannedEnableBox: TLabeledCheckBox;
+    PlannedEveryInput, PlannedForInput: TLabeledEdit;
+  end;
+
+procedure TConfig.StartScript(sender: TObject); override;
+var
+  amount1, amount2: Int32;
+begin
+  AlloyOne := EBar(Self.AlloyOneSelector.GetItemIndex());
+  AlloyTwo := EBar(Self.AlloyTwoSelector.GetItemIndex());
+
+  if (Self.AlloyOneAmountInput.GetText() = ' ')
+      or (Self.AlloyOneAmountInput.GetText() = '')
+      or (Self.AlloyTwoAmountInput.GetText() = ' ')
+      or (Self.AlloyTwoAmountInput.GetText() = '') then
+  begin
+    AlloyOneAmount := 14;
+    AlloyTwoAmount := 14;
+  end
+  else
+  begin
+    amount1 := StrToInt(Self.AlloyOneAmountInput.GetText());
+    amount2 := StrToInt(Self.AlloyTwoAmountInput.GetText());
+  end;
+
+  if (amount1 + amount2) < 28 then
+  begin
+    AlloyOneAmount := 14;
+    AlloyTwoAmount := 14;
+  end
+  else
+  begin
+    AlloyOneAmount := amount1;
+    AlloyTwoAmount := amount2;
+  end;
+
+  if (Self.BankTabInput.GetText() = ' ')
+      or (Self.BankTabInput.GetText() = '') then
+  begin
+    BankTab := 5;
+  end
+  else
+  begin
+    BankTab := StrToInt(Self.BankTabInput.GetText());
+  end;
+
+  ExportMoulds := Self.ExportMouldsBox.IsChecked();
+  SleepTime := Self.SleepTimeInput.GetText();
+  SleepLength := StrToInt(Self.SleepLengthInput.GetText) * ONE_HOUR;
+
+  // Planned (GUI) break values
+  PlannedBreaksEnabled := Self.PlannedEnableBox.IsChecked();
+  if (Self.PlannedEveryInput.GetText() <> '') then
+    PlannedEveryMinutes := StrToInt(Self.PlannedEveryInput.GetText())
+  else
+    PlannedEveryMinutes := 90;
+
+  if (Self.PlannedForInput.GetText() <> '') then
+    PlannedForMinutes := StrToInt(Self.PlannedForInput.GetText())
+  else
+    PlannedForMinutes := 15;
+
+  inherited;
+end;
+
+function TConfig.GetAlloyTypesStringArray(): TStringArray;
+begin
+  Result := ['Bronze', 'Iron', 'Steel', 'Mithril', 'Adamant', 'Rune'];
+end;
+
+procedure TConfig.Run(); override;
+var
+  tab: TTabSheet;
+  Img: TPicture;
+  BGImg: TImage;
+  gotPic : Boolean;
+  scriptLabel : TLabel;
+  actionLimit, timeLimit: TLabeledEdit;
+
+begin
+
+  if (not DirectoryExists(AppPath+'\Resources\')) then
+    CreateDirectory(AppPath+'\Resources');
+
+  if (not FileExists(AppPath+'\Resources\SCJFoundryGUI.png')) then
+    DownloadToFile('https://i.imgur.com/cH5Xy1Q.png', AppPath+'\Resources\SCJFoundryGUI.png');
+
+  gotPic := FileExists(AppPath+'\Resources\SCJFoundryGUI.png');
+
+  Self.Setup('Foundry by Skunkworks and CJ', Point(800, 620), false);
+  Self.Start.SetOnClick(@Self.StartScript);
+
+  Self.AddTab('Script Settings');
+  Self.AddTab('Login Settings');
+  Self.AddTab('Version Info');
+  tab := Self.GetTab('Script Settings');
+
+  if gotPic then
+  begin
+    Img.Init();
+    Img.LoadFromFile(AppPath+'\Resources\SCJFoundryGUI.png');
+
+    with BGImg do
+    begin
+      Create(tab);
+      SetBounds(0, 0, Self.Form.getWidth(), Self.Form.getHeight());
+      SetPicture(Img);
+    end;
+  end;
+
+  with scriptLabel do
+  begin
+    Create(tab);
+    SetLeft(TControl.AdjustToDPI(130));
+    SetTop(TControl.AdjustToDPI(0));
+    SetFontColor($FFFFFF);
+    GetFont().SetSize(30);
+    SetCaption("Skunkworks' and CJ's Foundry");
+  end;
+
+  tab.SetFontSize(9);
+
+  with Self.AlloyOneSelector do
+  begin
+    Create(tab);
+    SetCaption('Alloy one type:');
+    SetHint('Type of first alloy');
+    SetLeft(TControl.AdjustToDPI(40));
+    SetTop(TControl.AdjustToDPI(55));
+    SetStyle(csDropDownList);
+    AddItemArray(GetAlloyTypesStringArray());
+    SetItemIndex(Ord(AlloyOne));
+    Panel.SetColor(12043021);
+    SetFontColor($FFFFFF);
+  end;
+
+  with Self.AlloyOneAmountInput do
+  begin
+    Create(tab);
+    SetCaption('Number of Bars:');
+    SetLeft(AlloyOneSelector.GetRight() + TControl.AdjustToDPI(37));
+    SetTop(Self.AlloyOneSelector.GetTop());
+    SetText(IntToStr(AlloyOneAmount));
+    SetWidth(95);
+    SetMaxLength(2);
+    SetHint('Bars of alloy one used per sword');
+    Panel.SetColor(12043021);
+    SetFontColor($FFFFFF);
+  end;
+
+  with Self.AlloyTwoSelector do
+  begin
+    Create(tab);
+    SetCaption('Alloy two type:');
+    SetHint('Type of second alloy');
+    SetLeft(Self.AlloyOneSelector.GetLeft());
+    SetTop(Self.AlloyOneSelector.GetTop() + TControl.AdjustToDPI(60));
+    SetStyle(csDropDownList);
+    AddItemArray(GetAlloyTypesStringArray());
+    SetItemIndex(Ord(AlloyTwo));
+    Panel.SetColor(12043021);
+    SetFontColor($FFFFFF);
+  end;
+
+  with Self.AlloyTwoAmountInput do
+  begin
+    Create(tab);
+    SetCaption('Number of Bars:');
+    SetLeft(AlloyTwoSelector.GetRight() + TControl.AdjustToDPI(37));
+    SetTop(Self.AlloyTwoSelector.GetTop());
+    SetText(IntToStr(AlloyTwoAmount));
+    SetWidth(95);
+    SetMaxLength(2);
+    SetHint('Bars of alloy two used per sword');
+    Panel.SetColor(12043021);
+    SetFontColor($FFFFFF);
+  end;
+
+  with Self.BankTabInput do
+  begin
+    Create(tab);
+    SetCaption('Materials Bank Tab');
+    SetLeft(AlloyTwoSelector.GetLeft());
+    SetTop(Self.AlloyTwoSelector.GetTop() + TControl.AdjustToDPI(60));
+    SetText(ToStr(BankTab));
+    SetWidth(115);
+    SetMaxLength(1);
+    SetHint('Bank Tab With Your Smeltables/Bars');
+    Panel.SetColor(12043021);
+    SetFontColor($FFFFFF);
+  end;
+
+  with Self.ExportMouldsBox do
+  begin
+    Create(tab);
+    SetCaption('Export Moulds');
+    SetHint("Exports your moulds to a MouldsLibrary file so it doesnt OCR everytime");
+    SetLeft(AlloyTwoAmountInput.GetLeft());
+    SetTop(Self.BankTabInput.GetTop() + TControl.AdjustToDPI(18));
+    SetChecked(ExportMoulds);
+    Panel.SetColor(12043021);
+    SetFontColor($FFFFFF);
+  end;
+
+  with Self.SleepTimeInput do
+  begin
+    Create(tab);
+    SetCaption("Sleep at: (Time is in 24 hour format)");
+    SetWidth(300);
+    SetText(ToStr(SleepTime));
+    SetLeft(AlloyTwoSelector.GetLeft());
+    SetTop(Self.AlloyTwoSelector.GetBottom() + TControl.AdjustToDPI(70));
+    Panel.SetColor(12043021);
+    SetFontColor($FFFFFF);
+  end;
+
+  with Self.SleepLengthInput do
+  begin
+    Create(tab);
+    SetCaption("Sleep length: ");
+    SetText(IntToStr(SleepLength div ONE_HOUR));
+    SetLeft(SleepTimeInput.GetLeft());
+    SetTop(Self.SleepTimeInput.GetBottom() + TControl.AdjustToDPI(12));
+    Panel.SetColor(12043021);
+    SetFontColor($FFFFFF);
+  end;
+
+  // Planned (GUI) break controls
+  with Self.PlannedEnableBox do
+  begin
+    Create(tab);
+    SetCaption('Enable planned breaks (every X min for ~Y min)');
+    SetLeft(SleepLengthInput.GetLeft());
+    SetTop(Self.SleepLengthInput.GetBottom() + TControl.AdjustToDPI(12));
+    SetChecked(PlannedBreaksEnabled);
+    Panel.SetColor(12043021);
+    SetFontColor($FFFFFF);
+  end;
+
+  with Self.PlannedEveryInput do
+  begin
+    Create(tab);
+    SetCaption('Every X minutes:');
+    SetLeft(PlannedEnableBox.GetLeft());
+    SetTop(PlannedEnableBox.GetBottom() + TControl.AdjustToDPI(8));
+    SetWidth(160);
+    SetText(IntToStr(PlannedEveryMinutes));
+    Panel.SetColor(12043021);
+    SetFontColor($FFFFFF);
+  end;
+
+  with Self.PlannedForInput do
+  begin
+    Create(tab);
+    SetCaption('For ~Y minutes:');
+    SetLeft(PlannedEveryInput.GetRight() + TControl.AdjustToDPI(12));
+    SetTop(PlannedEveryInput.GetTop());
+    SetWidth(160);
+    SetText(IntToStr(PlannedForMinutes));
+    Panel.SetColor(12043021);
+    SetFontColor($FFFFFF);
+  end;
+
+  with actionLimit do
+  begin
+    Create(tab);
+    SetCaption('Stop after (number of swords 0 is never):');
+    SetName('wl_action_limit');
+    SetTooltip('Sets the script to stop after X amount of swords are made.'
+               + LINEENDING +
+               '0 = infinite.');
+    SetLeft(Self.PlannedEnableBox.GetLeft());
+    SetTop(Self.PlannedEveryInput.GetBottom() + TControl.AdjustToDPI(12));
+    SetText(ToStr(WLSettings.GetInt('max_actions')));
+    SetWidth(TControl.AdjustToDPI(240));
+    Panel.SetColor(12043021);
+    SetFontColor($FFFFFF);
+    Edit.setOnKeyPress(@Edit.NumberField);
+    Edit.setOnEditingDone(@Self._ActionLimitOnDone);
+  end;
+
+  with timeLimit do
+  begin
+    Create(tab);
+    SetCaption('Stop after (time in minutes 0 is never):');
+    SetName('wl_time_limit');
+    SetTooltip('Sets the script to stop after X amount of minutes have passed.'
+               + LINEENDING +
+               '0 = infinite.');
+    SetLeft(actionLimit.GetLeft());
+    SetTop(actionLimit.GetBottom() + TControl.AdjustToDPI(12));
+    SetText(ToStr(WLSettings.GetInt('max_time')));
+    SetWidth(TControl.AdjustToDPI(240));
+    Edit.setOnKeyPress(@Edit.NumberField);
+    Edit.setOnEditingDone(@Self._TimeLimitOnDone);
+    Panel.SetColor(12043021);
+    SetFontColor($FFFFFF);
+  end;
+
+  tab := Self.GetTab('Login Settings');
+  Self.CreateAccountManager(tab);
+
+  tab := Self.GetTab('Version Info');
+  Self.CreateVersionPanel(tab, [$27BA70, $00D8FF, $0000FF], TAlign.alClient);
+  inherited;
+end;
+
+var
+  GUI: TConfig;
+{$ENDIF}
+
+begin
+  {$IFDEF SCRIPT_GUI}
+  if EnableGui then
+  begin
+    GUI.Run();
+  end;
+  {$ENDIF}
+
+  if (not DirectoryExists(AppPath+'\Resources\')) then
+    CreateDirectory(AppPath+'\Resources');
+
+  if (not FileExists(AppPath+'\Resources\SCJFoundryHUD.png')) then
+    DownloadToFile('https://i.imgur.com/CWJzYW9.png', AppPath+'\Resources\SCJFoundryHUD.png');
+
+  if AlloyOne = AlloyTwo then
+    TerminateScript("Do not use 2 of the same alloy! This is inefficient AND unsupported!" + #13#10
+                    + "Check the Foundry entry on OSRS Wiki for more info." + #13#10
+                    + "https://oldschool.runescape.wiki/w/Giants%27_Foundry#Metal_score");
+
+  FoundryBot.DebugLn("Starting script with: ");
+  FoundryBot.DebugLn("Alloy one: " + ToStr(AlloyOne) + " num bars: " + ToStr(AlloyOneAmount));
+  FoundryBot.DebugLn("Alloy two: " + ToStr(AlloyTwo) + " num bars: " + ToStr(AlloyTwoAmount));
+  FoundryBot.run(WLSettings.MaxActions, WLSettings.MaxTime);
+end.

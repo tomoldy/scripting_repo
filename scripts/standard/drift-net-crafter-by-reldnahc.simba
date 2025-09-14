@@ -1,0 +1,271 @@
+{$UNDEF SCRIPT_ID}{$DEFINE SCRIPT_ID := '3bd89de2-c9a8-4d4b-bf93-6e8fc7e97bf7'}
+{$UNDEF SCRIPT_REVISION}{$DEFINE SCRIPT_REVISION := '2'}
+{$IFDEF WINDOWS}{$DEFINE SCRIPT_GUI}{$ENDIF}
+{$I SRL-T/osr.simba}
+{$I WaspLib/osr.simba}
+
+begin
+  Login.PlayerIndex := 0;
+end;
+
+type
+  EState = (
+    WAIT_STATE,
+    END_SCRIPT,
+    USE_BANK,
+    WITHRAW_SUPPLIES,
+    DEPOSIT_ITEMS,
+    CRAFT_NETS,
+    WAIT_CRAFT,
+    LEVEL_UP,
+    CLOSE_INTERFACE,
+    OPEN_LOOM,
+    OUT_OF_SUPPLIES
+  );
+
+  ReldDriftNetCrafter = record(TBaseBankScript)
+    State: EState;
+    Loom: TRSObject;
+
+    Fibre, Net: TRSBankItem;
+    IsCrafting, OutOfSupplies: Boolean;
+  end;
+
+
+procedure TAntiban.Setup(); override;
+begin
+  Self.Skills := [ERSSkill.TOTAL, ERSSkill.CRAFTING];
+  Self.MinZoom := 15;
+  Self.MaxZoom := 40;
+
+  inherited;
+end;
+
+procedure TRSObject.SetObject(objUpText: TStringArray; coordinates: TPointArray; shape: Vector3);
+begin
+  Self := [];
+  Self.SetupEx(shape, coordinates);
+  Self.Setup(objUpText);
+
+  Filter := [True, False, True, True];
+end;
+
+procedure ReldDriftNetCrafter.SetupLoom();
+begin
+    Self.Loom.SetObject(['Weave', 'Loom'], [[9317,1007]], [1.5, 1.5, 8]);
+    Self.Loom.Finder.Colors += CTS2(5663864, 10, 0.04, 0.13);
+    Self.Loom.Finder.ColorClusters += [CTS2(724496, 5, 2.43, 4.50), CTS2(5663864, 10, 0.04, 0.13), 50];
+
+    Self.Loom.Finder.ClusterDistance := 3;
+    Self.Loom.Finder.Erode := 3;
+    Self.Loom.Finder.Grow := 3;
+end;
+
+procedure ReldDriftNetCrafter.Init(maxActions: UInt32; maxTime: UInt64); override;
+begin
+  inherited;
+
+  RSW.Setup([RSRegions.FOSSIL_ISLAND]);
+  Self.Fibre := TRSBankItem.Setup('Jute fibre', Bank.QUANTITY_ALL);
+  Self.Net := TRSBankItem.Setup('Drift net', 14);
+  Self.SetupLoom();
+  Self.ActionProfit := ItemData.GetAverage(Self.Net.Item) -
+                       (ItemData.GetAverage(Self.Fibre.Item) * 2);
+end;
+
+function ReldDriftNetCrafter.GetState(): EState;
+begin
+  if WL.Activity.IsFinished() or Self.OutOfSupplies then
+    Exit(END_SCRIPT);
+
+  if Chat.LeveledUp() then
+  begin
+    Self.IsCrafting := False;
+    Exit(EState.LEVEL_UP);
+  end;
+
+  if MainScreen.HasInterface() then
+  begin
+    Self.IsCrafting := False;
+    if Bank.IsOpen() then
+    begin
+      if Inventory.ContainsRandomItems([Self.Fibre.Item]) then
+        Exit(EState.DEPOSIT_ITEMS);
+
+      if not Self.BankEmpty then
+      begin
+        if not Inventory.ContainsItem(Self.Fibre.Item) then
+          Exit(EState.WITHRAW_SUPPLIES);
+      end
+      else
+      begin
+        Exit(EState.OUT_OF_SUPPLIES);
+      end;
+    end;
+    if Bank.CountItem(Self.Fibre.Item) < 2 then
+    begin;
+      if Inventory.CountItem(Self.Fibre.Item) > 1 then
+      begin
+        Exit(EState.CLOSE_INTERFACE);
+      end;
+      Self.OutOfSupplies := true;
+      Exit(EState.OUT_OF_SUPPLIES);
+    end;
+    Exit(EState.CLOSE_INTERFACE);
+  end;
+
+  if (Inventory.ContainsAll([Self.Fibre.Item])) then
+  begin
+    if (Self.IsCrafting and (Inventory.CountItem(Self.Fibre.Item) > 1)) then
+    begin
+      Exit(EState.WAIT_CRAFT);
+    end;
+
+    if Make.IsOpen() then
+      Exit(EState.CRAFT_NETS);
+
+    if Inventory.CountItem(Self.Fibre.Item) = 1 then
+      Exit(USE_BANK);
+    Exit(EState.OPEN_LOOM);
+  end;
+
+  Exit(USE_BANK);
+end;
+
+function ReldDriftNetCrafter.WaitCraft(waitTime: Int32 = 6000): Boolean;
+var
+  count: Int32;
+begin
+  count := Inventory.CountItem(Self.Fibre.Item);
+
+  if count < 2 then
+  begin
+    Self.IsCrafting := False;
+    Exit;
+  end;
+
+  Result := WaitUntil((Inventory.CountItem(Self.Fibre.Item) < count) or XPBar.EarnedXP(), 1200, waitTime);
+  Self.IsCrafting := Result;
+
+  if Result then
+  begin
+    WL.Activity.Restart();
+  end;
+end;
+
+procedure ReldDriftNetCrafter.CalculateProfit();
+begin
+  Self.TotalProfit := Self.TotalActions * Self.ActionProfit;
+end;
+
+procedure ReldDriftNetCrafter.DepositNets();
+begin
+  WriteLn(Inventory.CountItem(Self.Net.Item));
+  Self.TotalActions += Inventory.CountItem(Self.Net.Item);
+  Bank.DepositAll();
+  Self.CalculateProfit();
+  Wait(500,1000);
+end;
+
+function ReldDriftNetCrafter.CraftNets(): Boolean;
+begin
+  if not Inventory.ContainsItem(Self.Fibre.Item) then
+    Exit;
+
+  if Make.Select(2, Make.QUANTITY_ALL) then
+    Exit(Self.WaitCraft());
+
+  Exit;
+end;
+
+function ReldDriftNetCrafter.WithdrawSupplies(): Boolean;
+begin
+  if not Self.Withdraw(Self.Fibre) then
+    TerminateScript('Could not find fibres');
+end;
+
+function ReldDriftNetCrafter.OpenLoom(): Boolean;
+begin
+  if Self.Loom.WalkClick() then
+  begin
+    Minimap.WaitMoving();
+    Result := WaitUntil(Make.IsOpen(), 100, 3000);
+  end;
+end;
+
+function ReldDriftNetCrafter.OpenBank(): Boolean;
+begin
+  if RSObjects.BankChestFossilIsland.WalkClick() then
+  begin
+    Minimap.WaitMoving();
+    Result := WaitUntil(Bank.IsOpen(), 100, 3000);
+  end;
+end;
+
+procedure ReldDriftNetCrafter.Run(maxActions: Int32; maxTime: Int64);
+begin
+  Self.Init(maxActions, maxTime);
+
+  repeat
+    Self.State := Self.GetState();
+    Self.SetAction(ToStr(Self.State));
+
+    case State of
+      WAIT_STATE: Wait(500, 800);
+      USE_BANK: Self.OpenBank();
+      DEPOSIT_ITEMS: Self.DepositNets();
+      CLOSE_INTERFACE: MainScreen.CloseInterface();
+      WITHRAW_SUPPLIES: Self.WithdrawSupplies();
+      OPEN_LOOM: Self.OpenLoom();
+      CRAFT_NETS: Self.CraftNets();
+      OUT_OF_SUPPLIES, END_SCRIPT: TerminateScript();
+      LEVEL_UP: Chat.HandleLevelUp();
+    end;
+    Self.DoAntiban();
+  until Self.ShouldStop();
+end;
+
+var
+  Script: ReldDriftNetCrafter;
+
+{$IFDEF SCRIPT_GUI}
+type
+  TConfig = record(TScriptForm)
+    Selector: TLabeledCombobox;
+  end;
+
+
+
+
+
+procedure TConfig.Run(); override;
+var
+  tab: TTabSheet;
+begin
+  Self.Setup("Relds Drift Nets");
+  Self.Start.SetOnClick(@Self.StartScript);
+
+  Self.AddTab('Script Settings');
+  tab := Self.Tabs[High(Self.Tabs)];
+
+  Self.CreateAccountManager(tab);
+
+  Self.CreateVersionPanel(tab);
+
+  Self.CreateAntibanManager();
+  Self.CreateWaspLibSettings();
+  Self.CreateAPISettings();
+
+  inherited;
+end;
+
+var
+  Config: TConfig;
+{$ENDIF}
+
+begin
+  {$IFDEF SCRIPT_GUI}
+  Sync(@Config.Run);
+  {$ENDIF}
+  Script.Run(WLSettings.MaxActions, WLSettings.MaxTime);
+end.
