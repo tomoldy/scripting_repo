@@ -35,6 +35,7 @@ type
     TotalBreakMs: UInt64;
     LastBreakMs: UInt32;
   end;
+
   TTitheFarmer = record
      (TBaseWalkerScript) State: EFarmerState;
     Patches, WalkLocations, FarmerGricoller: TRSObject;
@@ -59,7 +60,6 @@ begin
   Antiban.AddBreak(ONE_MINUTE * 90, ONE_MINUTE * 15, 0.3, 1);
   Antiban.AddSleep('01:00:00', 8.15 * ONE_HOUR, 0.1, 1);
 end;
-
 
 // Measure how unevenly the micro behaviours have been used so we can tighten scheduling
 // whenever one option is lagging behind the others.
@@ -338,6 +338,7 @@ begin
     Inc(Self.AntibanStats.HoverEvents);
     WriteLn('[ANTIBAN] Hovering skills during micro break refresh.');
   end;
+
   Wait(pauseMs);
   Self.ScheduleNextMicroBreak();
   Self.ActionsSinceBreak := 0;
@@ -414,7 +415,6 @@ begin
   Inc(Self.AntibanStats.HoverEvents);
   // Keep hover statistics visible for quick balancing tweaks.
   WriteLn('[ANTIBAN] Hover event -> ' + hoverAction + ' (total: ' + ToStr(Self.AntibanStats.HoverEvents) + ')');
-
   Self.ScheduleNextHover();
 end;
 
