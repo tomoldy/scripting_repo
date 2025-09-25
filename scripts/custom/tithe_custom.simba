@@ -23,6 +23,19 @@ const
 
 type
   EFarmerState = (WAIT_STATE, LOGIN1, HANDLE_SEED_PACKS, ANGLE, GET_SEEDS, SKIP_STATE, WALK_SPOT, PLANT_SEED, WATER_SEED, CLEAR_SEED, HARVEST_SEED, GET_WATER, GAMEFINISHED, GAMESTART, LEVEL_UP, CLOSE_CONTEXT, HOPWORLDS, END_SCRIPT, CANCEL_USE, MOUSE_MISSED_PATCH, OPEN_BOX, BUY_BOX, OPEN_CHAT, CHANGE_CHAT_FILTER);
+  // Micro-behaviours we schedule for antiban variety.
+  EMicroBehaviour = (MB_MOUSE_MOVE, MB_SMALL_CAMERA_ROTATION, MB_RANDOM_ROTATE, MB_HOVER_SKILLS);
+  // Telemetry snapshot that lets the scheduler bias toward underused behaviours and surface
+  // recent break data for pacing decisions.
+  TAntibanTelemetry = record
+    MicroUsage: array[EMicroBehaviour] of UInt32;
+    LastMicroBehaviour: EMicroBehaviour;
+    CameraAdjusts, HoverEvents: UInt32;
+    BreaksTaken: UInt32;
+    TotalBreakMs: UInt64;
+    LastBreakMs: UInt32;
+  end;
+
   TTitheFarmer = record
      (TBaseWalkerScript) State: EFarmerState;
     Patches, WalkLocations, FarmerGricoller: TRSObject;
@@ -33,6 +46,8 @@ type
     SpecialCanEmpty, Refilled, hasbought, seedBlocker: Boolean;
     NextMicroBreakAt, NextCameraAdjustAt, NextHoverAt, LastActionAt: UInt64;
     ActionsSinceBreak: Int32;
+    CompletedLoops, NextNarrativeLoop, NarrativeEventsFired: UInt32;
+    AntibanStats: TAntibanTelemetry; // live antiban telemetry for adaptive scheduling
   end;
 
 procedure TAntiban.Setup; override;
@@ -46,46 +61,248 @@ begin
   Antiban.AddSleep('01:00:00', 8.15 * ONE_HOUR, 0.1, 1);
 end;
 
+// Measure how unevenly the micro behaviours have been used so we can tighten scheduling
+// whenever one option is lagging behind the others.
+function TTitheFarmer.ComputeMicroUsageBias(): Double;
+var
+  behaviour: EMicroBehaviour;
+  minCount, maxCount, count: UInt32;
+begin
+  minCount := High(UInt32);
+  maxCount := 0;
+
+  for behaviour := Low(EMicroBehaviour) to High(EMicroBehaviour) do
+  begin
+    count := Self.AntibanStats.MicroUsage[behaviour];
+    if count < minCount then
+      minCount := count;
+    if count > maxCount then
+      maxCount := count;
+  end;
+
+  if maxCount = 0 then
+    Exit(1.0);
+
+  Result := 1.0 + (maxCount - minCount) / 10.0;
+end;
+
+// Reset telemetry whenever we reinitialise the humaniser so stale session data does not linger.
+procedure TTitheFarmer.ResetAntibanTelemetry();
+var
+  behaviour: EMicroBehaviour;
+begin
+  for behaviour := Low(EMicroBehaviour) to High(EMicroBehaviour) do
+    Self.AntibanStats.MicroUsage[behaviour] := 0;
+
+  Self.AntibanStats.LastMicroBehaviour := Low(EMicroBehaviour);
+  Self.AntibanStats.CameraAdjusts := 0;
+  Self.AntibanStats.HoverEvents := 0;
+  Self.AntibanStats.BreaksTaken := 0;
+  Self.AntibanStats.TotalBreakMs := 0;
+  Self.AntibanStats.LastBreakMs := 0;
+end;
+
+// Friendly label for console logging.
+function TTitheFarmer.MicroBehaviourToString(const behaviour: EMicroBehaviour): String;
+begin
+  case behaviour of
+    MB_MOUSE_MOVE: Result := 'mouse random movement';
+    MB_SMALL_CAMERA_ROTATION: Result := 'small camera rotation';
+    MB_RANDOM_ROTATE: Result := 'random camera rotate';
+    MB_HOVER_SKILLS: Result := 'hover skills';
+  end;
+end;
+
+// Bump usage counters so later scheduling/weighting can adapt.
+procedure TTitheFarmer.RecordMicroBehaviour(const behaviour: EMicroBehaviour);
+begin
+  Inc(Self.AntibanStats.MicroUsage[behaviour]);
+  Self.AntibanStats.LastMicroBehaviour := behaviour;
+end;
+
+// Weighted roulette that leans toward underused actions and avoids repeating the exact same
+// behaviour back-to-back. Every execution is announced to the console for transparency.
+procedure TTitheFarmer.PerformMicroBehaviour(const reason: String);
+var
+  behaviour: EMicroBehaviour;
+  weights: array[EMicroBehaviour] of Double;
+  totalWeight, cumulative: Double;
+  roll: Int32;
+begin
+  if Self.seedBlocker then
+    Exit;
+
+  totalWeight := 0.0;
+  for behaviour := Low(EMicroBehaviour) to High(EMicroBehaviour) do
+  begin
+    weights[behaviour] := 1.0 / (1 + Self.AntibanStats.MicroUsage[behaviour]);
+    if behaviour = Self.AntibanStats.LastMicroBehaviour then
+      weights[behaviour] := weights[behaviour] * 0.65;
+    totalWeight += weights[behaviour];
+  end;
+
+  if totalWeight = 0 then
+    Exit;
+
+  roll := Random(1000);
+  cumulative := 0.0;
+  behaviour := Low(EMicroBehaviour);
+  for behaviour := Low(EMicroBehaviour) to High(EMicroBehaviour) do
+  begin
+    cumulative += (weights[behaviour] / totalWeight) * 1000.0;
+    if roll < Trunc(cumulative) then
+      break;
+  end;
+
+  case behaviour of
+    MB_MOUSE_MOVE: Mouse.RandomMovement();
+    MB_SMALL_CAMERA_ROTATION: Antiban.SmallCameraRotation();
+    MB_RANDOM_ROTATE: Antiban.RandomRotate();
+    MB_HOVER_SKILLS: Antiban.HoverSkills();
+  end;
+
+  Self.RecordMicroBehaviour(behaviour);
+  WriteLn('[ANTIBAN] Micro behaviour -> ' + Self.MicroBehaviourToString(behaviour) + ' (reason: ' + reason + ', total uses: ' + ToStr(Self.AntibanStats.MicroUsage[behaviour]) + ')');
+end;
+
 
 procedure TTitheFarmer.ScheduleNextMicroBreak();
+var
+  interval: UInt64;
+  usageBias: Double;
 begin
-  Self.NextMicroBreakAt := GetTimeRunning() + (4 * ONE_MINUTE) + Random(5 * ONE_MINUTE);
+  // Bias the cadence so underused behaviours fire sooner, while long breaks/actions extend the gap.
+  usageBias := Self.ComputeMicroUsageBias();
+  if usageBias < 0.5 then
+    usageBias := 0.5
+  else if usageBias > 1.75 then
+    usageBias := 1.75;
+
+  interval := (3 * ONE_MINUTE) + Random(3 * ONE_MINUTE);
+  if Self.ActionsSinceBreak > 0 then
+    interval += UInt64(Self.ActionsSinceBreak) * 1500;
+
+  if Self.AntibanStats.LastBreakMs > 0 then
+    interval += UInt64(Self.AntibanStats.LastBreakMs) div 3;
+
+  interval := UInt64(Double(interval) / usageBias);
+  Self.NextMicroBreakAt := GetTimeRunning() + interval;
+  WriteLn('[ANTIBAN] Micro break scheduler -> next in ' + ToStr(interval) + ' ms (usage bias ' +
+    SRL.FormatNumber(usageBias, 2) + ', actions ' + ToStr(Self.ActionsSinceBreak) + ', last break ' +
+    ToStr(Self.AntibanStats.LastBreakMs) + ' ms)');
 end;
 
 procedure TTitheFarmer.ScheduleNextCameraAdjust();
+var
+  interval: UInt64;
 begin
-  Self.NextCameraAdjustAt := GetTimeRunning() + (45 * ONE_SECOND) + Random(60 * ONE_SECOND);
+  // Slow camera flick spam after several adjustments so hovers/micro-movements can steal focus.
+  interval := (45 * ONE_SECOND) + Random(60 * ONE_SECOND);
+  if Self.AntibanStats.CameraAdjusts > Self.AntibanStats.HoverEvents then
+    interval += UInt64((Self.AntibanStats.CameraAdjusts - Self.AntibanStats.HoverEvents) * 1500);
+  Self.NextCameraAdjustAt := GetTimeRunning() + interval;
+  WriteLn('[ANTIBAN] Camera scheduler -> next in ' + ToStr(interval) + ' ms (camera=' +
+    ToStr(Self.AntibanStats.CameraAdjusts) + ', hover=' + ToStr(Self.AntibanStats.HoverEvents) + ')');
 end;
 
 procedure TTitheFarmer.ScheduleNextHover();
+var
+  interval: UInt64;
 begin
-  Self.NextHoverAt := GetTimeRunning() + (60 * ONE_SECOND) + Random(90 * ONE_SECOND);
+  // Encourage hover/inspection events if they have been neglected by tightening the timer.
+  interval := (60 * ONE_SECOND) + Random(90 * ONE_SECOND);
+  if Self.AntibanStats.HoverEvents < Self.AntibanStats.CameraAdjusts then
+    interval := UInt64(Double(interval) * 0.85);
+  Self.NextHoverAt := GetTimeRunning() + interval;
+  WriteLn('[ANTIBAN] Hover scheduler -> next in ' + ToStr(interval) + ' ms (camera=' +
+    ToStr(Self.AntibanStats.CameraAdjusts) + ', hover=' + ToStr(Self.AntibanStats.HoverEvents) + ')');
+end;
+
+procedure TTitheFarmer.ScheduleNextNarrativeLoop();
+begin
+  Self.NextNarrativeLoop := Self.CompletedLoops + UInt32(1 + Random(2));
+end;
+
+procedure TTitheFarmer.PerformNarrativeEvent(const context: String);
+var
+  currentTab: ERSGameTab;
+  actionRoll: Int32;
+  actionDescription, seedLabel: String;
+  xpBefore, xpAfter: Int64;
+  seedCount: Int32;
+begin
+  if not RSClient.IsLoggedIn then
+    Exit;
+
+  currentTab := GameTabs.GetCurrentTab();
+  actionRoll := Random(100);
+
+  if actionRoll < 45 then
+  begin
+    actionDescription := 'checked the Farming stats tab';
+    if GameTabs.Open(ERSGameTab.STATS) then
+    begin
+      Wait(350, 850);
+      if Stats.MouseOver(ERSSkill.FARMING) then
+        Wait(600, 1300);
+    end;
+  end
+  else if actionRoll < 75 then
+  begin
+    actionDescription := 'reviewed the XP drop display';
+    if not XPBar.IsOpen() then
+      XPBar.Open();
+    Wait(300, 700);
+    xpBefore := XPBar.Read();
+    Wait(400, 800);
+    xpAfter := XPBar.Read();
+    if xpAfter <> xpBefore then
+      actionDescription += ' (change of ' + ToStr(xpAfter - xpBefore) + ' XP)';
+  end
+  else
+  begin
+    seedLabel := Self.GetSeedString();
+    actionDescription := 'counted remaining ' + seedLabel;
+    if Inventory.Open then
+    begin
+      Wait(250, 650);
+      seedCount := Inventory.CountItem(seedLabel);
+      actionDescription += ' (' + ToStr(seedCount) + ' left)';
+    end
+    else
+      actionDescription := 'glanced over the inventory layout';
+  end;
+
+  if currentTab <> ERSGameTab.UNKNOWN then
+    GameTabs.Open(currentTab)
+  else
+    GameTabs.Open(ERSGameTab.INVENTORY);
+
+  Inc(Self.NarrativeEventsFired);
+  WriteLn('[NARRATIVE] ' + actionDescription + ' (context: ' + context + ', event #' + ToStr(Self.NarrativeEventsFired) + ')');
+end;
+
+procedure TTitheFarmer.TriggerNarrativeMilestone(const context: String; const force: Boolean = False);
+begin
+  if Self.seedBlocker then
+    Exit;
+
+  if force or SRL.Dice(4) then
+    Self.PerformNarrativeEvent(context);
 end;
 
 procedure TTitheFarmer.SetupHumanizer();
 begin
   Self.ActionsSinceBreak := 0;
   Self.LastActionAt := GetTimeRunning();
+  Self.CompletedLoops := 0;
+  Self.NarrativeEventsFired := 0;
+  Self.ResetAntibanTelemetry();
   Self.ScheduleNextMicroBreak();
   Self.ScheduleNextCameraAdjust();
   Self.ScheduleNextHover();
-end;
-
-procedure TTitheFarmer.PerformMicroBehaviour();
-var
-  roll: Int32;
-begin
-  if Self.seedBlocker then
-    Exit;
-
-  roll := Random(100);
-  case roll of
-    0 .. 24: Mouse.RandomMovement();
-    25 .. 49: Antiban.SmallCameraRotation();
-    50 .. 74: Antiban.RandomRotate();
-    else
-      Antiban.HoverSkills();
-  end;
+  Self.ScheduleNextNarrativeLoop();
+  WriteLn('[ANTIBAN] Humaniser initialised -> telemetry reset and schedulers seeded.');
 end;
 
 procedure TTitheFarmer.MarkAction(const reason: String);
@@ -94,12 +311,13 @@ begin
   Inc(Self.ActionsSinceBreak);
 
   if SRL.Dice(5) then
-    Self.PerformMicroBehaviour();
+    Self.PerformMicroBehaviour('after ' + reason);
 end;
 
 procedure TTitheFarmer.MaybeDoMicroBreak(const reason: String);
 var
   pauseMs: Int32;
+  avgBreak: UInt32;
 begin
   if Self.seedBlocker then
     Exit;
@@ -112,15 +330,33 @@ begin
 
   pauseMs := Random(7000) + 6000;
   Self.SetAction('Micro break');
+  // Surface each break so testers can observe the pacing decisions live.
+  WriteLn('[ANTIBAN] Micro break for ' + ToStr(pauseMs) + ' ms (reason: ' + reason + ', actions since last break: ' + ToStr(Self.ActionsSinceBreak) + ')');
   if SRL.Dice(60) then
+  begin
     Antiban.HoverSkills();
+    Inc(Self.AntibanStats.HoverEvents);
+    WriteLn('[ANTIBAN] Hovering skills during micro break refresh.');
+  end;
+
   Wait(pauseMs);
   Self.ScheduleNextMicroBreak();
   Self.ActionsSinceBreak := 0;
   Self.LastActionAt := GetTimeRunning();
+  Inc(Self.AntibanStats.BreaksTaken);
+  Self.AntibanStats.LastBreakMs := pauseMs;
+  Inc(Self.AntibanStats.TotalBreakMs, UInt64(pauseMs));
+  if Self.AntibanStats.BreaksTaken > 0 then
+    avgBreak := UInt32(Self.AntibanStats.TotalBreakMs div Self.AntibanStats.BreaksTaken)
+  else
+    avgBreak := 0;
+  // Emit a quick telemetry snapshot after every pause to make the adaptive logic auditable.
+  WriteLn('[ANTIBAN] Break telemetry -> total: ' + ToStr(Self.AntibanStats.BreaksTaken) + ' avg length: ' + ToStr(avgBreak) + ' ms');
 end;
 
 procedure TTitheFarmer.MaybeDoCameraAdjust();
+var
+  usedRotation: String;
 begin
   if Self.seedBlocker then
     Exit;
@@ -129,9 +365,19 @@ begin
     Exit;
 
   if SRL.Dice(2) then
-    Antiban.SmallCameraRotation()
+  begin
+    Antiban.SmallCameraRotation();
+    usedRotation := 'small camera rotation';
+  end
   else
+  begin
     Antiban.RandomRotate();
+    usedRotation := 'random rotate';
+  end;
+
+  Inc(Self.AntibanStats.CameraAdjusts);
+  // Report every adjustment so session logs reveal how the anti-pattern rotation behaves.
+  WriteLn('[ANTIBAN] Camera adjust -> ' + usedRotation + ' (total: ' + ToStr(Self.AntibanStats.CameraAdjusts) + ')');
 
   Self.ScheduleNextCameraAdjust();
 end;
@@ -139,6 +385,7 @@ end;
 procedure TTitheFarmer.MaybeDoHover();
 var
   roll: Int32;
+  hoverAction: String;
 begin
   if Self.seedBlocker then
     Exit;
@@ -148,12 +395,26 @@ begin
 
   roll := Random(100);
   case roll of
-    0 .. 39: Antiban.HoverSkills();
-    40 .. 69: Antiban.HoverMSPlayers();
+    0 .. 39:
+      begin
+        Antiban.HoverSkills();
+        hoverAction := 'hover skills';
+      end;
+    40 .. 69:
+      begin
+        Antiban.HoverMSPlayers();
+        hoverAction := 'hover players';
+      end;
     else
-      Mouse.RandomMovement();
+      begin
+        Mouse.RandomMovement();
+        hoverAction := 'mouse random movement';
+      end;
   end;
 
+  Inc(Self.AntibanStats.HoverEvents);
+  // Keep hover statistics visible for quick balancing tweaks.
+  WriteLn('[ANTIBAN] Hover event -> ' + hoverAction + ' (total: ' + ToStr(Self.AntibanStats.HoverEvents) + ')');
   Self.ScheduleNextHover();
 end;
 
@@ -166,7 +427,7 @@ begin
   if (GetTimeRunning() - Self.LastActionAt) > (3500 + Random(2000)) then
   begin
     if SRL.Dice(3) then
-      Self.PerformMicroBehaviour();
+      Self.PerformMicroBehaviour('idle ' + reason);
     Self.LastActionAt := GetTimeRunning();
   end;
 end;
@@ -299,19 +560,32 @@ begin
 end;
 
 procedure TTitheFarmer.nextUnblock();
+var
+  loopContext: String;
 begin
   if not RSClient.IsLoggedIn then
-    exit;
-    writeln(Self.walkSpot);
-    writeln(High(PlanterArray));
+    Exit;
+
   if Self.IsLastStep() then
   begin
+    loopContext := 'patch loop ' + ToStr(Self.CompletedLoops + 1) + ' complete';
+    Inc(Self.CompletedLoops);
     Self.walkSpot := 0;
-    self.seedBlocker := false;
+    Self.seedBlocker := False;
+
+    if Self.CompletedLoops >= Self.NextNarrativeLoop then
+    begin
+      Self.TriggerNarrativeMilestone(loopContext, True);
+      Self.ScheduleNextNarrativeLoop();
+    end
+    else if SRL.Dice(6) then
+      Self.TriggerNarrativeMilestone(loopContext);
   end
   else
   begin
     Self.walkSpot += 1;
+    if SRL.Dice(20) then
+      Self.TriggerNarrativeMilestone('moving to patch ' + ToStr(Self.walkSpot + 1));
   end;
 end;
 
@@ -326,6 +600,7 @@ procedure TTitheFarmer.WaterSeed();
 var
   Patch: TCuboidEx;
   Cuboid: TCuboidEx;
+  hydrated: Boolean;
 begin
   if not RSClient.IsLoggedIn then
     exit;
@@ -336,9 +611,10 @@ begin
   WaitUntil(not (Minimap.IsPlayerMoving), 200, 5000);
   Patch := RSW.GetCuboidMS(PlanterArray[Self.walkSpot], [2, 2, 0], [- 1, - 1]);
   WaitUntil(self.checkPlantWater(Patch), 700, 3000);
-  writeln(self.checkPlantWater(Patch));
-  if not(self.checkPlantWater(Patch)) and self.checkPlant(Patch) then
+  hydrated := Self.checkPlantWater(Patch);
+  if (not hydrated) and self.checkPlant(Patch) then
   begin
+    WriteLn('[TITHE] Patch ' + ToStr(Self.walkSpot + 1) + ' still looks dry, re-watering.');
     waterSeed();
     exit;
   end;
@@ -652,6 +928,7 @@ begin
     Self.GetWater();
     self.hasbought := false;
     Self.MarkAction('enter farm');
+    Self.TriggerNarrativeMilestone('returned to the farm entrance');
   end;
 end;
 
@@ -669,7 +946,10 @@ begin
   wait(2000, 5000);
   Result := not (self.InFarm);
   if Result then
+  begin
     Self.MarkAction('turn-in');
+    Self.TriggerNarrativeMilestone('delivered fruit to Gricoller', True);
+  end;
 end;
 
 function TTitheFarmer.waitfunction(): boolean;
