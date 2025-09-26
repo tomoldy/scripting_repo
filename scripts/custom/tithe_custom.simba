@@ -35,7 +35,6 @@ type
     TotalBreakMs: UInt64;
     LastBreakMs: UInt32;
   end;
-
   TTitheFarmer = record
      (TBaseWalkerScript) State: EFarmerState;
     Patches, WalkLocations, FarmerGricoller: TRSObject;
@@ -44,6 +43,7 @@ type
     PlanterArray, WalkArray, nonModifiedPlanterArray, tpa: TPointArray;
     BoxCol: TCTS2Color;
     SpecialCanEmpty, Refilled, hasbought, seedBlocker: Boolean;
+    LongBreakWindowOpen: Boolean; // governs when SRL long breaks are allowed
     NextMicroBreakAt, NextCameraAdjustAt, NextHoverAt, LastActionAt: UInt64;
     ActionsSinceBreak: Int32;
     CompletedLoops, NextNarrativeLoop, NarrativeEventsFired: UInt32;
@@ -60,6 +60,7 @@ begin
   Antiban.AddBreak(ONE_MINUTE * 90, ONE_MINUTE * 15, 0.3, 1);
   Antiban.AddSleep('01:00:00', 8.15 * ONE_HOUR, 0.1, 1);
 end;
+
 
 // Measure how unevenly the micro behaviours have been used so we can tighten scheduling
 // whenever one option is lagging behind the others.
@@ -291,6 +292,40 @@ begin
     Self.PerformNarrativeEvent(context);
 end;
 
+// Toggle long-break eligibility and announce any transition so testers know why
+// SRL break scheduling was enabled or suppressed.
+procedure TTitheFarmer.SetLongBreakWindow(const open: Boolean; const reason: String);
+var
+  note: String;
+begin
+  if Self.LongBreakWindowOpen = open then
+    Exit;
+
+  Self.LongBreakWindowOpen := open;
+
+  if reason <> '' then
+    note := ' (' + reason + ')'
+  else
+    note := '';
+
+  if open then
+    WriteLn('[ANTIBAN] Long break window opened' + note + '.')
+  else
+    WriteLn('[ANTIBAN] Long break window closed' + note + '.');
+end;
+
+// Only allow SRL-managed breaks when a full harvest cycle has wrapped up.
+function TTitheFarmer.CanScheduleLongBreaks(): Boolean;
+var
+  inFarm: Boolean;
+begin
+  if Self.seedBlocker then
+    Exit(False);
+
+  inFarm := Self.InFarm();
+  Result := Self.LongBreakWindowOpen and ((not inFarm) or (Self.walkSpot = 0));
+end;
+
 procedure TTitheFarmer.SetupHumanizer();
 begin
   Self.ActionsSinceBreak := 0;
@@ -302,6 +337,10 @@ begin
   Self.ScheduleNextCameraAdjust();
   Self.ScheduleNextHover();
   Self.ScheduleNextNarrativeLoop();
+  if Self.InFarm() then
+    Self.SetLongBreakWindow(False, 'session initialised while inside the farm')
+  else
+    Self.SetLongBreakWindow(True, 'session initialised outside the farm');
   WriteLn('[ANTIBAN] Humaniser initialised -> telemetry reset and schedulers seeded.');
 end;
 
@@ -338,7 +377,6 @@ begin
     Inc(Self.AntibanStats.HoverEvents);
     WriteLn('[ANTIBAN] Hovering skills during micro break refresh.');
   end;
-
   Wait(pauseMs);
   Self.ScheduleNextMicroBreak();
   Self.ActionsSinceBreak := 0;
@@ -415,6 +453,7 @@ begin
   Inc(Self.AntibanStats.HoverEvents);
   // Keep hover statistics visible for quick balancing tweaks.
   WriteLn('[ANTIBAN] Hover event -> ' + hoverAction + ' (total: ' + ToStr(Self.AntibanStats.HoverEvents) + ')');
+
   Self.ScheduleNextHover();
 end;
 
@@ -572,6 +611,7 @@ begin
     Inc(Self.CompletedLoops);
     Self.walkSpot := 0;
     Self.seedBlocker := False;
+    Self.SetLongBreakWindow(True, loopContext + ' - long break now safe');
 
     if Self.CompletedLoops >= Self.NextNarrativeLoop then
     begin
@@ -659,6 +699,7 @@ begin
   Result := WaitUntil((seedCount > countSeeds(slot)), 50, 6000);
   wait(100);
   Self.seedBlocker := True;
+  Self.SetLongBreakWindow(False, 'patch cycle engaged at spot ' + ToStr(Self.walkSpot + 1));
   if Result then
   begin
     Self.MarkAction('plant');
@@ -739,7 +780,6 @@ begin
       self.HarvestSeed();
       exit;
     end;
-
     Self.TotalActions += 1;
     Self.MarkAction('harvest');
     self.nextUnblock();
@@ -929,6 +969,7 @@ begin
     self.hasbought := false;
     Self.MarkAction('enter farm');
     Self.TriggerNarrativeMilestone('returned to the farm entrance');
+    Self.SetLongBreakWindow(False, 'entered the farm for a new harvest cycle');
   end;
 end;
 
@@ -949,6 +990,7 @@ begin
   begin
     Self.MarkAction('turn-in');
     Self.TriggerNarrativeMilestone('delivered fruit to Gricoller', True);
+    Self.SetLongBreakWindow(True, 'fruit delivered to Gricoller');
   end;
 end;
 
@@ -1067,6 +1109,8 @@ begin
 end;
 
 procedure TTitheFarmer.Run(MaxActions: Int32; MaxTime: Int64);
+var
+  allowLongBreaks: Boolean;
 begin
   Self.Init(MaxActions, MaxTime);
 
@@ -1082,7 +1126,8 @@ begin
   repeat
     if not (self.seedBlocker) then
     begin
-      self.DoAntiban(true, false);
+      allowLongBreaks := Self.CanScheduleLongBreaks();
+      Self.DoAntiban(allowLongBreaks, false);
       Self.MaybeHumanIdle('loop');
     end;
     Self.State := Self.GetState();
