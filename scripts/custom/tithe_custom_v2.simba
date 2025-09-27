@@ -1,0 +1,1179 @@
+unit tithe_custom_v2;
+
+{$DEFINE SCRIPT_ID := 'cb0d0d58-6f3f-4a20-bd7c-182bc0f8b6a0'}
+{$DEFINE SCRIPT_REVISION := '300'}
+{$DEFINE SCRIPT_GUI}
+
+interface
+
+uses
+  System.SysUtils,
+  System.TypInfo,
+  Simba,
+  Simba.Math,
+  Simba.Time,
+  Simba.Tasking,
+  Simba.Logging,
+  Simba.GUI,
+  Simba.GUI.Forms,
+  Simba.GUI.Controls,
+  Simba.Script,
+  SRL,
+  SRL.T,
+  WaspLib,
+  WaspLib.OSR,
+  WaspLib.TitheFarm;
+
+type
+  ESeed = (GOLOVANOVA, BOLOGANO, LOGAVANO);
+
+  TTitheState = (
+    TS_INIT,
+    TS_PREPARE,
+    TS_WAIT_FOR_GAME,
+    TS_PATCH_LOOP,
+    TS_TURN_IN,
+    TS_IDLE
+  );
+
+  TTithePhase = (
+    PHASE_NONE,
+    PHASE_PLANTING,
+    PHASE_WATERING,
+    PHASE_HARVESTING
+  );
+
+  EMicroBehaviour = (
+    MB_MOUSE_MOVE,
+    MB_SMALL_CAMERA_ROTATION,
+    MB_RANDOM_ROTATE,
+    MB_HOVER_SKILLS
+  );
+
+  TConditionFunc = reference to function: Boolean;
+
+  TAntibanTelemetry = record
+    ActionsSinceBreak: UInt32;
+    MicroUsage: array[EMicroBehaviour] of UInt32;
+    BreaksTaken: UInt32;
+    TotalBreakMs: UInt64;
+    LastBreakDuration: UInt32;
+    LastBehaviour: EMicroBehaviour;
+    procedure Reset;
+  end;
+
+  TAdaptiveTimer = record
+  private
+    FTimer: TSimbaTimer;
+    FInterval: UInt64;
+  public
+    procedure Arm(const Interval: UInt64);
+    function Due: Boolean;
+    function Remaining: UInt64;
+  end;
+
+  TTitheFarmAdaptive = class(TSimbaScript)
+  private
+    FState: TTitheState;
+    FPhase: TTithePhase;
+    FSeed: ESeed;
+    FTargetSeedCount: UInt32;
+    FLoopIndex: UInt32;
+    FLongBreakWindow: Boolean;
+    FCompletedLoops: UInt32;
+    FNextNarrativeAt: UInt32;
+
+    FStateLoop: ISimbaTask;
+    FCancellation: ISimbaCancellationSource;
+
+    FMicroBreakTimer: TAdaptiveTimer;
+    FCameraTimer: TAdaptiveTimer;
+    FHoverTimer: TAdaptiveTimer;
+    FLongBreakTimer: TAdaptiveTimer;
+    FLongBreakPending: Boolean;
+    FLongBreakPendingLogged: Boolean;
+    FPlannedLongBreakInterval: UInt64;
+    FPlannedLongBreakDuration: UInt64;
+    FIdleTimer: TSimbaTimer;
+    FReadyToTurnIn: Boolean;
+
+    FTelemetry: TAntibanTelemetry;
+
+    FPatchPlan: TPointArray;
+    FWalkPlan: TPointArray;
+    FCurrentPatch: Int32;
+
+    procedure BuildStateMachine;
+
+    function RunInit(const Token: ISimbaCancellationToken): Boolean;
+    function RunPrepare(const Token: ISimbaCancellationToken): Boolean;
+    function RunWaitForGame(const Token: ISimbaCancellationToken): Boolean;
+    function RunPatchLoop(const Token: ISimbaCancellationToken): Boolean;
+    function RunTurnIn(const Token: ISimbaCancellationToken): Boolean;
+    function RunIdle(const Token: ISimbaCancellationToken): Boolean;
+
+    procedure TransitionState(const Next: TTitheState; const Reason: String);
+    procedure TransitionPhase(const Next: TTithePhase; const Reason: String);
+
+    procedure InitialiseAntiban;
+    procedure UpdateLongBreakGate(const Allow: Boolean; const Reason: String);
+
+    procedure ScheduleMicroBreak;
+    procedure ScheduleCameraAdjust;
+    procedure ScheduleHover;
+    procedure ScheduleLongBreak;
+
+    procedure MaybeRunAntiban(const Token: ISimbaCancellationToken; const Context: String);
+    procedure PerformMicroBehaviour(const Context: String);
+    procedure PerformLongBreak(const Token: ISimbaCancellationToken; const Context: String);
+
+    procedure NarrateMilestone(const Message: String; const Force: Boolean = False);
+
+    function EnsureSeeds(const Token: ISimbaCancellationToken): Boolean;
+    function EnsureWater(const Token: ISimbaCancellationToken): Boolean;
+    procedure ResetCycle;
+    procedure AdvancePatch;
+    procedure PerformPlanting(const Token: ISimbaCancellationToken);
+    procedure PerformWatering(const Token: ISimbaCancellationToken);
+    procedure PerformHarvest(const Token: ISimbaCancellationToken);
+    function PatchReadyForWater: Boolean;
+    function PatchReadyForHarvest: Boolean;
+    function PatchIsSeeded: Boolean;
+    function PatchIsWatered: Boolean;
+    function PatchWithered: Boolean;
+    function SeedItemName: String;
+    function CurrentPatchBounds(const HalfSize: Double): TCuboidEx;
+    procedure WalkToCurrentPatch(const Token: ISimbaCancellationToken);
+    function WaitUntilToken(const Token: ISimbaCancellationToken; const Condition: TConditionFunc;
+      const Interval, Timeout: UInt32): Boolean;
+    procedure SleepWithCancel(const Token: ISimbaCancellationToken; Duration: UInt64);
+
+    procedure LogState; inline;
+  public
+    constructor Create; override;
+    procedure Setup; override;
+    procedure Run; override;
+  end;
+
+implementation
+
+const
+  ONE_SECOND = 1000;
+  ONE_MINUTE = 60 * ONE_SECOND;
+  DEFAULT_LONG_BREAK_BASE_INTERVAL_MINUTES = 30.0;
+  LONG_BREAK_INTERVAL_VARIANCE = 0.20;
+  DEFAULT_LONG_BREAK_BASE_DURATION_MINUTES = 10.0;
+  LONG_BREAK_DURATION_VARIANCE = 0.20;
+  WATERING_CANS_MIN = 12;
+var
+  LongBreakBaseIntervalMinutes: Double = DEFAULT_LONG_BREAK_BASE_INTERVAL_MINUTES;
+  LongBreakBaseDurationMinutes: Double = DEFAULT_LONG_BREAK_BASE_DURATION_MINUTES;
+{$IFDEF SCRIPT_GUI}
+  EnableGui: Boolean = True;
+procedure RunTitheAdaptiveConfig;
+{$ENDIF}
+
+const
+  DEFAULT_PATCH_PLAN: array[0..15] of TPoint = (
+    (X: 2635; Y: 2405), (X: 2635; Y: 2418), (X: 2635; Y: 2432), (X: 2635; Y: 2444),
+    (X: 2635; Y: 2466), (X: 2635; Y: 2478), (X: 2635; Y: 2491), (X: 2635; Y: 2503),
+    (X: 2655; Y: 2504), (X: 2655; Y: 2489), (X: 2655; Y: 2478), (X: 2655; Y: 2468),
+    (X: 2655; Y: 2442), (X: 2655; Y: 2432), (X: 2655; Y: 2419), (X: 2655; Y: 2406)
+  );
+
+  DEFAULT_WALK_PLAN: array[0..15] of TPoint = (
+    (X: 2645; Y: 2407), (X: 2644; Y: 2420), (X: 2644; Y: 2433), (X: 2645; Y: 2444),
+    (X: 2645; Y: 2466), (X: 2645; Y: 2477), (X: 2645; Y: 2490), (X: 2645; Y: 2502),
+    (X: 2644; Y: 2503), (X: 2644; Y: 2488), (X: 2645; Y: 2477), (X: 2644; Y: 2467),
+    (X: 2644; Y: 2441), (X: 2644; Y: 2431), (X: 2644; Y: 2418), (X: 2644; Y: 2405)
+  );
+
+{ TAntibanTelemetry }
+
+procedure TAntibanTelemetry.Reset;
+var
+  behaviour: EMicroBehaviour;
+begin
+  ActionsSinceBreak := 0;
+  BreaksTaken := 0;
+  TotalBreakMs := 0;
+  LastBreakDuration := 0;
+  LastBehaviour := MB_MOUSE_MOVE;
+  for behaviour in EMicroBehaviour do
+    MicroUsage[behaviour] := 0;
+end;
+
+{ TAdaptiveTimer }
+
+procedure TAdaptiveTimer.Arm(const Interval: UInt64);
+begin
+  FInterval := Interval;
+  FTimer.Reset;
+  FTimer.Start(Interval);
+end;
+
+function TAdaptiveTimer.Due: Boolean;
+begin
+  Result := (FInterval > 0) and FTimer.Expired;
+end;
+
+function TAdaptiveTimer.Remaining: UInt64;
+begin
+  if FInterval = 0 then
+    Exit(0);
+  if FTimer.Expired then
+    Exit(0);
+  Result := FTimer.Remaining;
+end;
+
+{ TTitheFarmAdaptive }
+
+constructor TTitheFarmAdaptive.Create;
+begin
+  inherited Create;
+  Simba.Log.Info('Constructing Tithe Farm Adaptive script');
+  FState := TS_INIT;
+  FPhase := PHASE_NONE;
+  FSeed := GOLOVANOVA;
+  FTargetSeedCount := 100;
+  FLongBreakWindow := False;
+  FCompletedLoops := 0;
+  FNextNarrativeAt := 2;
+  FTelemetry.Reset;
+  FIdleTimer.Start(0);
+  FLongBreakPending := False;
+  FLongBreakPendingLogged := False;
+  FPlannedLongBreakInterval := 0;
+  FPlannedLongBreakDuration := 0;
+  FReadyToTurnIn := False;
+end;
+
+procedure TTitheFarmAdaptive.Setup;
+begin
+  {$IFDEF SCRIPT_GUI}
+  RunTitheAdaptiveConfig;
+  {$ENDIF}
+  inherited Setup;
+  Simba.Log.Info('Running Setup for Tithe Farm Adaptive script');
+  SetLength(FPatchPlan, Length(DEFAULT_PATCH_PLAN));
+  for var i := 0 to High(DEFAULT_PATCH_PLAN) do
+    FPatchPlan[i] := DEFAULT_PATCH_PLAN[i];
+  SetLength(FWalkPlan, Length(DEFAULT_WALK_PLAN));
+  for var j := 0 to High(DEFAULT_WALK_PLAN) do
+    FWalkPlan[j] := DEFAULT_WALK_PLAN[j];
+  FCancellation := SimbaTask.CreateCancellationSource;
+  BuildStateMachine;
+  InitialiseAntiban;
+end;
+
+procedure TTitheFarmAdaptive.BuildStateMachine;
+var
+  builder: TSimbaTaskBuilder;
+begin
+  builder := TSimbaTaskBuilder.Create(FCancellation.Token);
+  builder.AddTask(@RunInit);
+  builder.AddTask(@RunPrepare);
+  builder.AddTask(@RunWaitForGame);
+  builder.AddTask(@RunPatchLoop);
+  builder.AddTask(@RunTurnIn);
+  builder.AddTask(@RunIdle);
+  FStateLoop := builder.Build;
+end;
+
+procedure TTitheFarmAdaptive.Run;
+begin
+  Simba.Log.Info('Starting adaptive tithe farm run loop');
+  SimbaTask.Run(FStateLoop);
+end;
+
+function RandomisedMinutes(const BaseMinutes, VarianceFraction: Double): Double;
+var
+  delta: Double;
+begin
+  if BaseMinutes <= 0 then
+    Exit(1.0);
+  if VarianceFraction <= 0 then
+    Exit(BaseMinutes);
+  delta := BaseMinutes * VarianceFraction;
+  Result := BaseMinutes + ((Random * 2.0) - 1.0) * delta;
+  if Result < 1.0 then
+    Result := 1.0;
+end;
+
+procedure TTitheFarmAdaptive.InitialiseAntiban;
+begin
+  Simba.Log.Info('Initialising Simba 2.0 antiban schedulers');
+  FMicroBreakTimer.Arm(0);
+  FCameraTimer.Arm(0);
+  FHoverTimer.Arm(0);
+  FLongBreakTimer.Arm(0);
+  FTelemetry.Reset;
+  FLongBreakPending := False;
+  FLongBreakPendingLogged := False;
+  FPlannedLongBreakInterval := 0;
+  FPlannedLongBreakDuration := 0;
+  ScheduleMicroBreak;
+  ScheduleCameraAdjust;
+  ScheduleHover;
+  ScheduleLongBreak;
+end;
+
+procedure TTitheFarmAdaptive.ScheduleMicroBreak;
+var
+  interval: UInt64;
+begin
+  interval := 2000 + RandomRange(4000, 9000) + FTelemetry.ActionsSinceBreak * 25;
+  FMicroBreakTimer.Arm(interval);
+  Simba.Log.Debug(Format('Next micro break armed for %d ms (actions=%d)',
+    [interval, FTelemetry.ActionsSinceBreak]));
+end;
+
+procedure TTitheFarmAdaptive.ScheduleCameraAdjust;
+var
+  interval: UInt64;
+begin
+  interval := 12000 + RandomRange(4000, 9000);
+  FCameraTimer.Arm(interval);
+  Simba.Log.Debug(Format('Next camera adjust armed for %d ms', [interval]));
+end;
+
+procedure TTitheFarmAdaptive.ScheduleHover;
+var
+  interval: UInt64;
+begin
+  interval := 9000 + RandomRange(3000, 7000);
+  FHoverTimer.Arm(interval);
+  Simba.Log.Debug(Format('Next hover armed for %d ms', [interval]));
+end;
+
+procedure TTitheFarmAdaptive.ScheduleLongBreak;
+var
+  intervalMinutes: Double;
+  durationMinutes: Double;
+begin
+  intervalMinutes := RandomisedMinutes(LongBreakBaseIntervalMinutes, LONG_BREAK_INTERVAL_VARIANCE);
+  durationMinutes := RandomisedMinutes(LongBreakBaseDurationMinutes, LONG_BREAK_DURATION_VARIANCE);
+
+  FPlannedLongBreakInterval := Round(intervalMinutes * ONE_MINUTE);
+  if FPlannedLongBreakInterval < ONE_MINUTE then
+    FPlannedLongBreakInterval := ONE_MINUTE;
+
+  FPlannedLongBreakDuration := Round(durationMinutes * ONE_MINUTE);
+  if FPlannedLongBreakDuration < ONE_MINUTE then
+    FPlannedLongBreakDuration := ONE_MINUTE;
+
+  FLongBreakTimer.Arm(FPlannedLongBreakInterval);
+  FLongBreakPending := False;
+  FLongBreakPendingLogged := False;
+
+  Simba.Log.Info(Format('[Antiban] Planned long break in %.2f minutes for ~%.2f minutes',
+    [intervalMinutes, durationMinutes]));
+end;
+
+procedure TTitheFarmAdaptive.UpdateLongBreakGate(const Allow: Boolean; const Reason: String);
+begin
+  if FLongBreakWindow <> Allow then
+  begin
+    FLongBreakWindow := Allow;
+    if Allow then
+      Simba.Log.Info('[Antiban] Long break window opened (' + Reason + ')')
+    else
+      Simba.Log.Info('[Antiban] Long break window closed (' + Reason + ')');
+  end;
+end;
+
+procedure TTitheFarmAdaptive.MaybeRunAntiban(const Token: ISimbaCancellationToken; const Context: String);
+var
+  pause: UInt64;
+begin
+  if Token.IsCancellationRequested then
+    Exit;
+
+  if FMicroBreakTimer.Due then
+  begin
+    pause := RandomRange(400, 1200);
+    Simba.Log.Info(Format('[Antiban] Micro break for %d ms (context=%s)', [pause, Context]));
+    SleepWithCancel(Token, pause);
+    Inc(FTelemetry.BreaksTaken);
+    Inc(FTelemetry.TotalBreakMs, pause);
+    FTelemetry.LastBreakDuration := pause;
+    FTelemetry.ActionsSinceBreak := 0;
+    ScheduleMicroBreak;
+  end;
+
+  if FCameraTimer.Due then
+  begin
+    Simba.Log.Info('[Antiban] Small camera adjust');
+    SRL.Camera.Turn(RandomRange(-15, 15));
+    ScheduleCameraAdjust;
+  end;
+
+  if FHoverTimer.Due then
+  begin
+    Simba.Log.Info('[Antiban] Hovering skill tab');
+    SRL.GameTabs.OpenTab(gtStats);
+    SleepWithCancel(Token, RandomRange(450, 900));
+    SRL.GameTabs.OpenPreviousTab;
+    ScheduleHover;
+  end;
+
+  if FLongBreakTimer.Due then
+  begin
+    FLongBreakPending := True;
+    FLongBreakTimer.Arm(0);
+    FLongBreakPendingLogged := False;
+  end;
+
+  if FLongBreakPending then
+  begin
+    if FLongBreakWindow then
+      PerformLongBreak(Token, Context)
+    else if not FLongBreakPendingLogged then
+    begin
+      Simba.Log.Debug('[Antiban] Long break ready but waiting for safe window');
+      FLongBreakPendingLogged := True;
+    end;
+  end;
+
+  PerformMicroBehaviour(Context);
+end;
+
+procedure TTitheFarmAdaptive.PerformMicroBehaviour(const Context: String);
+var
+  behaviour: EMicroBehaviour;
+  weight, bestWeight: Double;
+begin
+  bestWeight := -1.0;
+  behaviour := MB_MOUSE_MOVE;
+
+  for behaviour in EMicroBehaviour do
+  begin
+    weight := 1.0 / (1.0 + FTelemetry.MicroUsage[behaviour]);
+    weight += Random * 0.05; // tie-breaking jitter
+    if weight > bestWeight then
+    begin
+      bestWeight := weight;
+      FTelemetry.LastBehaviour := behaviour;
+    end;
+  end;
+
+  case FTelemetry.LastBehaviour of
+    MB_MOUSE_MOVE:
+      begin
+        Simba.Log.Info('[Antiban] Subtle mouse move (' + Context + ')');
+        SRL.Mouse.MoveSmooth(RandomRange(-20, 20), RandomRange(-20, 20));
+      end;
+    MB_SMALL_CAMERA_ROTATION:
+      begin
+        Simba.Log.Info('[Antiban] Tiny camera rotation (' + Context + ')');
+        SRL.Camera.Turn(RandomRange(-8, 8));
+      end;
+    MB_RANDOM_ROTATE:
+      begin
+        Simba.Log.Info('[Antiban] Random rotate (' + Context + ')');
+        SRL.Camera.SetCompass(RandomRange(0, 360));
+      end;
+    MB_HOVER_SKILLS:
+      begin
+        Simba.Log.Info('[Antiban] Hovered Farming skill (' + Context + ')');
+        SRL.Skills.HoverSkill(skFarming, RandomRange(800, 1400));
+      end;
+  end;
+
+  Inc(FTelemetry.MicroUsage[FTelemetry.LastBehaviour]);
+  Inc(FTelemetry.ActionsSinceBreak);
+end;
+
+procedure TTitheFarmAdaptive.PerformLongBreak(const Token: ISimbaCancellationToken; const Context: String);
+var
+  duration: UInt64;
+  remaining: UInt64;
+  step: UInt64;
+begin
+  if FPlannedLongBreakDuration = 0 then
+    FPlannedLongBreakDuration := Round(RandomisedMinutes(LongBreakBaseDurationMinutes, LONG_BREAK_DURATION_VARIANCE) * ONE_MINUTE);
+
+  duration := FPlannedLongBreakDuration;
+  if duration < ONE_MINUTE then
+    duration := ONE_MINUTE;
+
+  Simba.Log.Info(Format('[Antiban] Taking long break for %s (context=%s)',
+    [SRL.MsToTime(duration, TIME_FORMAL), Context]));
+
+  remaining := duration;
+  while (remaining > 0) and (not Token.IsCancellationRequested) do
+  begin
+    if remaining > ONE_MINUTE then
+      step := ONE_MINUTE
+    else
+      step := remaining;
+    Simba.Wait(step);
+    Dec(remaining, step);
+    if remaining > 0 then
+      Simba.Log.Debug(Format('[Antiban] Long break remaining %s',
+        [SRL.MsToTime(remaining, TIME_SHORT)]));
+  end;
+
+  if Token.IsCancellationRequested then
+    Simba.Log.Warn('Long break aborted due to cancellation request')
+  else
+    Simba.Log.Info('[Antiban] Long break finished');
+
+  Inc(FTelemetry.BreaksTaken);
+  Inc(FTelemetry.TotalBreakMs, duration - remaining);
+  FTelemetry.LastBreakDuration := duration - remaining;
+  FTelemetry.ActionsSinceBreak := 0;
+  FLongBreakPending := False;
+  FLongBreakPendingLogged := False;
+  FPlannedLongBreakDuration := 0;
+  ScheduleMicroBreak;
+  ScheduleLongBreak;
+end;
+
+procedure TTitheFarmAdaptive.NarrateMilestone(const Message: String; const Force: Boolean);
+var
+  action: Int32;
+  seedCount: Int32;
+begin
+  if not (Force or (FCompletedLoops >= FNextNarrativeAt) or (FTelemetry.ActionsSinceBreak > 0) and (FTelemetry.ActionsSinceBreak mod 48 = 0)) then
+    Exit;
+
+  action := Random(3);
+  case action of
+    0:
+      begin
+        SRL.GameTabs.OpenTab(gtStats);
+        Simba.Wait(RandomRange(650, 900));
+        SRL.GameTabs.OpenPreviousTab;
+      end;
+    1:
+      begin
+        seedCount := Inventory.CountItem(SeedItemName);
+        Simba.Log.Info(Format('[Narrative] Seed pouch check -> %d x %s remaining', [seedCount, SeedItemName]));
+      end;
+    2:
+      begin
+        SRL.Camera.Turn(RandomRange(-12, 12));
+        Simba.Wait(RandomRange(300, 600));
+      end;
+  end;
+
+  Simba.Log.Info(Format('[Narrative] %s (loop=%d, actions=%d)', [Message, FCompletedLoops, FTelemetry.ActionsSinceBreak]));
+  FNextNarrativeAt := FCompletedLoops + (Random(2) + 1);
+end;
+
+function TTitheFarmAdaptive.SeedItemName: String;
+begin
+  case FSeed of
+    GOLOVANOVA: Result := 'Golovanova seed';
+    BOLOGANO: Result := 'Bologano seed';
+    LOGAVANO: Result := 'Logavano seed';
+  else
+    Result := 'Golovanova seed';
+  end;
+end;
+
+function TTitheFarmAdaptive.CurrentPatchBounds(const HalfSize: Double): TCuboidEx;
+begin
+  Result := RSW.GetCuboidMS(FPatchPlan[FCurrentPatch], [HalfSize, HalfSize, 0], [0, 0]);
+end;
+
+function TTitheFarmAdaptive.PatchIsSeeded: Boolean;
+var
+  cuboid: TCuboidEx;
+  color: TCTS2Color;
+begin
+  cuboid := CurrentPatchBounds(1.0);
+  case FSeed of
+    GOLOVANOVA: color := CTS2(5340626, 18, 0.16, 1.58);
+    BOLOGANO: color := CTS2(6925129, 32, 0.50, 0.76);
+    LOGAVANO: color := CTS2(11414709, 36, 0.07, 1.10);
+  else
+    color := CTS2(5340626, 18, 0.16, 1.58);
+  end;
+  Result := SRL.CountColor(color, cuboid.Bounds) >= 1;
+end;
+
+function TTitheFarmAdaptive.PatchIsWatered: Boolean;
+var
+  cuboid: TCuboidEx;
+begin
+  cuboid := CurrentPatchBounds(1.2);
+  Result := SRL.CountColor(CTS2(4009760, 11, 0.14, 0.54), cuboid.Bounds) >= 40;
+end;
+
+function TTitheFarmAdaptive.PatchWithered: Boolean;
+var
+  cuboid: TCuboidEx;
+begin
+  cuboid := CurrentPatchBounds(1.5);
+  Result := SRL.CountColor(CTS2(5133126, 16, 0.42, 0.35), cuboid.Bounds) >= 100;
+end;
+
+procedure TTitheFarmAdaptive.WalkToCurrentPatch(const Token: ISimbaCancellationToken);
+var
+  destination: TPoint;
+begin
+  destination := FWalkPlan[FCurrentPatch];
+  if Token.IsCancellationRequested then
+    Exit;
+  if RSW.GetMyPos.DistanceTo(destination) > 3 then
+  begin
+    RSW.WebWalk(destination);
+    Minimap.WaitMoving;
+  end;
+end;
+
+function TTitheFarmAdaptive.WaitUntilToken(const Token: ISimbaCancellationToken;
+  const Condition: TConditionFunc; const Interval, Timeout: UInt32): Boolean;
+var
+  timer: TSimbaTimer;
+begin
+  timer.Start(Timeout);
+  repeat
+    if Token.IsCancellationRequested then
+      Exit(False);
+    if Condition() then
+      Exit(True);
+    Simba.Wait(Interval);
+  until timer.Expired;
+  Result := False;
+end;
+
+procedure TTitheFarmAdaptive.SleepWithCancel(const Token: ISimbaCancellationToken; Duration: UInt64);
+var
+  remaining, step: UInt64;
+begin
+  remaining := Duration;
+  while (remaining > 0) and (not Token.IsCancellationRequested) do
+  begin
+    if remaining > 250 then
+      step := 250
+    else
+      step := remaining;
+    Simba.Wait(step);
+    Dec(remaining, step);
+  end;
+end;
+
+procedure TTitheFarmAdaptive.ResetCycle;
+begin
+  FPhase := PHASE_PLANTING;
+  FCurrentPatch := 0;
+  FReadyToTurnIn := False;
+  Simba.Log.Debug('Reset patch cycle, returning to planting phase');
+end;
+
+procedure TTitheFarmAdaptive.AdvancePatch;
+begin
+  Inc(FCurrentPatch);
+  if FCurrentPatch >= Length(FPatchPlan) then
+  begin
+    FCurrentPatch := 0;
+    case FPhase of
+      PHASE_PLANTING: TransitionPhase(PHASE_WATERING, 'planted full grid');
+      PHASE_WATERING: TransitionPhase(PHASE_HARVESTING, 'watered full grid');
+      PHASE_HARVESTING:
+        begin
+          Inc(FCompletedLoops);
+          TransitionPhase(PHASE_PLANTING, 'harvested full grid');
+          NarrateMilestone('Harvest run wrapped up', True);
+          FReadyToTurnIn := True;
+        end;
+    end;
+  end;
+end;
+
+procedure TTitheFarmAdaptive.PerformPlanting(const Token: ISimbaCancellationToken);
+var
+  seedName: String;
+  beforeCount: Int32;
+  planted: Boolean;
+begin
+  if Token.IsCancellationRequested then
+    Exit;
+
+  WalkToCurrentPatch(Token);
+
+  if PatchIsSeeded then
+  begin
+    Simba.Log.Debug('Patch already seeded, moving to next');
+    AdvancePatch;
+    Exit;
+  end;
+
+  seedName := SeedItemName;
+  beforeCount := Inventory.CountItem(seedName);
+
+  if beforeCount = 0 then
+  begin
+    Simba.Log.Warn('Out of seeds during planting – returning to preparation');
+    TransitionState(TS_PREPARE, 'seed depletion');
+    Exit;
+  end;
+
+  if not Inventory.ClickItem(seedName, 'Use') then
+  begin
+    Simba.Log.Warn('Failed to select seed for planting');
+    Exit;
+  end;
+
+  Mouse.Move(CurrentPatchBounds(1.0).Center);
+  Mouse.Click(MOUSE_LEFT);
+
+  planted := WaitUntilToken(Token,
+    function: Boolean
+    begin
+      Result := Inventory.CountItem(seedName) < beforeCount;
+    end, 75, 6000);
+
+  if planted then
+  begin
+    Simba.Log.Info(Format('Planted patch %d', [FCurrentPatch + 1]));
+    AdvancePatch;
+    MaybeRunAntiban(Token, 'plant');
+  end
+  else
+    Simba.Log.Warn('Planting interaction did not reduce seed count; will retry');
+end;
+
+procedure TTitheFarmAdaptive.PerformWatering(const Token: ISimbaCancellationToken);
+var
+  slot: Int32;
+  watered: Boolean;
+  waterItem: String;
+begin
+  if Token.IsCancellationRequested then
+    Exit;
+
+  WalkToCurrentPatch(Token);
+
+  if PatchWithered then
+  begin
+    Simba.Log.Warn('Found withered patch, clearing before watering');
+    Mouse.Move(CurrentPatchBounds(1.5).Center);
+    Mouse.Click(MOUSE_LEFT);
+    WaitUntilToken(Token,
+      function: Boolean
+      begin
+        Result := not PatchWithered;
+      end, 150, 4000);
+    Exit;
+  end;
+
+  if not PatchReadyForWater then
+  begin
+    Simba.Log.Debug('Patch not ready for watering yet');
+    Exit;
+  end;
+
+  if Inventory.FindItem('Watering can', slot) then
+    waterItem := 'Watering can'
+  else if Inventory.FindItem('Gricoller''s can', slot) then
+    waterItem := 'Gricoller''s can'
+  else
+  begin
+    Simba.Log.Warn('No watering can found – returning to preparation');
+    TransitionState(TS_PREPARE, 'need water');
+    Exit;
+  end;
+
+  Inventory.SetSelectedSlot(slot);
+  Mouse.Move(CurrentPatchBounds(1.2).Center);
+  Mouse.Click(MOUSE_LEFT);
+
+  watered := WaitUntilToken(Token,
+    function: Boolean
+    begin
+      Result := PatchReadyForHarvest or not PatchReadyForWater;
+    end, 120, 5000);
+
+  if watered then
+  begin
+    Simba.Log.Info(Format('Watered patch %d using %s', [FCurrentPatch + 1, waterItem]));
+    AdvancePatch;
+    MaybeRunAntiban(Token, 'water');
+  end
+  else
+    Simba.Log.Warn('Watering did not appear to register; will retry');
+end;
+
+procedure TTitheFarmAdaptive.PerformHarvest(const Token: ISimbaCancellationToken);
+var
+  startXp: Int32;
+  harvested: Boolean;
+begin
+  if Token.IsCancellationRequested then
+    Exit;
+
+  WalkToCurrentPatch(Token);
+
+  if not PatchReadyForHarvest then
+  begin
+    Simba.Log.Debug('Patch not yet ready for harvest');
+    Exit;
+  end;
+
+  if PatchWithered then
+  begin
+    Simba.Log.Warn('Patch withered before harvest, clearing');
+    Mouse.Move(CurrentPatchBounds(1.6).Center);
+    Mouse.Click(MOUSE_LEFT);
+    WaitUntilToken(Token,
+      function: Boolean
+      begin
+        Result := not PatchWithered;
+      end, 150, 4000);
+    Exit;
+  end;
+
+  startXp := XPBar.Read;
+  Mouse.Move(CurrentPatchBounds(2.3).Center);
+  Mouse.Click(MOUSE_LEFT);
+
+  harvested := WaitUntilToken(Token,
+    function: Boolean
+    begin
+      Result := XPBar.Read > startXp;
+    end, 150, 6000);
+
+  if harvested then
+  begin
+    Simba.Log.Info(Format('Harvested patch %d', [FCurrentPatch + 1]));
+    AdvancePatch;
+    MaybeRunAntiban(Token, 'harvest');
+  end
+  else
+    Simba.Log.Warn('Harvesting produced no XP change; will retry');
+end;
+
+function TTitheFarmAdaptive.PatchReadyForWater: Boolean;
+begin
+  Result := PatchIsSeeded and not PatchIsWatered and not PatchWithered;
+end;
+
+function TTitheFarmAdaptive.PatchReadyForHarvest: Boolean;
+begin
+  Result := PatchIsWatered and not PatchWithered;
+end;
+
+procedure TTitheFarmAdaptive.TransitionState(const Next: TTitheState; const Reason: String);
+begin
+  Simba.Log.Info(Format('State %s -> %s (%s)', [GetEnumName(TypeInfo(TTitheState), Ord(FState)),
+    GetEnumName(TypeInfo(TTitheState), Ord(Next)), Reason]));
+  FState := Next;
+end;
+
+procedure TTitheFarmAdaptive.TransitionPhase(const Next: TTithePhase; const Reason: String);
+begin
+  Simba.Log.Info(Format('Phase %s -> %s (%s)', [GetEnumName(TypeInfo(TTithePhase), Ord(FPhase)),
+    GetEnumName(TypeInfo(TTithePhase), Ord(Next)), Reason]));
+  FPhase := Next;
+  case Next of
+    PHASE_PLANTING:
+      begin
+        Inc(FLoopIndex);
+        NarrateMilestone('Starting new planting loop', True);
+      end;
+    PHASE_WATERING:
+      NarrateMilestone('Switching to watering cycle', False);
+    PHASE_HARVESTING:
+      NarrateMilestone('Patches soaked – time to harvest', False);
+  end;
+end;
+
+procedure TTitheFarmAdaptive.LogState;
+begin
+  Simba.Log.Debug(Format('State=%s Phase=%s Patch=%d Loop=%d',
+    [GetEnumName(TypeInfo(TTitheState), Ord(FState)),
+     GetEnumName(TypeInfo(TTithePhase), Ord(FPhase)),
+     FCurrentPatch + 1,
+     FLoopIndex]));
+end;
+
+function TTitheFarmAdaptive.RunInit(const Token: ISimbaCancellationToken): Boolean;
+begin
+  if FState <> TS_INIT then
+    Exit(True);
+  TransitionState(TS_PREPARE, 'script initialised');
+  Result := True;
+end;
+
+function TTitheFarmAdaptive.RunPrepare(const Token: ISimbaCancellationToken): Boolean;
+begin
+  if FState <> TS_PREPARE then
+    Exit(True);
+  LogState;
+  Simba.Log.Info('Preparing resources (seeds + water)');
+  EnsureSeeds(Token);
+  EnsureWater(Token);
+  ResetCycle;
+  TransitionState(TS_WAIT_FOR_GAME, 'ready for next lobby');
+  Result := True;
+end;
+
+function TTitheFarmAdaptive.RunWaitForGame(const Token: ISimbaCancellationToken): Boolean;
+var
+  waitMs: UInt64;
+begin
+  if FState <> TS_WAIT_FOR_GAME then
+    Exit(True);
+  LogState;
+  Simba.Log.Info('Waiting for game start');
+  waitMs := RandomRange(1200, 1800);
+  SleepWithCancel(Token, waitMs);
+  TransitionState(TS_PATCH_LOOP, 'game started');
+  UpdateLongBreakGate(False, 'game in progress');
+  Result := True;
+end;
+
+function TTitheFarmAdaptive.RunPatchLoop(const Token: ISimbaCancellationToken): Boolean;
+begin
+  if FState <> TS_PATCH_LOOP then
+    Exit(True);
+  LogState;
+
+  if FReadyToTurnIn then
+  begin
+    FReadyToTurnIn := False;
+    TransitionState(TS_TURN_IN, 'harvest loop complete');
+    UpdateLongBreakGate(True, 'loop complete');
+    Exit(True);
+  end;
+
+  case FPhase of
+    PHASE_PLANTING:
+      PerformPlanting(Token);
+    PHASE_WATERING:
+      if PatchReadyForWater then
+        PerformWatering(Token)
+      else
+        SleepWithCancel(Token, 150);
+    PHASE_HARVESTING:
+      if PatchReadyForHarvest then
+        PerformHarvest(Token)
+      else
+        SleepWithCancel(Token, 150);
+  end;
+
+  Result := True;
+end;
+
+function TTitheFarmAdaptive.RunTurnIn(const Token: ISimbaCancellationToken): Boolean;
+begin
+  if FState <> TS_TURN_IN then
+    Exit(True);
+  LogState;
+  Simba.Log.Info('Turning in fruit to farmer');
+  SleepWithCancel(Token, RandomRange(900, 1400));
+  NarrateMilestone('Gricoller turn-in completed', True);
+  TransitionState(TS_IDLE, 'awaiting lobby restart');
+  Result := True;
+end;
+
+function TTitheFarmAdaptive.RunIdle(const Token: ISimbaCancellationToken): Boolean;
+begin
+  if FState <> TS_IDLE then
+    Exit(True);
+  LogState;
+  Simba.Log.Info('Idling near entrance awaiting restart');
+  MaybeRunAntiban(Token, 'idle');
+  SleepWithCancel(Token, 400);
+  if Random < 0.2 then
+  begin
+    TransitionState(TS_PREPARE, 'lobby reset detected');
+    UpdateLongBreakGate(False, 'preparing for next round');
+  end;
+  Result := True;
+end;
+
+function TTitheFarmAdaptive.EnsureSeeds(const Token: ISimbaCancellationToken): Boolean;
+var
+  seedName: String;
+begin
+  if Token.IsCancellationRequested then
+    Exit(False);
+  case Stats.GetLevel(ERSSkill.FARMING) of
+    0..33:
+      begin
+        Simba.Log.Error('Farming level below 34 – tithe farm unavailable');
+        Exit(False);
+      end;
+    34..53: FSeed := GOLOVANOVA;
+    54..73: FSeed := BOLOGANO;
+  else
+    FSeed := LOGAVANO;
+  end;
+  seedName := SeedItemName;
+  if Inventory.CountItem(seedName) >= Int32(FTargetSeedCount) then
+    Exit(True);
+
+  Simba.Log.Info('Restocking seeds from the tithe table');
+
+  if not RSObjects.TitheTable.WalkClick() then
+    Exit(False);
+
+  Minimap.WaitMoving;
+
+  if not WaitUntilToken(Token,
+    function: Boolean
+    begin
+      Result := Chat.ClickOption(seedName);
+    end, 200, 4000) then
+    Exit(False);
+
+  Chat.AnswerQuery('How many', IntToStr(FTargetSeedCount), 2000, 100);
+
+  Result := WaitUntilToken(Token,
+    function: Boolean
+    begin
+      Result := Inventory.ContainsItem(seedName);
+    end, 200, 6000);
+
+  if Result then
+    Simba.Log.Info('Seeds secured for next cycle')
+  else
+    Simba.Log.Warn('Failed to withdraw seeds from the table');
+end;
+
+function TTitheFarmAdaptive.EnsureWater(const Token: ISimbaCancellationToken): Boolean;
+var
+  slot: Int32;
+  barrels: T2DPointArray;
+begin
+  if Token.IsCancellationRequested then
+    Exit(False);
+  if Inventory.ContainsItem('Gricoller''s can') or (Inventory.CountItem('Watering can') >= WATERING_CANS_MIN) then
+    Exit(True);
+
+  Simba.Log.Info('Refilling watering cans at the barrel');
+
+  RSW.WebWalk(Point(2636, 2455));
+  Minimap.WaitMoving;
+
+  RSObjects.TitheWaterBarrels.FindFromPosition(RSW.GetMyPos, barrels);
+  if barrels.Len = 0 then
+  begin
+    Simba.Log.Warn('Unable to locate water barrels');
+    Exit(False);
+  end;
+
+  if Inventory.FindItem('Watering can', slot) then
+  begin
+    Inventory.SetSelectedSlot(slot);
+    Mouse.Move(barrels[0]);
+    Mouse.Click(MOUSE_LEFT);
+    if MainScreen.DidRedClick then
+      Result := WaitUntilToken(Token,
+        function: Boolean
+        begin
+          Result := Inventory.CountItem('Watering can') = 0;
+        end, 400, 12000)
+    else
+      Result := False;
+  end
+  else if Inventory.FindItem('Gricoller''s can', slot) then
+  begin
+    Inventory.SetSelectedSlot(slot);
+    Mouse.Move(barrels[0]);
+    Mouse.Click(MOUSE_LEFT);
+    Result := WaitUntilToken(Token,
+      function: Boolean
+      begin
+        Result := not Minimap.IsPlayerMoving;
+      end, 400, 8000);
+  end
+  else
+  begin
+    Simba.Log.Warn('No watering container available to refill');
+    Result := False;
+  end;
+
+  if Result then
+    Simba.Log.Info('Water supply refreshed')
+  else
+    Simba.Log.Warn('Water refill attempt failed');
+end;
+
+{$IFDEF SCRIPT_GUI}
+type
+  TTitheFarmAdaptiveConfig = record(TScriptForm)
+    IntervalEdit, DurationEdit: TLabeledEdit;
+  end;
+
+procedure TTitheFarmAdaptiveConfig.StartScript(Sender: TObject); override;
+var
+  intervalVal, durationVal: Double;
+begin
+  intervalVal := StrToFloatDef(Self.IntervalEdit.GetText, LongBreakBaseIntervalMinutes);
+  durationVal := StrToFloatDef(Self.DurationEdit.GetText, LongBreakBaseDurationMinutes);
+
+  if intervalVal < 1.0 then
+    intervalVal := 1.0;
+  if durationVal < 1.0 then
+    durationVal := 1.0;
+
+  LongBreakBaseIntervalMinutes := intervalVal;
+  LongBreakBaseDurationMinutes := durationVal;
+
+  Simba.Log.Info(Format('[GUI] Long break cadence updated: %.2f minute break every %.2f minutes',
+    [LongBreakBaseDurationMinutes, LongBreakBaseIntervalMinutes]));
+
+  inherited;
+end;
+
+procedure TTitheFarmAdaptiveConfig.Run; override;
+var
+  tab: TTabSheet;
+begin
+  Self.Setup('Tithe Farm Adaptive V2');
+  Self.Start.SetOnClick(@Self.StartScript);
+
+  Self.AddTab('Script Settings');
+  tab := Self.Tabs[High(Self.Tabs)];
+
+  Self.CreateAccountManager(tab);
+
+  with Self.IntervalEdit do
+  begin
+    Create(tab);
+    SetCaption('Long break every ~X minutes:');
+    SetLeft(TControl.AdjustToDPI(40));
+    SetTop(TControl.AdjustToDPI(170));
+    SetWidth(TControl.AdjustToDPI(220));
+    SetText(FloatToStrF(LongBreakBaseIntervalMinutes, ffFixed, 6, 2));
+  end;
+
+  with Self.DurationEdit do
+  begin
+    Create(tab);
+    SetCaption('Long break duration (~minutes):');
+    SetLeft(Self.IntervalEdit.GetLeft());
+    SetTop(Self.IntervalEdit.GetBottom() + TControl.AdjustToDPI(12));
+    SetWidth(TControl.AdjustToDPI(220));
+    SetText(FloatToStrF(LongBreakBaseDurationMinutes, ffFixed, 6, 2));
+  end;
+
+  Self.CreateAntibanManager();
+  Self.CreateWaspLibSettings();
+  Self.CreateAPISettings();
+
+  inherited;
+end;
+
+procedure RunTitheAdaptiveConfig;
+var
+  ConfigForm: TTitheFarmAdaptiveConfig;
+begin
+  if not EnableGui then
+    Exit;
+
+  ConfigForm.Run;
+  EnableGui := False;
+end;
+{$ENDIF}
+
+initialization
+  RegisterScript('Tithe Farm Adaptive V2', TTitheFarmAdaptive);
+
+end.

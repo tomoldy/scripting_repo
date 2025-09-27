@@ -1,0 +1,1167 @@
+{$DEFINE SCRIPT_ID := '34f20198-b834-4087-aff7-eb61ea7add1c'}
+{$DEFINE SCRIPT_REVISION := '73'}
+{$DEFINE SCRIPT_GUI}
+{$I SRL-T/osr.simba}
+{$I WaspLib/osr.simba}
+
+{*
+  Comprehensive refactor of the tithe farm script. The original implementation
+  mixed state evaluation, patch helpers, and antiban plumbing inside a single
+  monolithic loop with repeated login guards. This rewrite separates concerns
+  into focused handlers:
+    • Session management (login, preparation, banking) lives in distinct state
+      handlers so behaviour is easy to trace and extend.
+    • Patch phases (plant → water → harvest) are orchestrated through a phase
+      controller that coordinates travel, interactions, and per-action telemetry.
+    • Antiban logic records every action, biases towards underused micro
+      behaviours, and controls SRL long breaks via a single gate keeping routine.
+
+  The result is a flatter control flow, fewer guard clauses, and clear logging
+  for every transition.
+*}
+
+type
+  ESeed = (GOLOVANOVA, BOLOGANO, LOGAVANO);
+
+  TTitheState = (
+    TS_INIT,
+    TS_LOGIN,
+    TS_PREPARE,
+    TS_WAIT_FOR_GAME,
+    TS_RUN_CYCLE,
+    TS_TURN_IN,
+    TS_HANDLE_REWARDS,
+    TS_IDLE,
+    TS_SHUTDOWN
+  );
+
+  TTithePhase = (PHASE_NONE, PHASE_PLANTING, PHASE_WATERING, PHASE_HARVESTING);
+
+  EMicroBehaviour = (MB_MOUSE_MOVE, MB_SMALL_CAMERA_ROTATION, MB_RANDOM_ROTATE, MB_HOVER_SKILLS);
+
+  TSeedProfile = record
+    Name: String;
+    XpPerHundred: Single;
+    SeedColor: TCTS2Color;
+  end;
+
+  TAntibanScheduler = record
+  private
+    NextMicroBreakAt, NextCameraAdjustAt, NextHoverAt, LastActionAt: UInt64;
+    ActionsSinceBreak: UInt32;
+    BreaksTaken: UInt32;
+    TotalBreakMs: UInt64;
+    MicroUsage: array[EMicroBehaviour] of UInt32;
+    LastBehaviour: EMicroBehaviour;
+    LongBreakWindowOpen: Boolean;
+    procedure ScheduleNextMicroBreak(const Reason: String);
+    procedure ScheduleNextCameraAdjust(const Reason: String);
+    procedure ScheduleNextHover(const Reason: String);
+  public
+    procedure Init;
+    procedure RecordAction(const Label: String);
+    procedure AllowLongBreaks(const Allow: Boolean; const Reason: String);
+    procedure Update(const Context: String; const SeedBlocker: Boolean);
+    procedure ResetForCycle(const Reason: String);
+    function AllowsLongBreak: Boolean;
+  end;
+
+  TTitheFarmer = record(TBaseWalkerScript)
+  private
+    { --- state orchestration --- }
+    State: TTitheState;
+    Phase: TTithePhase;
+    LoopStart: UInt64;
+    WalkIndex: Int32;
+    ShutdownAt: UInt64;
+
+    { --- inventory + configuration --- }
+    SelectedSeed: ESeed;
+    ActiveSeed: TSeedProfile;
+    SeedCountTarget: UInt32;
+    SeedBlocker: Boolean;
+
+    { --- farm geometry --- }
+    PlanterArray, WalkArray, BasePlanterArray: TPointArray;
+    PatchObjects, WalkObjects, FarmerNPC: TRSObject;
+
+    { --- antiban telemetry --- }
+    Humaniser: TAntibanScheduler;
+
+    { --- loop analytics --- }
+    CompletedLoops: UInt32;
+    NextNarrativeLoop: UInt32;
+
+    { state handlers }
+    procedure TransitionTo(const NextState: TTitheState; const Reason: String);
+    procedure TransitionPhase(const NextPhase: TTithePhase; const Reason: String);
+    procedure LogSessionSnapshot(const Reason: String);
+    procedure ProcessInit;
+    procedure ProcessLogin;
+    procedure ProcessPrepare;
+    procedure ProcessWaitForGame;
+    procedure ProcessRunCycle;
+    procedure ProcessTurnIn;
+    procedure ProcessHandleRewards;
+    procedure ProcessIdle;
+    procedure ProcessShutdown;
+
+    { antiban routines }
+    procedure InitialiseAntiban;
+    procedure RecordAction(const Label: String);
+    procedure AllowLongBreaks(const Allow: Boolean; const Reason: String);
+    procedure MaybeRunAntiban(const Context: String);
+
+    { preparation helpers }
+    procedure EnsureCompassAligned;
+    procedure EnsureChatFilters;
+    procedure MaybeUpgradeSeed;
+    procedure RefreshSeedProfile;
+    function EnsureSeeds: Boolean;
+    function EnsureWater: Boolean;
+    procedure ResetPatchCycle;
+
+    { patch helpers }
+    function CurrentPatchBounds(const HalfSize: Double): TCuboidEx;
+    function PatchIsSeeded: Boolean;
+    function PatchIsWatered: Boolean;
+    function PatchReadyToHarvest: Boolean;
+    function PatchWithered: Boolean;
+    procedure WalkToCurrentPatch;
+    procedure QueueNextPatch;
+    procedure RunPlantingPhase;
+    procedure RunWateringPhase;
+    procedure RunHarvestPhase;
+    procedure PerformPlant;
+    procedure PerformWater;
+    procedure PerformHarvest;
+    procedure ClearWithered;
+
+    { session helpers }
+    function InFarm: Boolean;
+    function InventoryHasFruit: Boolean;
+    function NeedWater: Boolean;
+    function NeedSeeds: Boolean;
+    function GameShouldRestart: Boolean;
+    function GameFinished: Boolean;
+    procedure NarrateMilestone(const Context: String; Force: Boolean = False);
+  public
+    procedure Setup; override;
+    procedure Run; override;
+    function GetSeedName: String;
+    function EstimatedXpPerHundred: Single;
+  end;
+
+var
+  BuyBoxes: Boolean := False;
+  BuySeedPack: Boolean := False;
+  UpgradeSeedBasedOnLevel: Boolean := True;
+  SeedXpPerHundred: Single := 96.6;
+
+const
+  WATERING_CANS_MIN = 12;
+  LONG_BREAK_IDLE_CONTEXT = 'idle-or-safe';
+  PLANterArray5: TPointArray = [
+    Point(2635, 2405), Point(2635, 2418), Point(2635, 2432), Point(2635, 2444),
+    Point(2635, 2466), Point(2635, 2478), Point(2635, 2491), Point(2635, 2503),
+    Point(2655, 2504), Point(2655, 2489), Point(2655, 2478), Point(2655, 2468),
+    Point(2655, 2442), Point(2655, 2432), Point(2655, 2419), Point(2655, 2406)
+  ];
+  WALKArray5: TPointArray = [
+    Point(2645, 2407), Point(2644, 2420), Point(2644, 2433), Point(2645, 2444),
+    Point(2645, 2468), Point(2645, 2480), Point(2645, 2492), Point(2644, 2503),
+    Point(2647, 2506), Point(2648, 2493), Point(2647, 2480), Point(2648, 2468),
+    Point(2647, 2444), Point(2648, 2432), Point(2648, 2421), Point(2647, 2408)
+  ];
+
+procedure Log(const Category, Message: String); inline;
+begin
+  WriteLn('[' + Category + '] ' + Message);
+end;
+
+procedure Logf(const Category, Fmt: String; const Args: array of const); inline;
+begin
+  Log(Category, Format(Fmt, Args));
+end;
+
+function BoolToWord(const Value: Boolean): String; inline;
+begin
+  if Value then
+    Result := 'yes'
+  else
+    Result := 'no';
+end;
+
+function SeedProfile(const Seed: ESeed): TSeedProfile;
+begin
+  case Seed of
+    GOLOVANOVA:
+      begin
+        Result.Name := 'Golovanova seed';
+        Result.XpPerHundred := 96.6;
+        Result.SeedColor := CTS2(5340626, 18, 0.16, 1.58);
+      end;
+    BOLOGANO:
+      begin
+        Result.Name := 'Bologano seed';
+        Result.XpPerHundred := 230.16;
+        Result.SeedColor := CTS2(6925129, 32, 0.50, 0.76);
+      end;
+    LOGAVANO:
+      begin
+        Result.Name := 'Logavano seed';
+        Result.XpPerHundred := 378.12;
+        Result.SeedColor := CTS2(11414709, 36, 0.07, 1.10);
+      end;
+  end;
+end;
+
+function FruitName(const Seed: ESeed): String;
+begin
+  case Seed of
+    GOLOVANOVA: Result := 'Golovanova fruit';
+    BOLOGANO: Result := 'Bologano fruit';
+    LOGAVANO: Result := 'Logavano fruit';
+  end;
+end;
+
+{==============================================================================
+  Utility helpers
+==============================================================================}
+
+function ToStateString(const State: TTitheState): String;
+begin
+  case State of
+    TS_INIT: Result := 'Initialise';
+    TS_LOGIN: Result := 'Login';
+    TS_PREPARE: Result := 'Prepare inventory';
+    TS_WAIT_FOR_GAME: Result := 'Await start';
+    TS_RUN_CYCLE: Result := 'Run cycle';
+    TS_TURN_IN: Result := 'Turn in fruit';
+    TS_HANDLE_REWARDS: Result := 'Rewards';
+    TS_IDLE: Result := 'Idle';
+    TS_SHUTDOWN: Result := 'Shutdown';
+  end;
+end;
+
+function ToPhaseString(const Phase: TTithePhase): String;
+begin
+  case Phase of
+    PHASE_NONE: Result := 'None';
+    PHASE_PLANTING: Result := 'Plant';
+    PHASE_WATERING: Result := 'Water';
+    PHASE_HARVESTING: Result := 'Harvest';
+  end;
+end;
+
+function MicroBehaviourToString(const Behaviour: EMicroBehaviour): String;
+begin
+  case Behaviour of
+    MB_MOUSE_MOVE: Result := 'mouse move';
+    MB_SMALL_CAMERA_ROTATION: Result := 'small camera rotation';
+    MB_RANDOM_ROTATE: Result := 'random rotate';
+    MB_HOVER_SKILLS: Result := 'skill hover';
+  else
+    Result := 'unknown';
+  end;
+end;
+
+{==============================================================================
+  Antiban implementation
+==============================================================================}
+
+procedure TAntibanScheduler.ScheduleNextMicroBreak(const Reason: String);
+var
+  interval: UInt64;
+begin
+  interval := Random(9000, 14000) + ActionsSinceBreak * Random(10, 16);
+  NextMicroBreakAt := SRL.Now() + interval;
+  Logf('ANTIBAN', 'Next micro break scheduled in %d ms (reason: %s, actions since break: %d)',
+    [Int64(interval), Reason, Int32(ActionsSinceBreak)]);
+end;
+
+procedure TAntibanScheduler.ScheduleNextCameraAdjust(const Reason: String);
+var
+  interval: UInt64;
+begin
+  interval := Random(16000, 26000);
+  NextCameraAdjustAt := SRL.Now() + interval;
+  Logf('ANTIBAN', 'Next camera adjust scheduled in %d ms (reason: %s)', [Int64(interval), Reason]);
+end;
+
+procedure TAntibanScheduler.ScheduleNextHover(const Reason: String);
+var
+  interval: UInt64;
+begin
+  interval := Random(24000, 36000);
+  NextHoverAt := SRL.Now() + interval;
+  Logf('ANTIBAN', 'Next skill hover scheduled in %d ms (reason: %s)', [Int64(interval), Reason]);
+end;
+
+procedure TAntibanScheduler.Init;
+var
+  behaviour: EMicroBehaviour;
+begin
+  LastActionAt := SRL.Now();
+  ActionsSinceBreak := 0;
+  LongBreakWindowOpen := True;
+  BreaksTaken := 0;
+  TotalBreakMs := 0;
+  LastBehaviour := Low(EMicroBehaviour);
+  for behaviour := Low(EMicroBehaviour) to High(EMicroBehaviour) do
+    MicroUsage[behaviour] := 0;
+
+  ScheduleNextMicroBreak('session start');
+  ScheduleNextCameraAdjust('session start');
+  ScheduleNextHover('session start');
+  Log('ANTIBAN', 'Humaniser initialised: telemetry reset and schedulers armed.');
+end;
+
+procedure TAntibanScheduler.RecordAction(const Label: String);
+begin
+  Inc(ActionsSinceBreak);
+  LastActionAt := SRL.Now();
+  Logf('ANTIBAN', 'Action recorded -> %s (actions since break: %d)', [Label, Int32(ActionsSinceBreak)]);
+end;
+
+procedure TAntibanScheduler.AllowLongBreaks(const Allow: Boolean; const Reason: String);
+begin
+  if LongBreakWindowOpen = Allow then
+    Exit;
+
+  LongBreakWindowOpen := Allow;
+  Antiban.SetLongBreakWindow(Allow);
+  if Allow then
+    Logf('ANTIBAN', 'Long break window opened (%s).', [Reason])
+  else
+    Logf('ANTIBAN', 'Long break window closed (%s).', [Reason]);
+end;
+
+procedure TAntibanScheduler.ResetForCycle(const Reason: String);
+begin
+  ActionsSinceBreak := 0;
+  LastActionAt := SRL.Now();
+  ScheduleNextMicroBreak(Reason);
+  ScheduleNextCameraAdjust(Reason);
+  ScheduleNextHover(Reason);
+end;
+
+function TAntibanScheduler.AllowsLongBreak: Boolean;
+begin
+  Result := LongBreakWindowOpen;
+end;
+
+procedure TAntibanScheduler.Update(const Context: String; const SeedBlocker: Boolean);
+var
+  nowTs, pauseMs: UInt64;
+  behaviour: EMicroBehaviour;
+  weights: array[EMicroBehaviour] of Double;
+  totalWeight, cumulative, roll: Double;
+  idx: Int32;
+begin
+  nowTs := SRL.Now();
+
+  if nowTs >= NextMicroBreakAt then
+  begin
+    pauseMs := Random(2500, 5200) + ActionsSinceBreak * Random(12, 18);
+    Logf('ANTIBAN', 'Micro break for %d ms (context: %s, actions: %d).',
+      [Int64(pauseMs), Context, Int32(ActionsSinceBreak)]);
+    SRL.Sleep(pauseMs);
+    Inc(BreaksTaken);
+    TotalBreakMs += pauseMs;
+    ActionsSinceBreak := 0;
+    if BreaksTaken > 0 then
+      Logf('ANTIBAN', 'Break summary -> total: %d, avg length: %d ms',
+        [Int32(BreaksTaken), Int64(TotalBreakMs div BreaksTaken)])
+    else
+      Log('ANTIBAN', 'Break summary -> total: 0, avg length: 0 ms');
+    ScheduleNextMicroBreak('post micro break');
+    ScheduleNextHover('post micro break');
+  end;
+
+  if nowTs >= NextCameraAdjustAt then
+  begin
+    Antiban.SmallCameraRotation();
+    Log('ANTIBAN', 'Camera adjusted.');
+    ScheduleNextCameraAdjust('camera event');
+  end;
+
+  if nowTs >= NextHoverAt then
+  begin
+    Antiban.HoverSkill(ERSSkill.FARMING);
+    Log('ANTIBAN', 'Hovered Farming skill.');
+    ScheduleNextHover('hover event');
+  end;
+
+  if SeedBlocker then
+    Exit;
+
+  if (nowTs - LastActionAt) < Random(3500, 5400) then
+    Exit;
+
+  totalWeight := 0.0;
+  for behaviour := Low(EMicroBehaviour) to High(EMicroBehaviour) do
+  begin
+    weights[behaviour] := 1.0 / (1 + MicroUsage[behaviour]);
+    if behaviour = LastBehaviour then
+      weights[behaviour] := weights[behaviour] * 0.5;
+    totalWeight += weights[behaviour];
+  end;
+
+  if totalWeight <= 0 then
+    Exit;
+
+  roll := Random(1000) / 1000.0;
+  cumulative := 0.0;
+  idx := Ord(Low(EMicroBehaviour));
+  for behaviour := Low(EMicroBehaviour) to High(EMicroBehaviour) do
+  begin
+    cumulative += weights[behaviour] / totalWeight;
+    if roll <= cumulative then
+    begin
+      idx := Ord(behaviour);
+      Break;
+    end;
+  end;
+
+  behaviour := EMicroBehaviour(idx);
+  case behaviour of
+    MB_MOUSE_MOVE: Mouse.RandomMovement();
+    MB_SMALL_CAMERA_ROTATION: Antiban.SmallCameraRotation();
+    MB_RANDOM_ROTATE: Antiban.RandomRotate();
+    MB_HOVER_SKILLS: Antiban.HoverSkill(ERSSkill.TOTAL);
+  end;
+
+  Inc(MicroUsage[behaviour]);
+  LastBehaviour := behaviour;
+  Logf('ANTIBAN', 'Micro behaviour executed -> %s (context: %s, usage count: %d)',
+    [MicroBehaviourToString(behaviour), Context, Int32(MicroUsage[behaviour])]);
+  ScheduleNextMicroBreak('micro behaviour roulette');
+  ScheduleNextCameraAdjust('micro behaviour roulette');
+  ScheduleNextHover('micro behaviour roulette');
+end;
+
+procedure TTitheFarmer.InitialiseAntiban;
+begin
+  Humaniser.Init;
+end;
+
+procedure TTitheFarmer.RecordAction(const Label: String);
+begin
+  Humaniser.RecordAction(Label);
+end;
+
+procedure TTitheFarmer.AllowLongBreaks(const Allow: Boolean; const Reason: String);
+begin
+  Humaniser.AllowLongBreaks(Allow, Reason);
+end;
+
+procedure TTitheFarmer.MaybeRunAntiban(const Context: String);
+begin
+  Humaniser.Update(Context, SeedBlocker);
+end;
+
+{==============================================================================
+  Setup & configuration
+==============================================================================}
+
+procedure TTitheFarmer.Setup;
+begin
+  inherited;
+  PlanterArray := PLANterArray5;
+  WalkArray := WALKArray5;
+  BasePlanterArray := PlanterArray;
+
+  PatchObjects.Setup(4, PlanterArray);
+  PatchObjects.Finder.Colors += CTS2(3035994, 11, 0.05, 0.19);
+  PatchObjects.UpText := ['> Patch'];
+
+  WalkObjects.Setup(4, WalkArray);
+  WalkObjects.UpText := ['> Patch'];
+
+  RSObjects.TitheWaterBarrels.SetupUpText(['> Water B']);
+  FarmerNPC.SetupUpText(['> Farmer Gricoller']);
+
+  SelectedSeed := GOLOVANOVA;
+  RefreshSeedProfile;
+  SeedCountTarget := 16;
+  MaybeUpgradeSeed;
+
+  WalkIndex := 0;
+  Phase := PHASE_NONE;
+  State := TS_INIT;
+  ShutdownAt := SRL.Now() + ONE_HOUR * 6;
+  CompletedLoops := 0;
+  NextNarrativeLoop := 1;
+  SeedBlocker := False;
+
+  InitialiseAntiban;
+end;
+
+function TTitheFarmer.GetSeedName: String;
+begin
+  Result := ActiveSeed.Name;
+end;
+
+function TTitheFarmer.EstimatedXpPerHundred: Single;
+begin
+  Result := ActiveSeed.XpPerHundred;
+end;
+
+procedure TTitheFarmer.MaybeUpgradeSeed;
+var
+  level: Int32;
+begin
+  if not UpgradeSeedBasedOnLevel then
+    Exit;
+  level := Skills.GetLevel(ERSSkill.FARMING);
+  if level >= 74 then
+    SelectedSeed := LOGAVANO
+  else if level >= 54 then
+    SelectedSeed := BOLOGANO
+  else
+    SelectedSeed := GOLOVANOVA;
+  RefreshSeedProfile;
+  Logf('SETUP', 'Farming level %d -> using %s', [level, GetSeedName]);
+end;
+
+procedure TTitheFarmer.RefreshSeedProfile;
+begin
+  ActiveSeed := SeedProfile(SelectedSeed);
+  SeedXpPerHundred := ActiveSeed.XpPerHundred;
+end;
+
+procedure TTitheFarmer.EnsureCompassAligned;
+begin
+  if (Minimap.GetCompassAngle < 80) or (Minimap.GetCompassAngle > 100) then
+  begin
+    Minimap.SetCompassAngle(90);
+    Log('SETUP', 'Compass realigned to north.');
+  end;
+end;
+
+procedure TTitheFarmer.EnsureChatFilters;
+begin
+  if ChatButtons.GetState(ERSChatButton.GAME_CHAT) <> ERSChatButtonState.ENABLED then
+  begin
+    ChatButtons.ChangeState(ERSChatButton.GAME_CHAT, ERSChatButtonState.ENABLED);
+    Log('SETUP', 'Game chat enabled.');
+  end;
+  if not ChatButtons.IsActive(ERSChatButton.ALL_CHAT) then
+  begin
+    ChatButtons.Open(ERSChatButton.ALL_CHAT);
+    Log('SETUP', 'All chat opened.');
+  end;
+end;
+
+function TTitheFarmer.EnsureSeeds: Boolean;
+begin
+  Result := Inventory.CountItem(GetSeedName) >= 16;
+  if Result then
+    Exit;
+
+  if not Bank.WalkOpen then
+  begin
+    Log('SEEDS', 'Unable to walk to bank chest.');
+    Exit(False);
+  end;
+
+  if not Bank.Withdraw(SeedCountTarget, GetSeedName) then
+  begin
+    Log('SEEDS', 'Failed to withdraw seeds.');
+    Bank.Close;
+    Exit(False);
+  end;
+
+  Bank.Close;
+  RecordAction('withdraw seeds');
+  Result := True;
+end;
+
+function TTitheFarmer.NeedSeeds: Boolean;
+begin
+  Result := Inventory.CountItem(GetSeedName) < 16;
+end;
+
+function TTitheFarmer.NeedWater: Boolean;
+begin
+  Result := Inventory.CountItem('Watering can') < WATERING_CANS_MIN;
+end;
+
+function TTitheFarmer.EnsureWater: Boolean;
+var
+  slot: Int32;
+  atpa: T2DPointArray;
+begin
+  Result := False;
+  RSObjects.TitheWaterBarrels.FindFromPosition(Self.RSW.GetMyPos(), atpa);
+  if atpa.Len = 0 then
+  begin
+    Log('WATER', 'Unable to locate water barrels.');
+    Exit(False);
+  end;
+
+  if Inventory.FindItem('Watering can', slot) then
+  begin
+    Inventory.SetSelectedSlot(slot);
+    Mouse.Move(atpa[0]);
+    Mouse.Click(MOUSE_LEFT);
+    if MainScreen.DidRedClick then
+      Result := WaitUntil(Inventory.CountItem('Watering can') = 0, 2000, 60000);
+  end
+  else if Inventory.FindItem('Gricoller''s can', slot) then
+  begin
+    Inventory.SetSelectedSlot(slot);
+    Mouse.Move(atpa[0]);
+    Mouse.Click(MOUSE_LEFT);
+    if MainScreen.DidRedClick then
+      WaitUntil(not Minimap.IsPlayerMoving, 2000, 60000);
+    Wait(2000, 4000);
+    Result := True;
+  end;
+
+  if Result then
+  begin
+    PlanterArray := BasePlanterArray;
+    RecordAction('refill water');
+  end;
+end;
+
+procedure TTitheFarmer.ResetPatchCycle;
+begin
+  WalkIndex := 0;
+  Phase := PHASE_PLANTING;
+  SeedBlocker := False;
+  Humaniser.ResetForCycle('cycle reset');
+  LoopStart := SRL.Now();
+  Log('PHASE', 'Cycle reset -> planting phase.');
+  NarrateMilestone('resetting patches for planting', CompletedLoops = 0);
+end;
+
+{==============================================================================
+  Patch logic
+==============================================================================}
+
+function TTitheFarmer.CurrentPatchBounds(const HalfSize: Double): TCuboidEx;
+begin
+  Result := Self.RSW.GetCuboidMS(PlanterArray[WalkIndex], [HalfSize, HalfSize, 0], [0, 0]);
+end;
+
+function TTitheFarmer.PatchIsSeeded: Boolean;
+var
+  cuboid: TCuboidEx;
+begin
+  cuboid := CurrentPatchBounds(1.0);
+  Result := SRL.CountColor(ActiveSeed.SeedColor, cuboid.Bounds) >= 1;
+end;
+
+function TTitheFarmer.PatchIsWatered: Boolean;
+var
+  cuboid: TCuboidEx;
+begin
+  cuboid := CurrentPatchBounds(1.2);
+  Result := SRL.CountColor(CTS2(4009760, 11, 0.14, 0.54), cuboid.Bounds) >= 40;
+end;
+
+function TTitheFarmer.PatchReadyToHarvest: Boolean;
+var
+  cuboid: TCuboidEx;
+begin
+  cuboid := CurrentPatchBounds(2.5);
+  Result := SRL.CountColor(CTS2(6008201, 14, 0.09, 0.81), cuboid.Bounds) >= 100;
+end;
+
+function TTitheFarmer.PatchWithered: Boolean;
+var
+  cuboid: TCuboidEx;
+begin
+  cuboid := CurrentPatchBounds(1.5);
+  Result := SRL.CountColor(CTS2(5133126, 16, 0.42, 0.35), cuboid.Bounds) >= 100;
+end;
+
+procedure TTitheFarmer.WalkToCurrentPatch;
+var
+  destination: TPoint;
+begin
+  destination := WalkArray[WalkIndex];
+  if Self.RSW.GetMyPos().DistanceTo(destination) > 3 then
+  begin
+    Self.RSW.WebWalk(destination);
+    Minimap.WaitMoving;
+  end;
+end;
+
+procedure TTitheFarmer.QueueNextPatch;
+begin
+  Inc(WalkIndex);
+end;
+
+procedure TTitheFarmer.RunPlantingPhase;
+begin
+  if WalkIndex > High(PlanterArray) then
+  begin
+    TransitionPhase(PHASE_WATERING, 'all patches seeded');
+    WalkIndex := 0;
+    Exit;
+  end;
+
+  WalkToCurrentPatch;
+  if PatchIsSeeded then
+  begin
+    QueueNextPatch;
+    Exit;
+  end;
+
+  PerformPlant;
+end;
+
+procedure TTitheFarmer.RunWateringPhase;
+begin
+  if WalkIndex > High(PlanterArray) then
+  begin
+    TransitionPhase(PHASE_HARVESTING, 'watering complete');
+    WalkIndex := 0;
+    Exit;
+  end;
+
+  WalkToCurrentPatch;
+  if PatchIsWatered then
+  begin
+    QueueNextPatch;
+    Exit;
+  end;
+
+  PerformWater;
+end;
+
+procedure TTitheFarmer.RunHarvestPhase;
+begin
+  if WalkIndex > High(PlanterArray) then
+  begin
+    TransitionTo(TS_TURN_IN, 'harvest loop finished');
+    Exit;
+  end;
+
+  WalkToCurrentPatch;
+  if PatchReadyToHarvest then
+    PerformHarvest;
+  QueueNextPatch;
+end;
+
+procedure TTitheFarmer.ClearWithered;
+begin
+  Mouse.Move(CurrentPatchBounds(1.5).Center);
+  Mouse.Click(MOUSE_LEFT);
+  Wait(600, 900);
+  RecordAction('clear withered patch');
+end;
+
+procedure TTitheFarmer.PerformPlant;
+var
+  beforeCount: Int32;
+begin
+  beforeCount := Inventory.CountItem(GetSeedName);
+  if beforeCount = 0 then
+  begin
+    TransitionTo(TS_PREPARE, 'out of seeds while planting');
+    Exit;
+  end;
+
+  Inventory.ClickItem(GetSeedName, 'Use');
+  Mouse.Move(CurrentPatchBounds(1.0).Center);
+  Mouse.Click(MOUSE_LEFT);
+  if WaitUntil(Inventory.CountItem(GetSeedName) < beforeCount, 50, 6000) then
+  begin
+    RecordAction('plant seed');
+    SeedBlocker := True;
+  end;
+end;
+
+procedure TTitheFarmer.PerformWater;
+var
+  slot: Int32;
+begin
+  if PatchWithered then
+  begin
+    ClearWithered;
+    Exit;
+  end;
+
+  if not PatchIsSeeded then
+  begin
+    QueueNextPatch;
+    Exit;
+  end;
+
+  if Inventory.FindItem('Watering can', slot) then
+  begin
+    Inventory.SetSelectedSlot(slot);
+    Mouse.Move(CurrentPatchBounds(1.2).Center);
+    Mouse.Click(MOUSE_LEFT);
+    Wait(600, 900);
+    if PatchIsWatered then
+    begin
+      RecordAction('water patch');
+      SeedBlocker := False;
+    end
+    else
+      Log('PATCH', 'Water interaction failed, rechecking next cycle.');
+  end
+  else if Inventory.FindItem('Gricoller''s can', slot) then
+  begin
+    Inventory.SetSelectedSlot(slot);
+    Mouse.Move(CurrentPatchBounds(1.2).Center);
+    Mouse.Click(MOUSE_LEFT);
+    Wait(600, 900);
+    RecordAction('water patch');
+    SeedBlocker := False;
+  end
+  else
+  begin
+    TransitionTo(TS_PREPARE, 'no watering can available');
+  end;
+end;
+
+procedure TTitheFarmer.PerformHarvest;
+var
+  startXp: Int32;
+begin
+  startXp := XPBar.Read;
+  Mouse.Move(CurrentPatchBounds(2.4).Center);
+  Mouse.Click(MOUSE_LEFT);
+  if WaitUntil(XPBar.Read > startXp, 200, 6000) then
+  begin
+    Inc(Self.TotalActions);
+    RecordAction('harvest patch');
+    SeedBlocker := False;
+  end;
+end;
+
+{==============================================================================
+  Session helpers
+==============================================================================}
+
+function TTitheFarmer.InFarm: Boolean;
+begin
+  Result := Inventory.ContainsItem('Gricoller''s fertiliser');
+end;
+
+function TTitheFarmer.InventoryHasFruit: Boolean;
+begin
+  Result := Inventory.ContainsAny([
+    FruitName(GOLOVANOVA),
+    FruitName(BOLOGANO),
+    FruitName(LOGAVANO)
+  ]);
+end;
+
+function TTitheFarmer.GameShouldRestart: Boolean;
+begin
+  Result := not InFarm;
+end;
+
+function TTitheFarmer.GameFinished: Boolean;
+begin
+  Result := InventoryHasFruit and (Inventory.CountItem(GetSeedName) <= 1);
+end;
+
+procedure TTitheFarmer.NarrateMilestone(const Context: String; Force: Boolean);
+begin
+  if Force or (CompletedLoops >= NextNarrativeLoop) then
+  begin
+    Logf('NARRATIVE', '%s (loop #%d)', [Context, Int32(CompletedLoops + 1)]);
+    NextNarrativeLoop := CompletedLoops + 2 + Random(1, 3);
+  end;
+end;
+
+{==============================================================================
+  State transitions
+==============================================================================}
+
+procedure TTitheFarmer.TransitionTo(const NextState: TTitheState; const Reason: String);
+begin
+  if State = NextState then
+    Exit;
+  Logf('STATE', '%s -> %s (%s)', [ToStateString(State), ToStateString(NextState), Reason]);
+  State := NextState;
+  Self.Action := ToStateString(State);
+  LogSessionSnapshot('state change');
+end;
+
+procedure TTitheFarmer.TransitionPhase(const NextPhase: TTithePhase; const Reason: String);
+begin
+  if Phase = NextPhase then
+    Exit;
+  Logf('PHASE', '%s -> %s (%s)', [ToPhaseString(Phase), ToPhaseString(NextPhase), Reason]);
+  Phase := NextPhase;
+  LogSessionSnapshot('phase change');
+end;
+
+procedure TTitheFarmer.LogSessionSnapshot(const Reason: String);
+var
+  seeds, watering, fruit: Int32;
+begin
+  if not RSClient.IsLoggedIn then
+  begin
+    Logf('DEBUG', '%s | state=%s phase=%s index=%d (not logged in)',
+      [Reason, ToStateString(State), ToPhaseString(Phase), WalkIndex]);
+    Exit;
+  end;
+
+  seeds := Inventory.CountItem(GetSeedName);
+  watering := Inventory.CountItem('Watering can');
+  if Inventory.ContainsItem('Gricoller''s can') then
+    Inc(watering);
+  fruit := Inventory.CountItem(FruitName(GOLOVANOVA))
+    + Inventory.CountItem(FruitName(BOLOGANO))
+    + Inventory.CountItem(FruitName(LOGAVANO));
+
+  Logf('DEBUG', '%s | state=%s phase=%s patch=%d/%d loops=%d seeds=%d water=%d fruit=%d long-break=%s',
+    [Reason, ToStateString(State), ToPhaseString(Phase), WalkIndex + 1,
+     Int32(Length(PlanterArray)), Int32(CompletedLoops), seeds, watering, fruit,
+     BoolToWord(Humaniser.AllowsLongBreak)]);
+end;
+
+{==============================================================================
+  State processors
+==============================================================================}
+
+procedure TTitheFarmer.ProcessInit;
+begin
+  EnsureCompassAligned;
+  EnsureChatFilters;
+  TransitionTo(TS_LOGIN, 'initial setup complete');
+end;
+
+procedure TTitheFarmer.ProcessLogin;
+begin
+  if RSClient.IsLoggedIn then
+  begin
+    TransitionTo(TS_PREPARE, 'session already active');
+    Exit;
+  end;
+
+  if login.LoginPlayer() then
+  begin
+    Log('LOGIN', 'Successfully logged in.');
+    TransitionTo(TS_PREPARE, 'login success');
+  end
+  else
+  begin
+    Log('LOGIN', 'Login failed, retrying.');
+    SRL.Sleep(5000);
+  end;
+end;
+
+procedure TTitheFarmer.ProcessPrepare;
+begin
+  if not RSClient.IsLoggedIn then
+  begin
+    TransitionTo(TS_LOGIN, 'lost session during prepare');
+    Exit;
+  end;
+
+  EnsureCompassAligned;
+  EnsureChatFilters;
+
+  if NeedSeeds and not EnsureSeeds then
+    Exit;
+
+  if NeedWater and not EnsureWater then
+    Exit;
+
+  if GameShouldRestart then
+  begin
+    Self.RSW.WebWalk([2655, 2470]);
+    Minimap.WaitMoving;
+    Exit;
+  end;
+
+  ResetPatchCycle;
+  TransitionTo(TS_WAIT_FOR_GAME, 'supplies confirmed');
+end;
+
+procedure TTitheFarmer.ProcessWaitForGame;
+begin
+  AllowLongBreaks(True, 'waiting for game');
+  MaybeRunAntiban('waiting');
+
+  if InventoryHasFruit then
+  begin
+    TransitionTo(TS_TURN_IN, 'fruit detected before start');
+    Exit;
+  end;
+
+  TransitionTo(TS_RUN_CYCLE, 'game start assumed');
+end;
+
+procedure TTitheFarmer.ProcessRunCycle;
+begin
+  AllowLongBreaks(False, 'actively farming');
+  MaybeRunAntiban('cycle');
+
+  if GameFinished then
+  begin
+    Inc(CompletedLoops);
+    NarrateMilestone('completed a full patch loop');
+    TransitionPhase(PHASE_NONE, 'game finished');
+    TransitionTo(TS_TURN_IN, 'fruit ready');
+    Exit;
+  end;
+
+  case Phase of
+    PHASE_PLANTING: RunPlantingPhase;
+    PHASE_WATERING: RunWateringPhase;
+    PHASE_HARVESTING: RunHarvestPhase;
+    PHASE_NONE: TransitionPhase(PHASE_PLANTING, 'phase reset');
+  end;
+end;
+
+procedure TTitheFarmer.ProcessTurnIn;
+var
+  tries: Int32;
+begin
+  AllowLongBreaks(False, 'handing in fruit');
+  MaybeRunAntiban('turn-in');
+
+  if not InventoryHasFruit then
+  begin
+    TransitionTo(TS_HANDLE_REWARDS, 'nothing to hand in');
+    Exit;
+  end;
+
+  for tries := 0 to 2 do
+  begin
+    if FarmerNPC.Find then
+    begin
+      Mouse.Click(FarmerNPC.MidPoint, MOUSE_LEFT);
+      if WaitUntil(not InventoryHasFruit, 200, 6000) then
+      begin
+        RecordAction('turn in fruit');
+        NarrateMilestone('delivered fruit to Gricoller', True);
+        TransitionTo(TS_HANDLE_REWARDS, 'fruit delivered');
+        Exit;
+      end;
+    end;
+    Self.RSW.WebWalk([2653, 2472]);
+    Minimap.WaitMoving;
+  end;
+
+  Log('TURN-IN', 'Unable to hand in fruit, retrying.');
+end;
+
+procedure TTitheFarmer.ProcessHandleRewards;
+begin
+  AllowLongBreaks(True, 'post turn-in');
+  MaybeRunAntiban('handle rewards');
+
+  if BuySeedPack and Inventory.ContainsItem('Seed pack') then
+  begin
+    Inventory.ClickItem('Seed pack');
+    RecordAction('open seed pack');
+    Wait(1200, 1600);
+  end;
+
+  if BuyBoxes and Inventory.ContainsItem('Seed box') then
+  begin
+    Inventory.ClickItem('Seed box');
+    RecordAction('open seed box');
+    Wait(1200, 1600);
+  end;
+
+  TransitionTo(TS_IDLE, 'rewards processed');
+end;
+
+procedure TTitheFarmer.ProcessIdle;
+begin
+  AllowLongBreaks(True, LONG_BREAK_IDLE_CONTEXT);
+  MaybeRunAntiban('idle');
+
+  if SeedBlocker then
+    SeedBlocker := False;
+
+  if NeedSeeds or NeedWater then
+  begin
+    TransitionTo(TS_PREPARE, 'needs supplies during idle');
+    Exit;
+  end;
+
+  if InventoryHasFruit then
+  begin
+    TransitionTo(TS_TURN_IN, 'fruit found during idle');
+    Exit;
+  end;
+
+  if SRL.Now() >= ShutdownAt then
+  begin
+    TransitionTo(TS_SHUTDOWN, 'timer reached');
+    Exit;
+  end;
+
+  if (SRL.Now() - LoopStart) > ONE_MINUTE * 40 then
+    TransitionTo(TS_SHUTDOWN, 'failsafe runtime');
+end;
+
+procedure TTitheFarmer.ProcessShutdown;
+begin
+  Log('SCRIPT', 'Shutdown requested.');
+  TerminateScript(Self.Name + ' completed runtime.');
+end;
+
+{==============================================================================
+  Main runtime
+==============================================================================}
+
+procedure TTitheFarmer.Run;
+begin
+  LoopStart := SRL.Now();
+  while not Self.Terminated do
+  begin
+    case State of
+      TS_INIT: ProcessInit;
+      TS_LOGIN: ProcessLogin;
+      TS_PREPARE: ProcessPrepare;
+      TS_WAIT_FOR_GAME: ProcessWaitForGame;
+      TS_RUN_CYCLE: ProcessRunCycle;
+      TS_TURN_IN: ProcessTurnIn;
+      TS_HANDLE_REWARDS: ProcessHandleRewards;
+      TS_IDLE: ProcessIdle;
+      TS_SHUTDOWN: ProcessShutdown;
+    end;
+
+    if State = TS_SHUTDOWN then
+      Break;
+
+    SRL.Sleep(150, 220);
+  end;
+end;
+
+{==============================================================================
+  Text report
+==============================================================================}
+
+function TBaseScript.BuildTextReport(): TStringArray; override;
+var
+  elapsed: UInt64;
+begin
+  elapsed := Self.TimeRunning.ElapsedTime();
+  Result += ' Action        : ' + Self.Action;
+  Result += ' Runtime       : ' + SRL.MsToTime(elapsed, Time_Short).Strip();
+  Result += ' Total Actions : ' + ToStr(Self.TotalActions);
+  Result += ' Harvest/Hour  : ' + ToStr(NumberPerHour(Self.TotalActions, elapsed));
+  Result += ' Total Exp     : ' + SRL.FormatNumber(XPBar.TotalEarnedXP(), 2);
+  Result += ' Est. Exp/Hour : ' + SRL.FormatNumber(NumberPerHour(Self.TotalActions * SeedXpPerHundred, elapsed), 2);
+  Result += '';
+end;
+
+{==============================================================================
+  Entry point
+==============================================================================}
+
+var
+  Farmer: TTitheFarmer;
+
+begin
+  Farmer.Setup;
+  Farmer.Run;
+end.
