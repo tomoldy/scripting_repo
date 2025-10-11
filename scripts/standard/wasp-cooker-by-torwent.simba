@@ -73,7 +73,41 @@ type
 
     Cooking: Boolean;
     UsingFire: Boolean;
+
+    NextCamJitterAt: UInt64;
+    NextFocusLossAt: UInt64;
   end;
+
+
+procedure TCooker.SetupAntibanProfile();
+begin
+  Mouse.Speed := SRL.NormalRange(16, 22);
+  Mouse.Gravity := SRL.NormalRange(10, 18);
+  Mouse.Wind := SRL.NormalRange(2, 5);
+  Mouse.MissChance := SRL.NormalRange(6, 12);
+
+  Self.NextCamJitterAt := UInt64(GetTickCount()) + UInt64(SRL.NormalRange(25000, 45000));
+  Self.NextFocusLossAt := UInt64(GetTickCount()) + UInt64(SRL.NormalRange(480000, 840000));
+end;
+
+procedure TCooker.MaybeAmbient();
+var
+  now: UInt64;
+begin
+  now := UInt64(GetTickCount());
+
+  if (Self.NextCamJitterAt <> 0) and (now >= Self.NextCamJitterAt) then
+  begin
+    Antiban.RandomRotate();
+    Self.NextCamJitterAt := now + UInt64(SRL.NormalRange(25000, 45000));
+  end;
+
+  if (Self.NextFocusLossAt <> 0) and (now >= Self.NextFocusLossAt) then
+  begin
+    Antiban.LoseFocus(SRL.NormalRange(600, 1800));
+    Self.NextFocusLossAt := now + UInt64(SRL.NormalRange(480000, 840000));
+  end;
+end;
 
 
 procedure TCooker.SetupItems();
@@ -170,6 +204,7 @@ begin
 
   Self.SetupItems();
   Self.SetupLocation();
+  Self.SetupAntibanProfile();
 end;
 
 
@@ -353,6 +388,9 @@ begin
 
       ECookerState.END_SCRIPT: Break;
     end;
+
+    if not RSInterface.IsOpen() then
+      Self.MaybeAmbient();
 
     Self.DoAntiban();
   until Self.ShouldStop();
