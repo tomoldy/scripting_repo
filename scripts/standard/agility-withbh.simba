@@ -23,14 +23,13 @@ type
     BirdhouseCheckbox, SleepCheckbox, FarmRunNowCheckbox,
     BlockInputCheckbox, FarmCheckbox: TLabeledCheckBox;
     BreakForInput, BreakAfterInput, BankTabInput: TLabeledEdit;
-    FoodInput, CourseInput: TLabeledCombobox;
+    FoodInput, CourseInput, HerbSeedCombo, FlowerSeedCombo: TLabeledCombobox;
     MagicSecateursCheckbox, CatherbyHerbCheckbox, HosidiusHerbCheckbox,
     CatherbyFlowerCheckbox, HosidiusFlowerCheckbox, CompostFlowersCheckbox,
     BarbarianDibberCheckbox,
     RunePouchCheckbox: TLabeledCheckBox;
     ScriptInfo, ScriptTitle, AntibanNote: TLabel;
     CompostInput: TLabeledCombobox;
-    SeedInput: TLabeledEdit;
   end;
 
   TObstacle = record
@@ -171,7 +170,7 @@ var
   AgilityRSW: TRSWalker;
   ReturnSpell: ERSSpell;
   BankBooth: TRSObject;
-  Food, Seed: TRSItem;
+  Food, Seed, FlowerSeed: TRSItem;
   GUI: TAgilityGUI;
   Course: ECourse;
   Farm: TFarmRun;
@@ -1819,6 +1818,34 @@ var
 begin
   for Item in Items do
     Self += Item;
+end;
+
+const
+  HERB_SEEDS: TRSItemArray = ['Guam seed', 'Marrentill seed', 'Tarromin seed', 'Harralander seed',
+                              'Ranarr seed', 'Toadflax seed', 'Irit seed', 'Avantoe seed',
+                              'Kwuarm seed', 'Snapdragon seed', 'Cadantine seed', 'Lantadyme seed',
+                              'Dwarf weed seed', 'Torstol seed'];
+
+  FLOWER_SEEDS: TRSItemArray = ['Marigold seed', 'Rosemary seed', 'Nasturtium seed', 'Woad seed',
+                                'Limpwurt seed', 'White lily seed'];
+
+function GetSeedIndex(const Seeds: TRSItemArray; const Seed: TRSItem): Int32;
+var
+  i: Int32;
+begin
+  for i := 0 to High(Seeds) do
+    if SameText(Seeds[i], Seed) then
+      Exit(i);
+
+  Result := -1;
+end;
+
+function EnsureSeedInList(const Seeds: TRSItemArray; const Seed, DefaultSeed: TRSItem): TRSItem;
+begin
+  if GetSeedIndex(Seeds, Seed) <> -1 then
+    Exit(Seed);
+
+  Result := DefaultSeed;
 end;
 
 function TFarmRun.GetNextTime(): Int32;
@@ -3776,6 +3803,7 @@ end;
 function TAgilityGUI.CreateFarmRunSettings(): TTabSheet;
 var
   Info: TLabel;
+  HerbIdx, FlowerIdx: Int32;
 begin
   Self.AddTab('Farm Run Settings');
   Result := Self.GetTab('Farm Run Settings');
@@ -3805,7 +3833,7 @@ begin
   with Self.HosidiusFlowerCheckbox do
   begin
     Create(Result);
-    SetCaption('Hosidius Limpwurt');
+    SetCaption('Hosidius Flower');
     SetTooltip('');
     SetLeft(TControl.AdjustToDPI(380));
     SetTop(TControl.AdjustToDPI(110));
@@ -3823,7 +3851,7 @@ begin
   with Self.CatherbyFlowerCheckbox do
   begin
     Create(Result);
-    SetCaption('Catherby Limpwurt');
+    SetCaption('Catherby Flower');
     SetTooltip('');
     SetLeft(TControl.AdjustToDPI(380));
     SetTop(TControl.AdjustToDPI(70));
@@ -3883,13 +3911,32 @@ begin
     SetCaption('Compost:');
   end;
 
-  with Self.SeedInput do
+  with Self.HerbSeedCombo do
   begin
     Create(Result);
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(110));
     SetCaption('Herb Seed:');
-    SetText('Toadflax seed');
+    SetStyle(csDropDownList);
+    AddItemArray(HERB_SEEDS);
+    HerbIdx := GetSeedIndex(HERB_SEEDS, 'Ranarr seed');
+    if HerbIdx < 0 then
+      HerbIdx := 0;
+    SetItemIndex(HerbIdx);
+  end;
+
+  with Self.FlowerSeedCombo do
+  begin
+    Create(Result);
+    SetLeft(TControl.AdjustToDPI(30));
+    SetTop(TControl.AdjustToDPI(150));
+    SetCaption('Flower Seed:');
+    SetStyle(csDropDownList);
+    AddItemArray(FLOWER_SEEDS);
+    FlowerIdx := GetSeedIndex(FLOWER_SEEDS, 'Limpwurt seed');
+    if FlowerIdx < 0 then
+      FlowerIdx := 0;
+    SetItemIndex(FlowerIdx);
   end;
 end;
 
@@ -4120,6 +4167,8 @@ begin
 end;
 
 procedure TAgilityGUI.StartScript(Sender: TObject); override;
+var
+  HerbIdx, FlowerIdx: Int32;
 begin
   DoBirdhouseRuns := Self.BirdhouseCheckbox.IsChecked();
   TakeSleeps := Self.SleepCheckbox.IsChecked();
@@ -4151,7 +4200,18 @@ begin
     BarbarianDibber := Self.BarbarianDibberCheckbox.IsChecked();
     FarmRunNow := Self.FarmRunNowCheckbox.IsChecked();
     CompostFlowers := Self.CompostFlowersCheckbox.IsChecked();
-    Seed := Self.SeedInput.GetText();
+    Seed := EnsureSeedInList(HERB_SEEDS, Self.HerbSeedCombo.GetText(), 'Ranarr seed');
+    FlowerSeed := EnsureSeedInList(FLOWER_SEEDS, Self.FlowerSeedCombo.GetText(), 'Limpwurt seed');
+
+    HerbIdx := GetSeedIndex(HERB_SEEDS, Seed);
+    if HerbIdx < 0 then
+      HerbIdx := 0;
+    Self.HerbSeedCombo.SetItemIndex(HerbIdx);
+
+    FlowerIdx := GetSeedIndex(FLOWER_SEEDS, FlowerSeed);
+    if FlowerIdx < 0 then
+      FlowerIdx := 0;
+    Self.FlowerSeedCombo.SetItemIndex(FlowerIdx);
   end;
 
   inherited;
@@ -4521,7 +4581,7 @@ begin
     end;
 
     if HosidiusFlower then
-      Farm.AddPatch(EFarmPatch.HOSIDIOUS_FLOWER, ETravelMethod.HOUSE_TELEPORT, 'Limpwurt seed');
+      Farm.AddPatch(EFarmPatch.HOSIDIOUS_FLOWER, ETravelMethod.HOUSE_TELEPORT, FlowerSeed);
 
     if CatherbyHerb then
     begin
@@ -4530,7 +4590,7 @@ begin
     end;
 
     if CatherbyFlower then
-      Farm.AddPatch(EFarmPatch.CATHERBY_FLOWER, ETravelMethod.CAMELOT_TELEPORT, 'Limpwurt seed');
+      Farm.AddPatch(EFarmPatch.CATHERBY_FLOWER, ETravelMethod.CAMELOT_TELEPORT, FlowerSeed);
 
     case CompostMethod of
       ECompostMethod.BOTTOMLESS:
@@ -4557,7 +4617,7 @@ begin
 
     if HosidiusFlower or CatherbyFlower then
     begin
-      FarmItems += 'Limpwurt seed';
+      FarmItems += FlowerSeed;
       FarmItemAmounts += 2;
     end;
 
@@ -4583,11 +4643,12 @@ begin
     WriteDebug(ToStr('Farm runs enabled.'));
     WriteDebug(ToStr('Patches length: ', Length(Farm.Patches)));
     WriteDebug(ToStr('Herb Seed: ', Seed));
+    WriteDebug(ToStr('Flower Seed: ', FlowerSeed));
     WriteDebug(ToStr('Hosidius Flower / Herb: ', HosidiusFlower, ' / ', HosidiusHerb));
     WriteDebug(ToStr('Catherby Flower / Herb: ', CatherbyFlower, ' / ', CatherbyHerb));
     WriteDebug(ToStr('Farm Run Timer: ', Farm.ReadyTimer.TimeRemaining()));
     if not CompostFlowers then
-      WriteDebug('Flower composting disabled; limpwurt patches will be skipped for compost.');
+      WriteDebug(ToStr('Flower composting disabled; ', FlowerSeed, ' patches will be skipped for compost.'));
   end;
 
   if BirdhouseRuns or FarmRuns then
