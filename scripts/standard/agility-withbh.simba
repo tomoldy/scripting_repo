@@ -366,7 +366,7 @@ begin
     Exit(true);
 
   //Can't count seeds while the slot is selected.
-  if Inventory.GetSelectedSlot() = -1 then
+  if Inventory.GetSelectedSlot() <> -1 then
     Exit(true);
 
   tools := ['Chisel', 'Hammer'];
