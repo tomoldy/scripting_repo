@@ -198,9 +198,17 @@ var
 
   NP_LastProgressTime, NP_LastLog: UInt64;
   ABNextCamJitterAt, ABNextBreakletAt: UInt64;
+  SystemUpdateCheckTimer: TCountdown;
+  SystemUpdateWarningShown: Boolean;
+  SystemUpdateOverlayMessage: String;
+  PendingSystemUpdateLogout: Boolean;
+  SystemUpdateThresholdMinutes: Int32;
+  SystemUpdateLogoutDelayedLogged: Boolean;
+  FarmRunActive, BirdhouseRunActive: Boolean;
   ABMouseSpeed, ABMouseGravity, ABMouseWind, ABMouseMiss: Int32;
 
 procedure ReleaseRealInput(); forward;
+procedure CheckSystemUpdate(); forward;
 
 function TMushroom.GetMushButton() : ERSMushTreeButton;
 begin
@@ -1272,6 +1280,8 @@ begin
 
   while not Self.HasRunFinished do
   begin
+    CheckSystemUpdate();
+
     //Re-log in during run
     if not RSClient.IsLoggedIn() then
     begin
@@ -1327,7 +1337,13 @@ end;
 
 procedure TBirdHouseInclude.DoBirdHouseRun();
 begin
-  Self.BirdhouseRun();
+  BirdhouseRunActive := True;
+  try
+    Self.BirdhouseRun();
+  finally
+    BirdhouseRunActive := False;
+    CheckSystemUpdate();
+  end;
 
   if(Self.TaskInterval < (50 * ONE_MINUTE)) then
     Self.TaskInterval := 50 * ONE_MINUTE;
@@ -3663,6 +3679,154 @@ begin
   SetLength(Self.HarvestQuantities, Length(LeprechaunItems));
 end;
 
+procedure UpdateSystemUpdateOverlay(const Message: String);
+begin
+  if SystemUpdateOverlayMessage = Message then
+    Exit;
+
+  SystemUpdateOverlayMessage := Message;
+
+  if Overlay.Enabled then
+    Overlay.Update();
+end;
+
+function IsPlayerBusyForSystemUpdate(): Boolean;
+var
+  PlayerBox: TBox;
+begin
+  Result := False;
+
+  if FarmRunActive or BirdhouseRunActive then
+    Exit(True);
+
+  if not RSClient.IsLoggedIn() then
+    Exit(False);
+
+  if Minimap.IsPlayerMoving() then
+    Exit(True);
+
+  PlayerBox := Mainscreen.GetPlayerBox();
+  Result := SRL.IsAnimating(PlayerBox, Mainscreen.NormalizeDistance(450), 350, 2);
+end;
+
+procedure SendSystemUpdateWebhook(const Message: String);
+begin
+  {$IF DECLARED(Discord)}
+    {$IF DECLARED(ENABLEWEBHOOKS)}
+    if ENABLEWEBHOOKS then
+    begin
+      try
+        Discord.Webhook.Content := Message;
+        Discord.Send();
+      except
+        WriteLn('[Discord] Failed to send system update notification.');
+      end;
+    end;
+    {$ENDIF}
+  {$ENDIF}
+end;
+
+procedure HandlePendingSystemUpdate();
+var
+  Reason: String;
+  LogoutSucceeded: Boolean;
+  RuntimeText: String;
+  ThresholdText: String;
+begin
+  if not PendingSystemUpdateLogout then
+    Exit;
+
+  if not RSClient.IsLoggedIn() then
+  begin
+    TerminateScript('System update detected - safe logout completed');
+    Exit;
+  end;
+
+  if SystemUpdateThresholdMinutes > 0 then
+    ThresholdText := 'System update <= ' + IntToStr(SystemUpdateThresholdMinutes) + 'm'
+  else
+    ThresholdText := 'System update';
+
+  if IsPlayerBusyForSystemUpdate() then
+  begin
+    if not SystemUpdateLogoutDelayedLogged then
+    begin
+      WriteLn('System update detected but player is busy. Waiting to logout safely once idle.');
+      UpdateSystemUpdateOverlay(ThresholdText + ' - waiting for idle');
+      SystemUpdateLogoutDelayedLogged := True;
+    end;
+    Exit;
+  end;
+
+  RuntimeText := SRL.MsToTime(GetTimeRunning(), Time_Short);
+  Reason := 'System update detected - safe logout completed';
+
+  UpdateSystemUpdateOverlay(ThresholdText + ' - logging out safely');
+  WriteLn('System update detected while idle - logging out safely.');
+  SendSystemUpdateWebhook('**SYSTEM UPDATE** Logging out safely (' + ThresholdText + '). Runtime: ' + RuntimeText);
+
+  Logout.ClickLogout();
+  LogoutSucceeded := WaitUntil(not RSClient.IsLoggedIn(), 250, 7500);
+
+  PendingSystemUpdateLogout := False;
+
+  if not LogoutSucceeded then
+  begin
+    WriteLn('Warning: attempted logout for system update but logout confirmation was not detected.');
+    TerminateScript('System update detected - attempted logout (manual verification recommended)');
+  end else
+    TerminateScript(Reason);
+end;
+
+procedure CheckSystemUpdate();
+const
+  SYSTEM_UPDATE_CHECK_INTERVAL = 30000;
+  SYSTEM_UPDATE_THRESHOLD_MINUTES = 15;
+var
+  Threshold: Int32;
+  WarningText: String;
+begin
+  HandlePendingSystemUpdate();
+
+  if not RSClient.IsLoggedIn() then
+    Exit;
+
+  if SystemUpdateCheckTimer.Length = 0 then
+    SystemUpdateCheckTimer.Init(0);
+
+  if not SystemUpdateCheckTimer.IsFinished() then
+    Exit;
+
+  SystemUpdateCheckTimer.Init(SYSTEM_UPDATE_CHECK_INTERVAL);
+
+  Threshold := SYSTEM_UPDATE_THRESHOLD_MINUTES;
+
+  if Chat.CheckSystemUpdate(Threshold) then
+  begin
+    SystemUpdateThresholdMinutes := Threshold;
+    WarningText := 'System update in <= ' + IntToStr(Threshold) + 'm';
+
+    if not SystemUpdateWarningShown then
+    begin
+      WriteLn('SYSTEM UPDATE WARNING: ' + WarningText + '! Preparing safe logout.');
+      SystemUpdateWarningShown := True;
+    end;
+
+    UpdateSystemUpdateOverlay(WarningText + ' - preparing safe logout');
+    PendingSystemUpdateLogout := True;
+    SystemUpdateLogoutDelayedLogged := False;
+
+    HandlePendingSystemUpdate();
+  end
+  else if not PendingSystemUpdateLogout then
+  begin
+    SystemUpdateWarningShown := False;
+    SystemUpdateThresholdMinutes := 0;
+    SystemUpdateLogoutDelayedLogged := False;
+    UpdateSystemUpdateOverlay('');
+  end;
+end;
+
 procedure TFarmRun.Run();
 var
   AntibanMinZ, AntibanMaxZ: Int32;
@@ -3672,96 +3836,104 @@ begin
   if not RSClient.IsLoggedIn() then
     Login.LoginPlayer();
 
-  Antiban.DebugLn('Starting farm run.');
-  Self.Runtime.Start();
+  FarmRunActive := True;
+  try
+    Antiban.DebugLn('Starting farm run.');
+    Self.Runtime.Start();
 
-  AntibanMinZ := Antiban.MinZoom;
-  AntibanMaxZ := Antiban.MaxZoom;
-  Antiban.MinZoom := 17;
-  Antiban.MaxZoom := 23;
-  Mainscreen.SetHighestPitch;
-  Options.SetZoomLevel(Random(17, 23));
+    AntibanMinZ := Antiban.MinZoom;
+    AntibanMaxZ := Antiban.MaxZoom;
+    Antiban.MinZoom := 17;
+    Antiban.MaxZoom := 23;
+    Mainscreen.SetHighestPitch;
+    Options.SetZoomLevel(Random(17, 23));
 
-  Self.OnStart();
+    Self.OnStart();
 
-  Self.LastXPRead := XPBar.Read();
-  Self.InactivityTimer.Restart();
+    Self.LastXPRead := XPBar.Read();
+    Self.InactivityTimer.Restart();
 
-  if not RSClient.IsLoggedIn() then
-    Login.LoginPlayer();
-
-  for Self.CurrentPatch in Self.Patches do
-  begin
     if not RSClient.IsLoggedIn() then
       Login.LoginPlayer();
 
-    repeat
-      State := Self.CurrentPatch.GetState();
+    for Self.CurrentPatch in Self.Patches do
+    begin
+      if not RSClient.IsLoggedIn() then
+        Login.LoginPlayer();
 
-      if FailedCount = 8 then
-        State := EPatchState.SKIP;
+      repeat
+        CheckSystemUpdate();
 
-      if State <> EPatchState.FAILED then
-        FailedCount := 0;
+        State := Self.CurrentPatch.GetState();
 
-      case State of
-        EPatchState.HARVEST_WHITEBERRIES: Self.HarvestWhiteBerries;
-        EPatchState.HARVEST_CACTUS: Self.HarvestCactus;
-        EPatchState.HARVEST: Self.Harvest;
-        EPatchState.PLANT: Self.Plant;
-        EPatchState.COMPOST:
-        begin
-          if (Self.CurrentPatch.Data.PatchType = EPatchType.FLOWER) and (not Self.CompostFlowers) then
+        if FailedCount = 8 then
+          State := EPatchState.SKIP;
+
+        if State <> EPatchState.FAILED then
+          FailedCount := 0;
+
+        case State of
+          EPatchState.HARVEST_WHITEBERRIES: Self.HarvestWhiteBerries;
+          EPatchState.HARVEST_CACTUS: Self.HarvestCactus;
+          EPatchState.HARVEST: Self.Harvest;
+          EPatchState.PLANT: Self.Plant;
+          EPatchState.COMPOST:
           begin
-            WriteLn('Skipping compost at ' + Self.CurrentPatch.Data.Name + ' flower patch per settings.');
-            Self.CurrentPatch.Complete := True;
-          end else
-            Self.CompostPatch();
+            if (Self.CurrentPatch.Data.PatchType = EPatchType.FLOWER) and (not Self.CompostFlowers) then
+            begin
+              WriteLn('Skipping compost at ' + Self.CurrentPatch.Data.Name + ' flower patch per settings.');
+              Self.CurrentPatch.Complete := True;
+            end else
+              Self.CompostPatch();
+          end;
+          EPatchState.DISEASED: Self.HandleDiseasedPatch;
+          EPatchState.DEAD: Self.HandleDeadPatch;
+          EPatchState.TELEPORT_TO: Self.TeleportTo(Self.CurrentPatch.TravelMethod, True);
+          EPatchState.NOTE_ITEMS: Self.NoteItems;
+          EPatchState.FAILED: Inc(failedCount);
+          EPatchState.COMPLETE:
+          begin
+            WriteLn('Patch complete.');
+            Inc(Self.PatchesCompleted);
+            Break();
+          end;
+          EPatchState.SKIP:
+          begin
+            WriteLn('Skipping patch.');
+            Inc(Self.PatchesSkipped);
+            Break();
+          end;
         end;
-        EPatchState.DISEASED: Self.HandleDiseasedPatch;
-        EPatchState.DEAD: Self.HandleDeadPatch;
-        EPatchState.TELEPORT_TO: Self.TeleportTo(Self.CurrentPatch.TravelMethod, True);
-        EPatchState.NOTE_ITEMS: Self.NoteItems;
-        EPatchState.FAILED: Inc(failedCount);
-        EPatchState.COMPLETE:
-        begin
-          WriteLn('Patch complete.');
-          Inc(Self.PatchesCompleted);
-          Break();
-        end;
-        EPatchState.SKIP:
-        begin
-          WriteLn('Skipping patch.');
-          Inc(Self.PatchesSkipped);
-          Break();
-        end;
-      end;
 
-      if XPBar.EarnedXP() then
-        InactivityTimer.Restart();
+        if XPBar.EarnedXP() then
+          InactivityTimer.Restart();
 
-    until InactivityTimer.IsFinished();
+      until InactivityTimer.IsFinished();
 
-    Self.CurrentPatch.Skip := Self.CurrentPatch.Complete := False;
+      Self.CurrentPatch.Skip := Self.CurrentPatch.Complete := False;
 
-    if Self.DoReport then
-      Self.Report();
+      if Self.DoReport then
+        Self.Report();
+    end;
+
+    if InactivityTimer.IsFinished() then
+      TerminateScript('Terminating due to inactivity.');
+
+    Inc(Self.RunsComplete);
+
+    Antiban.MinZoom := AntibanMinZ;
+    Antiban.MaxZoom := AntibanMaxZ;
+
+    Self.OnComplete();
+
+    Self.Runtime.Pause();
+
+    Self.XPGained += XPBar.Read() - Self.LastXPRead;
+    Self.Report();
+  finally
+    FarmRunActive := False;
+    CheckSystemUpdate();
   end;
-
-  if InactivityTimer.IsFinished() then
-    TerminateScript('Terminating due to inactivity.');
-
-  Inc(Self.RunsComplete);
-
-  Antiban.MinZoom := AntibanMinZ;
-  Antiban.MaxZoom := AntibanMaxZ;
-
-  Self.OnComplete();
-
-  Self.Runtime.Pause();
-
-  Self.XPGained += XPBar.Read() - Self.LastXPRead;
-  Self.Report();
 end;
 
 procedure ReleaseRealInput();
@@ -4499,6 +4671,9 @@ begin
   lines += birdLine;
   lines += lootLine;
 
+  if SystemUpdateOverlayMessage <> '' then
+    lines += '⚠ ' + SystemUpdateOverlayMessage;
+
   lineSpacing := Self.FontSize + 4;
   headerSpacing := Self.FontSize + 6;
   height := (Self.Padding * 2) + headerSpacing + (lineSpacing * (Length(lines) - 1));
@@ -4868,6 +5043,15 @@ begin
   InactivityTimer.Start();
   ReportTimer.Start();
 
+  SystemUpdateCheckTimer.Init(0);
+  SystemUpdateWarningShown := False;
+  PendingSystemUpdateLogout := False;
+  SystemUpdateOverlayMessage := '';
+  SystemUpdateThresholdMinutes := 0;
+  SystemUpdateLogoutDelayedLogged := False;
+  FarmRunActive := False;
+  BirdhouseRunActive := False;
+
   Overlay.Update();
 end;
 
@@ -5079,6 +5263,8 @@ end;
 
 procedure Loop();
 begin
+  CheckSystemUpdate();
+
   if HasGainedXP() then
     InactivityTimer.Reset();
 
