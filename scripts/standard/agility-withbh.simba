@@ -45,8 +45,8 @@ type
     Runtime: TStopWatch;
   end;
 
-procedure AgilityStatusHud_Init(var Display: TAgilityStatusHud);
-procedure AgilityStatusHud_Update(var Display: TAgilityStatusHud);
+procedure AgilityStatusHud_Init(var Hud: TAgilityStatusHud);
+procedure AgilityStatusHud_Update(var Hud: TAgilityStatusHud);
 procedure AgilityStatusHud_Clear();
 
 procedure AgilityGUI_LoadSettings();
@@ -5439,21 +5439,21 @@ begin
   Result := SRL.MsToTime(BirdHouseRunner.ScriptIntervalTimer.TimeRemaining(), Time_Short);
 end;
 
-procedure AgilityStatusHud_Init(var Display: TAgilityStatusHud);
+procedure AgilityStatusHud_Init(var Hud: TAgilityStatusHud);
 begin
-  Display.Enabled := EnableStatusHud;
-  Display.FontSize := 11;
-  Display.BackgroundColor := $2D2D30;
-  Display.BorderColor := $000000;
-  Display.TextColor := $FFFFFF;
-  Display.Position := Point(14, 70);
-  Display.Padding := 6;
-  Display.Width := 235;
-  Display.Runtime := Default(TStopWatch);
-  Display.Runtime.Start();
+  Hud.Enabled := EnableStatusHud;
+  Hud.FontSize := 11;
+  Hud.BackgroundColor := $2D2D30;
+  Hud.BorderColor := $000000;
+  Hud.TextColor := $FFFFFF;
+  Hud.Position := Point(14, 70);
+  Hud.Padding := 6;
+  Hud.Width := 235;
+  Hud.Runtime := Default(TStopWatch);
+  Hud.Runtime.Start();
 end;
 
-procedure AgilityStatusHud_Update(var Display: TAgilityStatusHud);
+procedure AgilityStatusHud_Update(var Hud: TAgilityStatusHud);
 var
   runtimeMs, elapsedSinceBreak: UInt64;
   xpPerHour: Int32;
@@ -5464,13 +5464,13 @@ var
   box: TBox;
   i: Int32;
 begin
-  if not Display.Enabled then
+  if not Hud.Enabled then
     Exit;
 
   if not RSClient.IsLoggedIn() then
     Exit;
 
-  runtimeMs := Display.Runtime.ElapsedTime();
+  runtimeMs := Hud.Runtime.ElapsedTime();
 
   if runtimeMs = 0 then
     xpPerHour := 0
@@ -5519,28 +5519,28 @@ begin
   if SystemUpdateHudMessage <> '' then
     lines += '⚠ ' + SystemUpdateHudMessage;
 
-  lineSpacing := Display.FontSize + 4;
-  headerSpacing := Display.FontSize + 6;
-  height := (Display.Padding * 2) + headerSpacing + (lineSpacing * (Length(lines) - 1));
-  box := Box(Display.Position.X, Display.Position.Y, Display.Position.X + Display.Width, Display.Position.Y + height);
+  lineSpacing := Hud.FontSize + 4;
+  headerSpacing := Hud.FontSize + 6;
+  height := (Hud.Padding * 2) + headerSpacing + (lineSpacing * (Length(lines) - 1));
+  box := Box(Hud.Position.X, Hud.Position.Y, Hud.Position.X + Hud.Width, Hud.Position.Y + height);
 
   with RSClient.Image() do
   begin
-    DrawBoxFilled(box.Expand(1), False, Display.BorderColor);
-    DrawBoxFilled(box, False, Display.BackgroundColor);
+    DrawBoxFilled(box.Expand(1), False, Hud.BorderColor);
+    DrawBoxFilled(box, False, Hud.BackgroundColor);
     SetFontName('Arial');
 
-    y := box.Y1 + Display.Padding;
+    y := box.Y1 + Hud.Padding;
 
-    SetFontSize(Display.FontSize + 1);
-    DrawText(lines[0], Point(box.X1 + Display.Padding, y), Display.TextColor);
+    SetFontSize(Hud.FontSize + 1);
+    DrawText(lines[0], Point(box.X1 + Hud.Padding, y), Hud.TextColor);
     y += headerSpacing;
 
-    SetFontSize(Display.FontSize);
+    SetFontSize(Hud.FontSize);
 
     for i := 1 to High(lines) do
     begin
-      DrawText(lines[i], Point(box.X1 + Display.Padding, y), Display.TextColor);
+      DrawText(lines[i], Point(box.X1 + Hud.Padding, y), Hud.TextColor);
       y += lineSpacing;
     end;
   end;
