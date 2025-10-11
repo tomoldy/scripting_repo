@@ -36,7 +36,7 @@ type
     CompostInput: TLabeledCombobox;
   end;
 
-  TStatusHud = record
+  TAgilityStatusHud = record
     Enabled: Boolean;
     FontSize: Int32;
     BackgroundColor, BorderColor, TextColor: TColor;
@@ -45,9 +45,9 @@ type
     Runtime: TStopWatch;
   end;
 
-procedure StatusHud_Init(var Hud: TStatusHud);
-procedure StatusHud_Update(var Hud: TStatusHud);
-procedure StatusHud_Clear();
+procedure AgilityStatusHud_Init(var Display: TAgilityStatusHud);
+procedure AgilityStatusHud_Update(var Display: TAgilityStatusHud);
+procedure AgilityStatusHud_Clear();
 
 procedure AgilityGUI_LoadSettings();
 function AgilityGUI_GetActiveUsername(): String;
@@ -221,7 +221,7 @@ var
   GUI: TAgilityGUI;
   Course: ECourse := DRAYNOR_ROOF;
   Farm: TFarmRun;
-  StatusHud: TStatusHud;
+  AgilityHud: TAgilityStatusHud;
   Discord: TDiscordClient;
   WebhookURL: String := '';
 
@@ -3738,8 +3738,8 @@ begin
 
   SystemUpdateHudMessage := Message;
 
-  if StatusHud.Enabled then
-    StatusHud_Update(StatusHud);
+  if AgilityHud.Enabled then
+    AgilityStatusHud_Update(AgilityHud);
 end;
 
 function IsPlayerBusyForSystemUpdate(): Boolean;
@@ -3976,8 +3976,8 @@ begin
   WriteLn(SRL.TimeStamp(), ':[Breaks]: ' + Message);
   SendBreakWebhook('**' + Kind + ' break** for ' + DurationText + '.');
 
-  if StatusHud.Enabled then
-    StatusHud_Update(StatusHud);
+  if AgilityHud.Enabled then
+    AgilityStatusHud_Update(AgilityHud);
 end;
 
 procedure FinishBreakEvent(const Kind: String);
@@ -3986,8 +3986,8 @@ begin
   LastBreakEventAt := GetTimeRunning();
   WriteLn(SRL.TimeStamp(), ':[Breaks]: ' + Kind + ' break finished.');
 
-  if StatusHud.Enabled then
-    StatusHud_Update(StatusHud);
+  if AgilityHud.Enabled then
+    AgilityStatusHud_Update(AgilityHud);
 end;
 
 function SafeToTakeBreak(): Boolean;
@@ -4269,7 +4269,7 @@ end;
 
 procedure ReleaseRealInput();
 begin
-  StatusHud_Clear();
+  AgilityStatusHud_Clear();
 
   if RealInputBlocked then
   begin
@@ -5439,21 +5439,21 @@ begin
   Result := SRL.MsToTime(BirdHouseRunner.ScriptIntervalTimer.TimeRemaining(), Time_Short);
 end;
 
-procedure StatusHud_Init(var Hud: TStatusHud);
+procedure AgilityStatusHud_Init(var Display: TAgilityStatusHud);
 begin
-  Hud.Enabled := EnableStatusHud;
-  Hud.FontSize := 11;
-  Hud.BackgroundColor := $2D2D30;
-  Hud.BorderColor := $000000;
-  Hud.TextColor := $FFFFFF;
-  Hud.Position := Point(14, 70);
-  Hud.Padding := 6;
-  Hud.Width := 235;
-  Hud.Runtime := Default(TStopWatch);
-  Hud.Runtime.Start();
+  Display.Enabled := EnableStatusHud;
+  Display.FontSize := 11;
+  Display.BackgroundColor := $2D2D30;
+  Display.BorderColor := $000000;
+  Display.TextColor := $FFFFFF;
+  Display.Position := Point(14, 70);
+  Display.Padding := 6;
+  Display.Width := 235;
+  Display.Runtime := Default(TStopWatch);
+  Display.Runtime.Start();
 end;
 
-procedure StatusHud_Update(var Hud: TStatusHud);
+procedure AgilityStatusHud_Update(var Display: TAgilityStatusHud);
 var
   runtimeMs, elapsedSinceBreak: UInt64;
   xpPerHour: Int32;
@@ -5464,13 +5464,13 @@ var
   box: TBox;
   i: Int32;
 begin
-  if not Hud.Enabled then
+  if not Display.Enabled then
     Exit;
 
   if not RSClient.IsLoggedIn() then
     Exit;
 
-  runtimeMs := Hud.Runtime.ElapsedTime();
+  runtimeMs := Display.Runtime.ElapsedTime();
 
   if runtimeMs = 0 then
     xpPerHour := 0
@@ -5519,34 +5519,34 @@ begin
   if SystemUpdateHudMessage <> '' then
     lines += '⚠ ' + SystemUpdateHudMessage;
 
-  lineSpacing := Hud.FontSize + 4;
-  headerSpacing := Hud.FontSize + 6;
-  height := (Hud.Padding * 2) + headerSpacing + (lineSpacing * (Length(lines) - 1));
-  box := Box(Hud.Position.X, Hud.Position.Y, Hud.Position.X + Hud.Width, Hud.Position.Y + height);
+  lineSpacing := Display.FontSize + 4;
+  headerSpacing := Display.FontSize + 6;
+  height := (Display.Padding * 2) + headerSpacing + (lineSpacing * (Length(lines) - 1));
+  box := Box(Display.Position.X, Display.Position.Y, Display.Position.X + Display.Width, Display.Position.Y + height);
 
   with RSClient.Image() do
   begin
-    DrawBoxFilled(box.Expand(1), False, Hud.BorderColor);
-    DrawBoxFilled(box, False, Hud.BackgroundColor);
+    DrawBoxFilled(box.Expand(1), False, Display.BorderColor);
+    DrawBoxFilled(box, False, Display.BackgroundColor);
     SetFontName('Arial');
 
-    y := box.Y1 + Hud.Padding;
+    y := box.Y1 + Display.Padding;
 
-    SetFontSize(Hud.FontSize + 1);
-    DrawText(lines[0], Point(box.X1 + Hud.Padding, y), Hud.TextColor);
+    SetFontSize(Display.FontSize + 1);
+    DrawText(lines[0], Point(box.X1 + Display.Padding, y), Display.TextColor);
     y += headerSpacing;
 
-    SetFontSize(Hud.FontSize);
+    SetFontSize(Display.FontSize);
 
     for i := 1 to High(lines) do
     begin
-      DrawText(lines[i], Point(box.X1 + Hud.Padding, y), Hud.TextColor);
+      DrawText(lines[i], Point(box.X1 + Display.Padding, y), Display.TextColor);
       y += lineSpacing;
     end;
   end;
 end;
 
-procedure StatusHud_Clear();
+procedure AgilityStatusHud_Clear();
 begin
   try
     RSClient.Image().Clear();
@@ -5782,7 +5782,7 @@ begin
   if WebhookEnabled and SendHourlyReports then
     HourlyReportTimer.Start();
 
-  StatusHud_Init(StatusHud);
+  AgilityStatusHud_Init(AgilityHud);
 
   if Options.GetNPCAttackOption() <> ERSAttackOption.HIDDEN then
     Options.SetNPCAttackOption(ERSAttackOption.HIDDEN);
@@ -5935,7 +5935,7 @@ begin
   FarmRunActive := False;
   BirdhouseRunActive := False;
 
-  StatusHud_Update(StatusHud);
+  AgilityStatusHud_Update(AgilityHud);
 end;
 
 function GetStep(): Int32;
@@ -6192,7 +6192,7 @@ begin
     NormalStep(Step);
   end;
 
-  StatusHud_Update(StatusHud);
+  AgilityStatusHud_Update(AgilityHud);
 
   MaybeHandleScheduledBreaks();
 
