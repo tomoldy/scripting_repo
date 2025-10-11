@@ -56,6 +56,99 @@ var
   AmbientInitialized: Boolean = False;
   NextAmbientCamJitterAt, NextAmbientBreakletAt: UInt64;
 
+procedure EnsureAmbientSchedule(force: Boolean = False);
+begin
+  if force or not AmbientInitialized then
+  begin
+    AmbientInitialized := True;
+    NextAmbientCamJitterAt := GetTickCount() + SRL.NormalRange(22000, 38000);
+    NextAmbientBreakletAt := GetTickCount() + SRL.NormalRange(480000, 840000);
+  end;
+end;
+
+procedure BumpAmbientSchedule(performed: Boolean);
+var
+  now: UInt64;
+begin
+  if performed then
+  begin
+    now := GetTickCount();
+    if NextAmbientCamJitterAt < now + 3000 then
+      NextAmbientCamJitterAt := now + SRL.NormalRange(22000, 38000);
+    if NextAmbientBreakletAt < now + 3000 then
+      NextAmbientBreakletAt := now + SRL.NormalRange(480000, 840000);
+  end;
+end;
+
+procedure ReactionDelay(tier: Int32);
+var
+  minDelay, maxDelay, meanDelay, spread, delay: Int32;
+begin
+  case tier of
+    1:
+      begin
+        minDelay := REACTION_T1_MIN;
+        maxDelay := REACTION_T1_MAX;
+      end;
+    2:
+      begin
+        minDelay := REACTION_T2_MIN;
+        maxDelay := REACTION_T2_MAX;
+      end;
+    3:
+      begin
+        minDelay := REACTION_T3_MIN;
+        maxDelay := REACTION_T3_MAX;
+      end;
+  else
+    minDelay := REACTION_T1_MIN;
+    maxDelay := REACTION_T3_MAX;
+  end;
+
+  meanDelay := (minDelay + maxDelay) div 2;
+  spread := (maxDelay - minDelay) div 3;
+  if spread < 20 then
+    spread := 20;
+  delay := SRL.NormalRange(meanDelay, spread);
+
+  if delay < minDelay then
+    delay := minDelay
+  else if delay > maxDelay then
+    delay := maxDelay;
+
+  Wait(delay);
+end;
+
+procedure MaybeMicroIdle();
+var
+  performed: Boolean = False;
+begin
+  EnsureAmbientSchedule();
+
+  if SRL.Dice(MICRO_ROTATE_CHANCE) then
+  begin
+    Antiban.RandomRotate();
+    performed := True;
+  end
+  else if SRL.Dice(MICRO_RIGHTCLICK_CHANCE) then
+  begin
+    Antiban.RandomRightClick();
+    performed := True;
+  end
+  else if SRL.Dice(MICRO_KEYBOARD_CHANCE) then
+  begin
+    Antiban.RandomKeyboard();
+    performed := True;
+  end
+  else if SRL.Dice(MICRO_LOSEFOCUS_CHANCE) then
+  begin
+    Antiban.LoseFocus(SRL.NormalRange(600, 1800));
+    performed := True;
+  end;
+
+  BumpAmbientSchedule(performed);
+end;
+
 type
   ECookerState = (
     OPEN_BANK,
@@ -90,14 +183,46 @@ type
     BreakWasCooking: Boolean;
   end;
 
-  if performed then
+procedure TCooker.SetupAntibanProfile();
+begin
+  EnsureAmbientSchedule(True);
+
+  Mouse.Speed := SRL.NormalRange(16, 22);
+  Mouse.Gravity := SRL.NormalRange(10, 18);
+  Mouse.Wind := SRL.NormalRange(3, 6);
+  Mouse.MissChance := SRL.NormalRange(6, 12);
+end;
+
+procedure TCooker.MaybeAmbient();
+var
+  now: UInt64;
+  performed: Boolean = False;
+  delay: Int32;
+begin
+  EnsureAmbientSchedule();
+
+  now := GetTickCount();
+  if now >= NextAmbientCamJitterAt then
   begin
-    now := GetTickCount();
-    if NextAmbientCamJitterAt < now + 3000 then
-      NextAmbientCamJitterAt := now + SRL.NormalRange(20000, 32000);
-    if NextAmbientBreakletAt < now + 3000 then
-      NextAmbientBreakletAt := now + SRL.NormalRange(480000, 840000);
+    Antiban.RandomRotate();
+    NextAmbientCamJitterAt := now + SRL.NormalRange(22000, 38000);
+    performed := True;
   end;
+
+  if now >= NextAmbientBreakletAt then
+  begin
+    Antiban.RandomRightClick();
+    if SRL.Dice(45) then
+      Antiban.RandomKeyboard();
+    delay := SRL.NormalRange(900, 350);
+    if delay < 200 then
+      delay := 200;
+    Wait(delay);
+    NextAmbientBreakletAt := now + SRL.NormalRange(480000, 840000);
+    performed := True;
+  end;
+
+  BumpAmbientSchedule(performed);
 end;
 
 
