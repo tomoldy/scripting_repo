@@ -36,7 +36,7 @@ type
     CompostInput: TLabeledCombobox;
   end;
 
-  TAgilityOverlay = record
+  TStatusHud = record
     Enabled: Boolean;
     FontSize: Int32;
     BackgroundColor, BorderColor, TextColor: TColor;
@@ -45,9 +45,9 @@ type
     Runtime: TStopWatch;
   end;
 
-procedure Overlay_Init(var Overlay: TAgilityOverlay);
-procedure Overlay_Update(var Overlay: TAgilityOverlay);
-procedure Overlay_Clear();
+procedure StatusHud_Init(var Hud: TStatusHud);
+procedure StatusHud_Update(var Hud: TStatusHud);
+procedure StatusHud_Clear();
 
 procedure AgilityGUI_LoadSettings();
 function AgilityGUI_GetActiveUsername(): String;
@@ -202,7 +202,7 @@ var
   FarmRunNow, UseMagicSecateurs, BarbarianDibber, CatherbyHerb, CatherbyFlower,
   CompostFlowers: Boolean;
   PlannedBreaksEnabled: Boolean := True;
-  EnableOverlay: Boolean := True;
+  EnableStatusHud: Boolean := True;
   RealInputBlocked: Boolean := False;
   BlockInput: Boolean := True;
   SendHourlyReports: Boolean := True;
@@ -221,7 +221,7 @@ var
   GUI: TAgilityGUI;
   Course: ECourse := DRAYNOR_ROOF;
   Farm: TFarmRun;
-  Overlay: TAgilityOverlay;
+  StatusHud: TStatusHud;
   Discord: TDiscordClient;
   WebhookURL: String := '';
 
@@ -242,7 +242,7 @@ var
   MiniBreakRemainingMs, PlannedBreakRemainingMs: UInt64;
   SystemUpdateCheckTimer: TCountdown;
   SystemUpdateWarningShown: Boolean;
-  SystemUpdateOverlayMessage: String;
+  SystemUpdateHudMessage: String;
   PendingSystemUpdateLogout: Boolean;
   SystemUpdateThresholdMinutes: Int32;
   SystemUpdateLogoutDelayedLogged: Boolean;
@@ -3731,15 +3731,15 @@ begin
   SetLength(Self.HarvestQuantities, Length(LeprechaunItems));
 end;
 
-procedure UpdateSystemUpdateOverlay(const Message: String);
+procedure UpdateSystemUpdateHud(const Message: String);
 begin
-  if SystemUpdateOverlayMessage = Message then
+  if SystemUpdateHudMessage = Message then
     Exit;
 
-  SystemUpdateOverlayMessage := Message;
+  SystemUpdateHudMessage := Message;
 
-  if Overlay.Enabled then
-    Overlay_Update(Overlay);
+  if StatusHud.Enabled then
+    StatusHud_Update(StatusHud);
 end;
 
 function IsPlayerBusyForSystemUpdate(): Boolean;
@@ -3804,7 +3804,7 @@ begin
     if not SystemUpdateLogoutDelayedLogged then
     begin
       WriteLn('System update detected but player is busy. Waiting to logout safely once idle.');
-      UpdateSystemUpdateOverlay(ThresholdText + ' - waiting for idle');
+      UpdateSystemUpdateHud(ThresholdText + ' - waiting for idle');
       SystemUpdateLogoutDelayedLogged := True;
     end;
     Exit;
@@ -3813,7 +3813,7 @@ begin
   RuntimeText := SRL.MsToTime(GetTimeRunning(), Time_Short);
   Reason := 'System update detected - safe logout completed';
 
-  UpdateSystemUpdateOverlay(ThresholdText + ' - logging out safely');
+  UpdateSystemUpdateHud(ThresholdText + ' - logging out safely');
   WriteLn('System update detected while idle - logging out safely.');
   SendSystemUpdateWebhook('**SYSTEM UPDATE** Logging out safely (' + ThresholdText + '). Runtime: ' + RuntimeText);
 
@@ -3864,7 +3864,7 @@ begin
       SystemUpdateWarningShown := True;
     end;
 
-    UpdateSystemUpdateOverlay(WarningText + ' - preparing safe logout');
+    UpdateSystemUpdateHud(WarningText + ' - preparing safe logout');
     PendingSystemUpdateLogout := True;
     SystemUpdateLogoutDelayedLogged := False;
 
@@ -3875,7 +3875,7 @@ begin
     SystemUpdateWarningShown := False;
     SystemUpdateThresholdMinutes := 0;
     SystemUpdateLogoutDelayedLogged := False;
-    UpdateSystemUpdateOverlay('');
+    UpdateSystemUpdateHud('');
   end;
 end;
 
@@ -3976,8 +3976,8 @@ begin
   WriteLn(SRL.TimeStamp(), ':[Breaks]: ' + Message);
   SendBreakWebhook('**' + Kind + ' break** for ' + DurationText + '.');
 
-  if Overlay.Enabled then
-    Overlay_Update(Overlay);
+  if StatusHud.Enabled then
+    StatusHud_Update(StatusHud);
 end;
 
 procedure FinishBreakEvent(const Kind: String);
@@ -3986,8 +3986,8 @@ begin
   LastBreakEventAt := GetTimeRunning();
   WriteLn(SRL.TimeStamp(), ':[Breaks]: ' + Kind + ' break finished.');
 
-  if Overlay.Enabled then
-    Overlay_Update(Overlay);
+  if StatusHud.Enabled then
+    StatusHud_Update(StatusHud);
 end;
 
 function SafeToTakeBreak(): Boolean;
@@ -4269,7 +4269,7 @@ end;
 
 procedure ReleaseRealInput();
 begin
-  Overlay_Clear();
+  StatusHud_Clear();
 
   if RealInputBlocked then
   begin
@@ -5411,7 +5411,7 @@ begin
   Result := 'Obstacle #' + IntToStr(Step);
 end;
 
-function GetFarmRunOverlayText(): String;
+function GetFarmRunHudText(): String;
 begin
   if not DoFarmRuns then
     Exit('Disabled');
@@ -5425,7 +5425,7 @@ begin
   Result := SRL.MsToTime(Farm.ReadyTimer.TimeRemaining(), Time_Short);
 end;
 
-function GetBirdhouseOverlayText(): String;
+function GetBirdhouseHudText(): String;
 begin
   if not DoBirdhouseRuns then
     Exit('Disabled');
@@ -5439,21 +5439,21 @@ begin
   Result := SRL.MsToTime(BirdHouseRunner.ScriptIntervalTimer.TimeRemaining(), Time_Short);
 end;
 
-procedure Overlay_Init(var Overlay: TAgilityOverlay);
+procedure StatusHud_Init(var Hud: TStatusHud);
 begin
-  Overlay.Enabled := EnableOverlay;
-  Overlay.FontSize := 11;
-  Overlay.BackgroundColor := $2D2D30;
-  Overlay.BorderColor := $000000;
-  Overlay.TextColor := $FFFFFF;
-  Overlay.Position := Point(14, 70);
-  Overlay.Padding := 6;
-  Overlay.Width := 235;
-  Overlay.Runtime := Default(TStopWatch);
-  Overlay.Runtime.Start();
+  Hud.Enabled := EnableStatusHud;
+  Hud.FontSize := 11;
+  Hud.BackgroundColor := $2D2D30;
+  Hud.BorderColor := $000000;
+  Hud.TextColor := $FFFFFF;
+  Hud.Position := Point(14, 70);
+  Hud.Padding := 6;
+  Hud.Width := 235;
+  Hud.Runtime := Default(TStopWatch);
+  Hud.Runtime.Start();
 end;
 
-procedure Overlay_Update(var Overlay: TAgilityOverlay);
+procedure StatusHud_Update(var Hud: TStatusHud);
 var
   runtimeMs, elapsedSinceBreak: UInt64;
   xpPerHour: Int32;
@@ -5464,13 +5464,13 @@ var
   box: TBox;
   i: Int32;
 begin
-  if not Overlay.Enabled then
+  if not Hud.Enabled then
     Exit;
 
   if not RSClient.IsLoggedIn() then
     Exit;
 
-  runtimeMs := Overlay.Runtime.ElapsedTime();
+  runtimeMs := Hud.Runtime.ElapsedTime();
 
   if runtimeMs = 0 then
     xpPerHour := 0
@@ -5478,8 +5478,8 @@ begin
     xpPerHour := Round(GainedXP / (runtimeMs / 3600000));
 
   xpLine := ToStr('XP: ', GainedXP, ' (', xpPerHour, '/h)');
-  farmLine := 'Farm: ' + GetFarmRunOverlayText();
-  birdLine := 'Birdhouse: ' + GetBirdhouseOverlayText();
+  farmLine := 'Farm: ' + GetFarmRunHudText();
+  birdLine := 'Birdhouse: ' + GetBirdhouseHudText();
   lootLine := 'Loot: Marks ' + IntToStr(Marks);
 
   if DoBirdhouseRuns then
@@ -5516,37 +5516,37 @@ begin
   if breakLine <> '' then
     lines += breakLine;
 
-  if SystemUpdateOverlayMessage <> '' then
-    lines += '⚠ ' + SystemUpdateOverlayMessage;
+  if SystemUpdateHudMessage <> '' then
+    lines += '⚠ ' + SystemUpdateHudMessage;
 
-  lineSpacing := Overlay.FontSize + 4;
-  headerSpacing := Overlay.FontSize + 6;
-  height := (Overlay.Padding * 2) + headerSpacing + (lineSpacing * (Length(lines) - 1));
-  box := Box(Overlay.Position.X, Overlay.Position.Y, Overlay.Position.X + Overlay.Width, Overlay.Position.Y + height);
+  lineSpacing := Hud.FontSize + 4;
+  headerSpacing := Hud.FontSize + 6;
+  height := (Hud.Padding * 2) + headerSpacing + (lineSpacing * (Length(lines) - 1));
+  box := Box(Hud.Position.X, Hud.Position.Y, Hud.Position.X + Hud.Width, Hud.Position.Y + height);
 
   with RSClient.Image() do
   begin
-    DrawBoxFilled(box.Expand(1), False, Overlay.BorderColor);
-    DrawBoxFilled(box, False, Overlay.BackgroundColor);
+    DrawBoxFilled(box.Expand(1), False, Hud.BorderColor);
+    DrawBoxFilled(box, False, Hud.BackgroundColor);
     SetFontName('Arial');
 
-    y := box.Y1 + Overlay.Padding;
+    y := box.Y1 + Hud.Padding;
 
-    SetFontSize(Overlay.FontSize + 1);
-    DrawText(lines[0], Point(box.X1 + Overlay.Padding, y), Overlay.TextColor);
+    SetFontSize(Hud.FontSize + 1);
+    DrawText(lines[0], Point(box.X1 + Hud.Padding, y), Hud.TextColor);
     y += headerSpacing;
 
-    SetFontSize(Overlay.FontSize);
+    SetFontSize(Hud.FontSize);
 
     for i := 1 to High(lines) do
     begin
-      DrawText(lines[i], Point(box.X1 + Overlay.Padding, y), Overlay.TextColor);
+      DrawText(lines[i], Point(box.X1 + Hud.Padding, y), Hud.TextColor);
       y += lineSpacing;
     end;
   end;
 end;
 
-procedure Overlay_Clear();
+procedure StatusHud_Clear();
 begin
   try
     RSClient.Image().Clear();
@@ -5782,7 +5782,7 @@ begin
   if WebhookEnabled and SendHourlyReports then
     HourlyReportTimer.Start();
 
-  Overlay_Init(Overlay);
+  StatusHud_Init(StatusHud);
 
   if Options.GetNPCAttackOption() <> ERSAttackOption.HIDDEN then
     Options.SetNPCAttackOption(ERSAttackOption.HIDDEN);
@@ -5929,13 +5929,13 @@ begin
   SystemUpdateCheckTimer.Init(0);
   SystemUpdateWarningShown := False;
   PendingSystemUpdateLogout := False;
-  SystemUpdateOverlayMessage := '';
+  SystemUpdateHudMessage := '';
   SystemUpdateThresholdMinutes := 0;
   SystemUpdateLogoutDelayedLogged := False;
   FarmRunActive := False;
   BirdhouseRunActive := False;
 
-  Overlay_Update(Overlay);
+  StatusHud_Update(StatusHud);
 end;
 
 function GetStep(): Int32;
@@ -6192,7 +6192,7 @@ begin
     NormalStep(Step);
   end;
 
-  Overlay_Update(Overlay);
+  StatusHud_Update(StatusHud);
 
   MaybeHandleScheduledBreaks();
 
