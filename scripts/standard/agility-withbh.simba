@@ -4136,27 +4136,43 @@ begin
   Self.LoseFocus(SRL.NormalRange(250, 1900));
 end;
 
-procedure SetupAntiban();
+procedure TAntiban.HandleFinishTask(Task: PAntibanTask);
 begin
-  Antiban.AddTask(ONE_MINUTE * 2, @Antiban.RandomMouse, 1);
-  Antiban.AddTask(ONE_MINUTE * 9, @Antiban.HoverMSPlayers, 1);
-  Antiban.AddTask(ONE_MINUTE * 5, @Antiban.DoLoseFocus, 1);
-  Antiban.AddTask(ONE_MINUTE * 6, @Antiban.RandomRotate, 1);
-  Antiban.AddTask(ONE_MINUTE * 9, @Antiban.RandomRightClick, 1);
+  if Task = nil then
+    Exit;
+end;
+
+procedure TAntiban.Setup(); override;
+begin
+  inherited;
+
+  Self.AddTask(ONE_MINUTE * 2, @Self.RandomMouse, 1);
+  Self.AddTask(ONE_MINUTE * 9, @Self.HoverMSPlayers, 1);
+  Self.AddTask(ONE_MINUTE * 5, @Self.DoLoseFocus, 1);
+  Self.AddTask(ONE_MINUTE * 6, @Self.RandomRotate, 1);
+  Self.AddTask(ONE_MINUTE * 9, @Self.RandomRightClick, 1);
+
+  Self.Breaks := [];
 
   if ExtraAntiban then
-    Antiban.AddBreak(ONE_SECOND * 200, ONE_SECOND * 15, 1, 0);
+    Self.AddBreak(ONE_SECOND * 200, ONE_SECOND * 15, 1, 0);
 
   if TakeSleeps then
   begin
-    Antiban.OnStartSleep := @OnSleepStart;
-    Antiban.OnFinishSleep := @OnSleepEnd;
-    Antiban.AddSleep('00:00:00', 6 * ONE_HOUR, 0.1, 1);
+    Self.OnStartSleep := @OnSleepStart;
+    Self.OnFinishSleep := @OnSleepEnd;
+    Self.AddSleep('00:00:00', 6 * ONE_HOUR, 0.1, 1);
+  end
+  else
+  begin
+    Self.OnStartSleep := nil;
+    Self.OnFinishSleep := nil;
   end;
 
-  Antiban.AddBreak(BreakAfter * ONE_MINUTE, BreakFor * ONE_MINUTE, 0.3, 1);
-  Antiban.OnStartBreak := @PauseTimer;
-  Antiban.OnFinishBreak := @ResumeTimer;
+  Self.AddBreak(BreakAfter * ONE_MINUTE, BreakFor * ONE_MINUTE, 0.3, 1);
+  Self.OnStartBreak := @PauseTimer;
+  Self.OnFinishBreak := @ResumeTimer;
+  Self.OnFinishTask := @Self.HandleFinishTask;
 end;
 
 procedure AddObstacle(i: Int32; Tile, WalkTile: TPoint; UpText: TStringArray; Area: TBox; Height, Wait: Int32);
@@ -4422,7 +4438,6 @@ begin
     ReturnItemAmounts += 2;
   end;
 
-  SetupAntiban();
   InactivityTimer.Start();
   ReportTimer.Start();
 end;
