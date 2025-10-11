@@ -161,6 +161,7 @@ var
   DoBirdhouseRuns, TakeSleeps, DoFarmRuns, UseRunePouch, HosidiusHerb, HosidiusFlower,
   FarmRunNow, UseMagicSecateurs, BarbarianDibber, CatherbyHerb, CatherbyFlower,
   CompostFlowers: Boolean;
+  RealInputBlocked: Boolean := False;
   BlockInput: Boolean := True;
   InactivityTimer, ReportTimer, InfoTimer: TStopwatch;
   ReturnItemAmounts, FarmItemAmounts: TIntegerArray;
@@ -185,6 +186,8 @@ var
   NP_LastProgressTime, NP_LastLog: UInt64;
   ABNextCamJitterAt, ABNextBreakletAt: UInt64;
   ABMouseSpeed, ABMouseGravity, ABMouseWind, ABMouseMiss: Int32;
+
+procedure ReleaseRealInput(); forward;
 
 function TMushroom.GetMushButton() : ERSMushTreeButton;
 begin
@@ -1025,6 +1028,7 @@ begin
       if not HandleCave() then
       begin
         Self.DebugLn("Couldn't recover. Terminating.");
+        ReleaseRealInput();
         TerminateScript();
       end
       else
@@ -1036,6 +1040,7 @@ begin
       if not HandleCave() then
       begin
         Self.DebugLn("Couldn't recover. Terminating.");
+        ReleaseRealInput();
         TerminateScript();
       end
       else
@@ -3713,8 +3718,20 @@ begin
   Self.Report();
 end;
 
+procedure ReleaseRealInput();
+begin
+  if RealInputBlocked then
+  begin
+    WriteDebug('Re-enabling real input.');
+    RSClient.RemoteInput.EnableRealInput();
+    WLSettings.RemoteInput.BlockInput := False;
+    RealInputBlocked := False;
+  end;
+end;
+
 procedure TerminateScript(Reason: String); override; begin
   WriteLn(Reason);
+  ReleaseRealInput();
   TerminateScript();
 end;
 
@@ -4600,11 +4617,13 @@ begin
     WriteDebug('Blocking real input (default). Uncheck "Block Real Input" before starting to allow manual control.');
     WLSettings.RemoteInput.BlockInput := True;
     RSClient.RemoteInput.DisableRealInput();
+    RealInputBlocked := True;
   end else
   begin
     WriteDebug('Real input enabled; "Block Real Input" was unchecked.');
     WLSettings.RemoteInput.BlockInput := False;
     RSClient.RemoteInput.EnableRealInput();
+    RealInputBlocked := False;
   end;
 
   if UseRunePouch then
@@ -5089,10 +5108,14 @@ begin
 end;
 
 begin
-  GUI.Run();
-  Initiate();
+  try
+    GUI.Run();
+    Initiate();
 
-  repeat
-    Loop();
-  until false;
+    repeat
+      Loop();
+    until false;
+  finally
+    ReleaseRealInput();
+  end;
 end.
