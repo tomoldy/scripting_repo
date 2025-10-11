@@ -179,7 +179,7 @@ var
   BirdHouseRunner : TBirdHouseInclude;
   BHWriteDebug : Boolean := true;
   BHIncludeGUILogType : ERSLogType := ERSLogType.MAPLE_LOGS;
-  BHIncludeGUISeed : TRSItem := 'Potato seed';
+  BHIncludeGUISeed : TRSItem := 'Barley seed';
   BHIncludeGUIRunIntervalMinutes : Int32 := 51;
   PatchData: array of TPatchData;
 
@@ -486,8 +486,6 @@ begin
 
   Self.SetupBirdHouses();
   Self.Initialized := true;
-
-  Self.Seed := ToStr(Self.Seed).Replace("Barely", "Barley", [rfIgnoreCase]).Before(" ") + " seed";
 
   Self.DebugLn("Birdhouse Run initialized");
   Self.DebugLn("Log: " + ToStr(Self.LogType));
@@ -1449,10 +1447,13 @@ function TScriptForm.CreateBirdhouseRunSettings(): TTabSheet;
 
   procedure TScriptForm._SeedChanged(sender: TObject);
   var
-    seed : TEdit;
+    comboBox: TComboBox;
+    idx: Int32;
   begin
-    seed := sender;
-    BirdHouseRunner.Seed := seed.getText();
+    comboBox := sender;
+    idx := comboBox.getItemIndex();
+    if (idx >= 0) and (idx < comboBox.getItems().getCount()) then
+      BirdHouseRunner.Seed := comboBox.getItems().getStrings(idx);
   end;
 
   procedure TScriptForm._LogTypeChanged(sender: TObject);
@@ -1480,8 +1481,8 @@ var
   logTypeCombo : TLabeledCombobox;
   nowRadio, laterRadio: TRadioButton;
   intervalLabel : TLabel;
-  seedEdit  : TLabeledEdit;
-  fullWidth, w, space, y: Int32;
+  seedCombo  : TLabeledCombobox;
+  seedIndex, fullWidth, w, space, y: Int32;
 
 begin
   Self.AddTab('Birdhouse Settings');
@@ -1506,20 +1507,24 @@ begin
     Combobox.SetOnChange(@Self._LogTypeChanged);
   end;
 
-  with seedEdit do
+  with seedCombo do
   begin
     Create(Result);
-    SetTop(logTypeCOmbo.GetTop());
+    SetTop(logTypeCombo.GetTop());
     SetLeft(logTypeCombo.GetRight() + TControl.AdjustToDPI(H_SPACING));
     SetWidth(250);
-    SetCaption("Seed: just the name like potato or cabbage");
-    SetTooltip("Just the name of the seed don't include the word seed!");
+    SetCaption('Seed:');
     SetName('bh_seed');
-    SetMaxLength(30);
-    BirdHouseRunner.Seed := ToStr(BHIncludeGUISeed).Replace("Barely", "Barley", [rfIgnoreCase]).Before(" ");
-    Edit.setOnChange(@Self._SeedChanged);
-    Edit.setOnKeyPress(@Edit.CJTextField);
-    SetText(ToStr(BirdHouseRunner.Seed));
+    SetStyle(csDropDownList);
+    AddItemArray(['Barley seed', 'Hammerstone seed', 'Asgarnian seed',
+                  'Jute seed', 'Yanillian seed', 'Krandorian seed', 'Wildblood seed']);
+    BirdHouseRunner.Seed := ToStr(BHIncludeGUISeed);
+    seedIndex := ComboBox.getItems().IndexOf(ToStr(BirdHouseRunner.Seed));
+    if seedIndex < 0 then
+      seedIndex := 0;
+    SetItemIndex(seedIndex);
+    BirdHouseRunner.Seed := ComboBox.getItems().getStrings(seedIndex);
+    ComboBox.SetOnChange(@Self._SeedChanged);
   end;
 
   with intervalLabel do
