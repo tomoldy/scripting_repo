@@ -2,6 +2,7 @@
 {$DEFINE SCRIPT_REVISION := '14'}
 program agility;
 {$I WaspLib/osr.simba}
+{$I WaspLib/optional/handlers/discord.simba}
 {$IFNDEF ANDREW_MUSHTREE_INCLUDED}
   {$I WaspLib/optional/interfaces/mainscreen/mushtree.simba}
 {$ENDIF}
@@ -21,8 +22,9 @@ type
 
   TAgilityGUI = record (TScriptForm)
     BirdhouseCheckbox, SleepCheckbox, FarmRunNowCheckbox,
-    BlockInputCheckbox, FarmCheckbox: TLabeledCheckBox;
-    BreakForInput, BreakAfterInput, BankTabInput: TLabeledEdit;
+    BlockInputCheckbox, FarmCheckbox, HourlyReportCheckbox,
+    SessionSummaryCheckbox: TLabeledCheckBox;
+    BreakForInput, BreakAfterInput, BankTabInput, WebhookInput: TLabeledEdit;
     FoodInput, CourseInput, HerbSeedCombo, FlowerSeedCombo: TLabeledCombobox;
     MagicSecateursCheckbox, CatherbyHerbCheckbox, HosidiusHerbCheckbox,
     CatherbyFlowerCheckbox, HosidiusFlowerCheckbox, CompostFlowersCheckbox,
@@ -167,7 +169,8 @@ const
   NP_LOG_EVERY        = 60000;    // ms throttle for console spam
 
 var
-  Marks, WaitRand, Step, WaitTime, FarmRuns, BirdhouseRuns, BreakFor, BreakAfter, StartXP, CurrentXP, GainedXP, fc, gfc: Int32;
+  Marks, WaitRand, Step, WaitTime, FarmRuns, BirdhouseRuns, BreakFor, BreakAfter, StartXP, CurrentXP, GainedXP, fc, gfc,
+  LapsCompleted: Int32;
   BankTab: Int32 := 0;
   DoBirdhouseRuns, TakeSleeps, DoFarmRuns, UseRunePouch, HosidiusHerb, HosidiusFlower,
   FarmRunNow, UseMagicSecateurs, BarbarianDibber, CatherbyHerb, CatherbyFlower,
@@ -175,7 +178,10 @@ var
   EnableOverlay: Boolean := True;
   RealInputBlocked: Boolean := False;
   BlockInput: Boolean := True;
-  InactivityTimer, ReportTimer, InfoTimer: TStopwatch;
+  SendHourlyReports: Boolean := True;
+  SendSessionSummaryReports: Boolean := True;
+  WebhookEnabled, SessionSummarySent: Boolean;
+  InactivityTimer, ReportTimer, InfoTimer, HourlyReportTimer, RuntimeTimer: TStopwatch;
   ReturnItemAmounts, FarmItemAmounts: TIntegerArray;
   ReturnItems, FarmItems: TRSItemArray;
   Obstacles: Array of TObstacle;
@@ -188,6 +194,8 @@ var
   Course: ECourse;
   Farm: TFarmRun;
   Overlay: TAgilityOverlay;
+  Discord: TDiscordClient;
+  WebhookURL: String := '';
 
   BirdHouseRunner : TBirdHouseInclude;
   BHWriteDebug : Boolean := true;
@@ -3777,8 +3785,10 @@ begin
   end;
 end;
 
-procedure TerminateScript(Reason: String); override; begin
+procedure TerminateScript(Reason: String); override;
+begin
   WriteLn(Reason);
+  SendSessionSummary();
   ReleaseRealInput();
   TerminateScript();
 end;
@@ -4044,7 +4054,7 @@ begin
     SetFontSize(11);
     SetCaption('Script page and instructions:');
     SetLeft(380);
-    SetTop(360);
+    SetTop(TControl.AdjustToDPI(410));
     SetWidth(200);
   end;
 
@@ -4054,7 +4064,7 @@ begin
     SetCaption('https://waspscripts.com/scripts/agility-with-bh-and-farm-runs-by-nll');
     SetFontColor($FF0000);
     SetLeft(380);
-    SetTop(385);
+    SetTop(TControl.AdjustToDPI(435));
     SetWidth(200);
     setOnClick(@OpenLink);
     setCursor(crHandPoint);
@@ -4086,6 +4096,37 @@ begin
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(320));
     SetChecked(True);
+  end;
+
+  with Self.WebhookInput do
+  begin
+    Create(Tab);
+    SetCaption('Discord webhook:');
+    SetLeft(TControl.AdjustToDPI(30));
+    SetTop(TControl.AdjustToDPI(350));
+    SetWidth(TControl.AdjustToDPI(320));
+    SetToolTip('Optional: paste a Discord webhook URL to enable hourly and session reports.');
+    SetText(WebhookURL);
+  end;
+
+  with Self.HourlyReportCheckbox do
+  begin
+    Create(Tab);
+    SetCaption('Send hourly report');
+    SetLeft(TControl.AdjustToDPI(380));
+    SetTop(TControl.AdjustToDPI(320));
+    SetChecked(SendHourlyReports);
+    SetToolTip('Posts an hourly progress embed when a webhook is configured.');
+  end;
+
+  with Self.SessionSummaryCheckbox do
+  begin
+    Create(Tab);
+    SetCaption('Send session summary');
+    SetLeft(TControl.AdjustToDPI(380));
+    SetTop(TControl.AdjustToDPI(345));
+    SetChecked(SendSessionSummaryReports);
+    SetToolTip('Posts a summary with screenshot when the script stops.');
   end;
 
   Self.CreateAccountManager(Tab);
@@ -4198,6 +4239,9 @@ begin
     BlockInput := Self.BlockInputCheckbox.IsChecked()
   else
     BlockInput := True;
+  WebhookURL := Self.WebhookInput.GetText();
+  SendHourlyReports := Self.HourlyReportCheckbox.IsChecked();
+  SendSessionSummaryReports := Self.SessionSummaryCheckbox.IsChecked();
   BreakFor := Self.BreakForInput.GetText().ExtractInteger();
   BreakAfter := Self.BreakAfterInput.GetText().ExtractInteger();
   BankTab := Self.BankTabInput.GetText().ExtractInteger();
@@ -4389,6 +4433,172 @@ begin
   Hourly := ToStr('(', Round((GainedXP/(Hours*1000)), 1), ' k / hr)');
   WriteLn(SRL.TimeStamp(), ':[Experience]: ', Total, Hourly);
   ReportTimer.Reset();
+end;
+
+procedure ConfigureDiscord();
+begin
+  WebhookEnabled := False;
+
+  if WebhookURL = '' then
+  begin
+    if SendHourlyReports or SendSessionSummaryReports then
+      WriteLn('[Discord] Webhook URL is empty; Discord reports disabled.');
+    Exit;
+  end;
+
+  try
+    Discord.Setup();
+  except
+    on E: Exception do
+    begin
+      WriteLn('[Discord] Failed to initialize Discord client: ' + E.Message);
+      Exit;
+    end;
+  end;
+
+  if not Discord.SetWebhook(WebhookURL) then
+  begin
+    WriteLn('[Discord] Failed to validate webhook: ' + Discord.LastError);
+    Exit;
+  end;
+
+  Discord.SetUsername('Agility with BH');
+  Discord.Webhook.ClearAll();
+  WebhookEnabled := True;
+  WriteLn('[Discord] Webhook configured successfully.');
+end;
+
+procedure SendHourlyReport();
+var
+  runtimeMs: UInt64;
+  runtimeHours, xpPerHour, lapsPerHour: Double;
+  embedIdx: Int32;
+  sent: Boolean;
+begin
+  if not (WebhookEnabled and SendHourlyReports) then
+    Exit;
+
+  runtimeMs := RuntimeTimer.ElapsedTime();
+
+  if RSClient.IsLoggedIn() then
+    CurrentXP := XPBar.Read();
+
+  GainedXP := CurrentXP - StartXP;
+
+  if runtimeMs = 0 then
+    runtimeHours := 0
+  else
+    runtimeHours := runtimeMs / 3600000.0;
+
+  if runtimeHours > 0 then
+  begin
+    xpPerHour := GainedXP / runtimeHours;
+    lapsPerHour := LapsCompleted / runtimeHours;
+  end else
+  begin
+    xpPerHour := 0;
+    lapsPerHour := 0;
+  end;
+
+  try
+    Discord.Webhook.ClearAll();
+    Discord.Webhook.Content := '**Hourly Progress Report** :chart_with_upwards_trend:';
+    embedIdx := Discord.Webhook.AddEmbed();
+    Discord.Webhook.Embeds[embedIdx].Title := 'Agility with BH - Hourly Report';
+    Discord.Webhook.Embeds[embedIdx].Color := $1E90FF;
+    Discord.Webhook.Embeds[embedIdx].Description :=
+      'Runtime: ' + SRL.MsToTime(runtimeMs, Time_Short) + LineEnding +
+      'XP gained: ' + SRL.FormatNumber(GainedXP, 0) + ' (' + SRL.FormatNumber(xpPerHour, 1) + '/h)' + LineEnding +
+      'Laps: ' + SRL.FormatNumber(LapsCompleted, 0) + ' (' + SRL.FormatNumber(lapsPerHour, 1) + '/h)' + LineEnding +
+      'Farm runs: ' + IntToStr(FarmRuns) + LineEnding +
+      'Birdhouse runs: ' + IntToStr(BirdhouseRuns) + LineEnding +
+      'Marks of grace: ' + IntToStr(Marks);
+
+    sent := Discord.Send();
+
+    if sent then
+      WriteLn('[Discord] Hourly report sent.')
+    else
+      WriteLn('[Discord] Failed to send hourly report: ' + Discord.LastError);
+  except
+    WriteLn('[Discord] Error sending hourly report: ' + GetExceptionMessage);
+  end;
+end;
+
+procedure CheckHourlyReport();
+begin
+  if not (WebhookEnabled and SendHourlyReports) then
+    Exit;
+
+  if HourlyReportTimer.ElapsedTime() >= 3600000 then
+  begin
+    SendHourlyReport();
+    HourlyReportTimer.Reset();
+    HourlyReportTimer.Start();
+  end;
+end;
+
+procedure SendSessionSummary();
+var
+  runtimeMs: UInt64;
+  runtimeHours, xpPerHour, lapsPerHour: Double;
+  embedIdx: Int32;
+  sent: Boolean;
+begin
+  if SessionSummarySent then
+    Exit;
+
+  SessionSummarySent := True;
+
+  if not (WebhookEnabled and SendSessionSummaryReports) then
+    Exit;
+
+  runtimeMs := RuntimeTimer.ElapsedTime();
+
+  if RSClient.IsLoggedIn() then
+    CurrentXP := XPBar.Read();
+
+  GainedXP := CurrentXP - StartXP;
+
+  if runtimeMs = 0 then
+    runtimeHours := 0
+  else
+    runtimeHours := runtimeMs / 3600000.0;
+
+  if runtimeHours > 0 then
+  begin
+    xpPerHour := GainedXP / runtimeHours;
+    lapsPerHour := LapsCompleted / runtimeHours;
+  end else
+  begin
+    xpPerHour := 0;
+    lapsPerHour := 0;
+  end;
+
+  try
+    Discord.Webhook.ClearAll();
+    Discord.Webhook.Content := '**Session Complete!** :checkered_flag:';
+    embedIdx := Discord.Webhook.AddEmbed();
+    Discord.Webhook.Embeds[embedIdx].Title := 'Agility with BH - Session Summary';
+    Discord.Webhook.Embeds[embedIdx].Color := $32CD32;
+    Discord.Webhook.Embeds[embedIdx].Description :=
+      'Runtime: ' + SRL.MsToTime(runtimeMs, Time_Short) + LineEnding +
+      'XP gained: ' + SRL.FormatNumber(GainedXP, 0) + ' (' + SRL.FormatNumber(xpPerHour, 1) + '/h)' + LineEnding +
+      'Laps: ' + SRL.FormatNumber(LapsCompleted, 0) + ' (' + SRL.FormatNumber(lapsPerHour, 1) + '/h)' + LineEnding +
+      'Farm runs: ' + IntToStr(FarmRuns) + LineEnding +
+      'Birdhouse runs: ' + IntToStr(BirdhouseRuns) + LineEnding +
+      'Marks of grace: ' + IntToStr(Marks);
+    Discord.Webhook.Embeds[embedIdx].Footer := 'Bird nests looted: ' + IntToStr(BirdHouseRunner.NestsLooted);
+
+    sent := Discord.SendScreenshot(False);
+
+    if sent then
+      WriteLn('[Discord] Session summary sent.')
+    else
+      WriteLn('[Discord] Failed to send session summary: ' + Discord.LastError);
+  except
+    WriteLn('[Discord] Error sending session summary: ' + GetExceptionMessage);
+  end;
 end;
 
 function GetCurrentObstacleName(): String;
@@ -4717,12 +4927,28 @@ begin
   AB_InitProfile();
 
   if WaitUntil(RSClient.IsLoggedIn(), 250, 12000) then
+  begin
     StartXP := XPBar.Read();
+    CurrentXP := StartXP;
+    GainedXP := 0;
+  end;
 
   if StartXP < 1024 then
     TerminateScript('Failed to read XP, make sure XPBar is set up!');
 
   NP_MarkProgress();
+
+  LapsCompleted := 0;
+  SessionSummarySent := False;
+
+  RuntimeTimer := Default(TStopWatch);
+  RuntimeTimer.Start();
+
+  ConfigureDiscord();
+
+  HourlyReportTimer := Default(TStopWatch);
+  if WebhookEnabled and SendHourlyReports then
+    HourlyReportTimer.Start();
 
   Overlay.Init();
 
@@ -5023,7 +5249,7 @@ end;
 
 procedure NormalStep(Step: Int32);
 var
-  Health, Experience: Int32;
+  Health, Experience, NewXP: Int32;
   Found: Boolean;
   Pos: TPoint;
 begin
@@ -5043,6 +5269,12 @@ begin
   begin
     Mouse.Click(MOUSE_LEFT);
     WaitUntil((Experience < XPBar.Read()) or (Health > Minimap.GetHPLevel()), 300, 12775);
+    if (Length(Obstacles) > 0) and (Step = High(Obstacles)) then
+    begin
+      NewXP := XPBar.Read();
+      if NewXP > Experience then
+        Inc(LapsCompleted);
+    end;
     Wait(Obstacles[Step].Wait);
   end else
   begin
@@ -5103,6 +5335,8 @@ begin
 
   if ReportTimer.ElapsedTime() > 120000 then
     PrintProgress();
+
+  CheckHourlyReport();
 
   Step := GetStep();
 
@@ -5347,6 +5581,9 @@ begin
       Loop();
     until false;
   finally
+    SendSessionSummary();
+    if Discord.HTTP <> 0 then
+      Discord.Free();
     ReleaseRealInput();
   end;
 end.
