@@ -32,6 +32,10 @@ type
     RunePouchCheckbox: TLabeledCheckBox;
     ScriptInfo, ScriptTitle, AntibanNote: TLabel;
     CompostInput: TLabeledCombobox;
+    procedure Create();
+    function GetActiveUsername(): String;
+    procedure SaveSettingsToIni();
+    procedure FormCloseHandler(Sender: TObject; var CloseAction: TCloseAction);
   end;
 
   TAgilityOverlay = record
@@ -154,6 +158,8 @@ const
                                 'Grimy kwuarm', 'Grimy snapdragon', 'Grimy cadantine', 'Grimy lantadyme',
                                 'Grimy dwarf weed', 'Grimy torstol'];
 
+  AGILITY_INI_FILE = 'Configs/AgilityWithBH.ini';
+
   // Lightweight anti-ban profile tuning
   AB_REACT_MIN = 90;       // ms
   AB_REACT_MAX = 420;      // ms
@@ -185,17 +191,20 @@ var
   ReturnItemAmounts, FarmItemAmounts: TIntegerArray;
   ReturnItems, FarmItems: TRSItemArray;
   Obstacles: Array of TObstacle;
-  CompostMethod: ECompostMethod;
+  CompostMethod: ECompostMethod := ULTRA;
   AgilityRSW: TRSWalker;
   ReturnSpell: ERSSpell;
   BankBooth: TRSObject;
   Food, Seed, FlowerSeed: TRSItem;
   GUI: TAgilityGUI;
-  Course: ECourse;
+  Course: ECourse := DRAYNOR_ROOF;
   Farm: TFarmRun;
   Overlay: TAgilityOverlay;
   Discord: TDiscordClient;
   WebhookURL: String := '';
+
+  SavedHerbSeedName: String := 'Ranarr seed';
+  SavedFlowerSeedName: String := 'Limpwurt seed';
 
   BirdHouseRunner : TBirdHouseInclude;
   BHWriteDebug : Boolean := true;
@@ -4113,6 +4122,12 @@ begin
     SetTop(TControl.AdjustToDPI(70));
     AddItemArray(["Ultracompost", "Bottomless Compost"]);
     SetCaption('Compost:');
+    HerbIdx := Ord(CompostMethod) - 2;
+    if HerbIdx < 0 then
+      HerbIdx := 0
+    else if HerbIdx > 1 then
+      HerbIdx := 1;
+    SetItemIndex(HerbIdx);
   end;
 
   with Self.HerbSeedCombo do
@@ -4123,7 +4138,9 @@ begin
     SetCaption('Herb Seed:');
     SetStyle(csDropDownList);
     AddItemArray(HERB_SEEDS);
-    HerbIdx := GetSeedIndex(HERB_SEEDS, 'Ranarr seed');
+    HerbIdx := GetSeedIndex(HERB_SEEDS, SavedHerbSeedName);
+    if HerbIdx < 0 then
+      HerbIdx := GetSeedIndex(HERB_SEEDS, 'Ranarr seed');
     if HerbIdx < 0 then
       HerbIdx := 0;
     SetItemIndex(HerbIdx);
@@ -4137,11 +4154,235 @@ begin
     SetCaption('Flower Seed:');
     SetStyle(csDropDownList);
     AddItemArray(FLOWER_SEEDS);
-    FlowerIdx := GetSeedIndex(FLOWER_SEEDS, 'Limpwurt seed');
+    FlowerIdx := GetSeedIndex(FLOWER_SEEDS, SavedFlowerSeedName);
+    if FlowerIdx < 0 then
+      FlowerIdx := GetSeedIndex(FLOWER_SEEDS, 'Limpwurt seed');
     if FlowerIdx < 0 then
       FlowerIdx := 0;
     SetItemIndex(FlowerIdx);
   end;
+
+  if Self.FarmRunNowCheckbox.CheckBox <> nil then
+    Self.FarmRunNowCheckbox.SetChecked(FarmRunNow);
+
+  if Self.CompostFlowersCheckbox.CheckBox <> nil then
+    Self.CompostFlowersCheckbox.SetChecked(CompostFlowers);
+end;
+
+procedure TAgilityGUI.Create();
+var
+  Username: String;
+  CourseIdx, CompostIdx: Int32;
+begin
+  SavedHerbSeedName := 'Ranarr seed';
+  SavedFlowerSeedName := 'Limpwurt seed';
+  if BankTab < 0 then
+    BankTab := 0
+  else if BankTab > 9 then
+    BankTab := 9;
+  Course := DRAYNOR_ROOF;
+  CompostMethod := ULTRA;
+
+  Username := Self.GetActiveUsername();
+  if Username = '' then
+  begin
+    WriteDebug('[Agility GUI] No active login username; using default GUI settings.');
+    Exit;
+  end;
+
+  try
+    BankTab := StrToIntDef(ReadINI(Username + ' AgilityWithBH', 'BankTab', AGILITY_INI_FILE), BankTab);
+    if BankTab < 0 then
+      BankTab := 0
+    else if BankTab > 9 then
+      BankTab := 9;
+
+    CourseIdx := StrToIntDef(ReadINI(Username + ' AgilityWithBH', 'Course', AGILITY_INI_FILE), Ord(Course));
+    if CourseIdx < 0 then
+      CourseIdx := 0
+    else if CourseIdx > Ord(High(ECourse)) then
+      CourseIdx := Ord(High(ECourse));
+    Course := ECourse(CourseIdx);
+
+    DoBirdhouseRuns := StrToBoolDef(ReadINI(Username + ' AgilityWithBH', 'DoBirdhouseRuns', AGILITY_INI_FILE), DoBirdhouseRuns);
+    DoFarmRuns := StrToBoolDef(ReadINI(Username + ' AgilityWithBH', 'DoFarmRuns', AGILITY_INI_FILE), DoFarmRuns);
+    FarmRunNow := StrToBoolDef(ReadINI(Username + ' AgilityWithBH', 'FarmRunNow', AGILITY_INI_FILE), FarmRunNow);
+    CompostFlowers := StrToBoolDef(ReadINI(Username + ' AgilityWithBH', 'CompostFlowers', AGILITY_INI_FILE), CompostFlowers);
+
+    SavedHerbSeedName := ReadINI(Username + ' AgilityWithBH', 'HerbSeed', AGILITY_INI_FILE);
+    if SavedHerbSeedName = '' then
+      SavedHerbSeedName := 'Ranarr seed';
+
+    SavedFlowerSeedName := ReadINI(Username + ' AgilityWithBH', 'FlowerSeed', AGILITY_INI_FILE);
+    if SavedFlowerSeedName = '' then
+      SavedFlowerSeedName := 'Limpwurt seed';
+
+    CompostIdx := StrToIntDef(ReadINI(Username + ' AgilityWithBH', 'CompostIndex', AGILITY_INI_FILE), Ord(CompostMethod) - 2);
+    if CompostIdx < 0 then
+      CompostIdx := 0
+    else if CompostIdx > 1 then
+      CompostIdx := 1;
+    CompostMethod := ECompostMethod(CompostIdx + 2);
+
+    WebhookURL := ReadINI(Username + ' AgilityWithBH', 'WebhookURL', AGILITY_INI_FILE);
+    SendHourlyReports := StrToBoolDef(ReadINI(Username + ' AgilityWithBH', 'SendHourlyReports', AGILITY_INI_FILE), SendHourlyReports);
+    SendSessionSummaryReports := StrToBoolDef(ReadINI(Username + ' AgilityWithBH', 'SendSessionSummaryReports', AGILITY_INI_FILE), SendSessionSummaryReports);
+  except
+    on E: Exception do
+      WriteDebug('[Agility GUI] Failed to load saved settings: ' + E.Message);
+  end;
+end;
+
+function TAgilityGUI.GetActiveUsername(): String;
+var
+  Player: TRSLoginPlayer;
+begin
+  Result := '';
+
+  try
+    if (Login.PlayerIndex >= 0) and (Login.PlayerIndex <= High(Login.Players)) then
+      Result := Login.Players[Login.PlayerIndex].User;
+
+    if Result = '' then
+    begin
+      Player := Login.GetPlayer();
+      Result := Player.User;
+    end;
+  except
+    Result := '';
+  end;
+
+  if Result = '' then
+    Exit;
+end;
+
+procedure TAgilityGUI.SaveSettingsToIni();
+var
+  Username, HerbSeedName, FlowerSeedName, SavedWebhook: String;
+  CourseIdx, CompostIdx, SavedBankTab: Int32;
+  SavedBirdhouseRuns, SavedFarmRuns, SavedFarmRunNow, SavedCompostFlowers,
+  SavedHourlyReports, SavedSessionSummary: Boolean;
+begin
+  Username := Self.GetActiveUsername();
+  if Username = '' then
+  begin
+    WriteDebug('[Agility GUI] No active login username; skipping INI save.');
+    Exit;
+  end;
+
+  try
+    if Self.BankTabInput.Edit <> nil then
+      SavedBankTab := Self.BankTabInput.GetText().ExtractInteger()
+    else
+      SavedBankTab := BankTab;
+
+    if SavedBankTab < 0 then
+      SavedBankTab := 0
+    else if SavedBankTab > 9 then
+      SavedBankTab := 9;
+
+    if Self.CourseInput.ComboBox <> nil then
+      CourseIdx := Self.CourseInput.GetItemIndex()
+    else
+      CourseIdx := Ord(Course);
+    if CourseIdx < 0 then
+      CourseIdx := 0
+    else if CourseIdx > Ord(High(ECourse)) then
+      CourseIdx := Ord(High(ECourse));
+
+    if Self.CompostInput.ComboBox <> nil then
+      CompostIdx := Self.CompostInput.GetItemIndex()
+    else
+      CompostIdx := Ord(CompostMethod) - 2;
+    if CompostIdx < 0 then
+      CompostIdx := 0
+    else if CompostIdx > 1 then
+      CompostIdx := 1;
+
+    if Self.HerbSeedCombo.ComboBox <> nil then
+      HerbSeedName := Self.HerbSeedCombo.GetText()
+    else
+      HerbSeedName := SavedHerbSeedName;
+    if HerbSeedName = '' then
+      HerbSeedName := 'Ranarr seed';
+
+    if Self.FlowerSeedCombo.ComboBox <> nil then
+      FlowerSeedName := Self.FlowerSeedCombo.GetText()
+    else
+      FlowerSeedName := SavedFlowerSeedName;
+    if FlowerSeedName = '' then
+      FlowerSeedName := 'Limpwurt seed';
+
+    if Self.WebhookInput.Edit <> nil then
+      SavedWebhook := Self.WebhookInput.GetText()
+    else
+      SavedWebhook := WebhookURL;
+
+    if Self.BirdhouseCheckbox.CheckBox <> nil then
+      SavedBirdhouseRuns := Self.BirdhouseCheckbox.IsChecked()
+    else
+      SavedBirdhouseRuns := DoBirdhouseRuns;
+
+    if Self.FarmCheckbox.CheckBox <> nil then
+      SavedFarmRuns := Self.FarmCheckbox.IsChecked()
+    else
+      SavedFarmRuns := DoFarmRuns;
+
+    if Self.FarmRunNowCheckbox.CheckBox <> nil then
+      SavedFarmRunNow := Self.FarmRunNowCheckbox.IsChecked()
+    else
+      SavedFarmRunNow := FarmRunNow;
+
+    if Self.CompostFlowersCheckbox.CheckBox <> nil then
+      SavedCompostFlowers := Self.CompostFlowersCheckbox.IsChecked()
+    else
+      SavedCompostFlowers := CompostFlowers;
+
+    if Self.HourlyReportCheckbox.CheckBox <> nil then
+      SavedHourlyReports := Self.HourlyReportCheckbox.IsChecked()
+    else
+      SavedHourlyReports := SendHourlyReports;
+
+    if Self.SessionSummaryCheckbox.CheckBox <> nil then
+      SavedSessionSummary := Self.SessionSummaryCheckbox.IsChecked()
+    else
+      SavedSessionSummary := SendSessionSummaryReports;
+
+    WriteINI(Username + ' AgilityWithBH', 'BankTab', IntToStr(SavedBankTab), AGILITY_INI_FILE);
+    WriteINI(Username + ' AgilityWithBH', 'Course', IntToStr(CourseIdx), AGILITY_INI_FILE);
+    WriteINI(Username + ' AgilityWithBH', 'DoBirdhouseRuns', BoolToStr(SavedBirdhouseRuns, 'true', 'false'), AGILITY_INI_FILE);
+    WriteINI(Username + ' AgilityWithBH', 'DoFarmRuns', BoolToStr(SavedFarmRuns, 'true', 'false'), AGILITY_INI_FILE);
+    WriteINI(Username + ' AgilityWithBH', 'FarmRunNow', BoolToStr(SavedFarmRunNow, 'true', 'false'), AGILITY_INI_FILE);
+    WriteINI(Username + ' AgilityWithBH', 'CompostFlowers', BoolToStr(SavedCompostFlowers, 'true', 'false'), AGILITY_INI_FILE);
+    WriteINI(Username + ' AgilityWithBH', 'HerbSeed', HerbSeedName, AGILITY_INI_FILE);
+    WriteINI(Username + ' AgilityWithBH', 'FlowerSeed', FlowerSeedName, AGILITY_INI_FILE);
+    WriteINI(Username + ' AgilityWithBH', 'CompostIndex', IntToStr(CompostIdx), AGILITY_INI_FILE);
+    WriteINI(Username + ' AgilityWithBH', 'WebhookURL', SavedWebhook, AGILITY_INI_FILE);
+    WriteINI(Username + ' AgilityWithBH', 'SendHourlyReports', BoolToStr(SavedHourlyReports, 'true', 'false'), AGILITY_INI_FILE);
+    WriteINI(Username + ' AgilityWithBH', 'SendSessionSummaryReports', BoolToStr(SavedSessionSummary, 'true', 'false'), AGILITY_INI_FILE);
+
+    BankTab := SavedBankTab;
+    Course := ECourse(CourseIdx);
+    CompostMethod := ECompostMethod(CompostIdx + 2);
+    WebhookURL := SavedWebhook;
+    DoBirdhouseRuns := SavedBirdhouseRuns;
+    DoFarmRuns := SavedFarmRuns;
+    FarmRunNow := SavedFarmRunNow;
+    CompostFlowers := SavedCompostFlowers;
+    SendHourlyReports := SavedHourlyReports;
+    SendSessionSummaryReports := SavedSessionSummary;
+    SavedHerbSeedName := HerbSeedName;
+    SavedFlowerSeedName := FlowerSeedName;
+  except
+    on E: Exception do
+      WriteDebug('[Agility GUI] Failed to save settings: ' + E.Message);
+  end;
+end;
+
+procedure TAgilityGUI.FormCloseHandler(Sender: TObject; var CloseAction: TCloseAction);
+begin
+  Self.SaveSettingsToIni();
+  TerminateScript();
 end;
 
 procedure TAgilityGUI.Run(); override;
@@ -4149,6 +4390,7 @@ var
   Tab: TTabSheet;
 begin
   Self.Setup('Agility', Point(800, 500), False);
+  Self.Form.SetOnClose(@Self.FormCloseHandler);
   Self.Start.SetOnClick(@Self.StartScript);
   Self.AddTab('Settings');
 
@@ -4250,6 +4492,7 @@ begin
     SetLeft(TControl.AdjustToDPI(380));
     SetTop(TControl.AdjustToDPI(160));
     AddItemArray(["Draynor Village", "Varrock", "Falador", "Seers' Village", "Ardougne"]);
+    SetItemIndex(Ord(Course));
   end;
 
   with Self.SleepCheckbox do
@@ -4306,8 +4549,12 @@ begin
   Self.CreateBirdhouseRunSettings();
   Self.CreateFarmRunSettings();
 
-  Self.GetTab('Birdhouse Settings').SetTabVisible(False);
-  Self.GetTab('Farm Run Settings').SetTabVisible(False);
+  Self.BirdhouseCheckbox.SetChecked(DoBirdhouseRuns);
+  Self.FarmCheckbox.SetChecked(DoFarmRuns);
+  if Self.BirdhouseCheckbox.CheckBox <> nil then
+    Self.OnBirdhouseRunCheckboxChanged(Self.BirdhouseCheckbox.CheckBox);
+  if Self.FarmCheckbox.CheckBox <> nil then
+    Self.OnFarmRunCheckboxChanged(Self.FarmCheckbox.CheckBox);
 
   inherited;
 end;
@@ -4451,6 +4698,8 @@ begin
       FlowerIdx := 0;
     Self.FlowerSeedCombo.SetItemIndex(FlowerIdx);
   end;
+
+  Self.SaveSettingsToIni();
 
   inherited;
 end;
@@ -5761,6 +6010,7 @@ end;
 
 begin
   try
+    GUI.Create();
     GUI.Run();
     Initiate();
 
