@@ -199,6 +199,7 @@ var
   SendHourlyReports: Boolean := True;
   SendSessionSummaryReports: Boolean := True;
   WebhookEnabled, SessionSummarySent: Boolean;
+  ScriptCleanedUp: Boolean := False;
   InactivityTimer, ReportTimer, InfoTimer, HourlyReportTimer, RuntimeTimer: TStopwatch;
   ReturnItemAmounts, FarmItemAmounts: TIntegerArray;
   ReturnItems, FarmItems: TRSItemArray;
@@ -244,6 +245,7 @@ var
   LastBreakEventAt: UInt64;
 
 procedure ReleaseRealInput(); forward;
+procedure CleanupScript(); forward;
 procedure CheckSystemUpdate(); forward;
 
 function TMushroom.GetMushButton() : ERSMushTreeButton;
@@ -1084,8 +1086,7 @@ begin
       if not HandleCave() then
       begin
         Self.DebugLn("Couldn't recover. Terminating.");
-        ReleaseRealInput();
-        TerminateScript();
+        TerminateScript('Birdhouse runner failed to recover from cave navigation.');
       end
       else
         Self.DebugLn("Recovered!");
@@ -1096,8 +1097,7 @@ begin
       if not HandleCave() then
       begin
         Self.DebugLn("Couldn't recover. Terminating.");
-        ReleaseRealInput();
-        TerminateScript();
+        TerminateScript('Birdhouse runner failed to recover after walker exception.');
       end
       else
         Self.DebugLn("Recovered!");
@@ -4267,12 +4267,36 @@ begin
   end;
 end;
 
+procedure CleanupScript();
+begin
+  if ScriptCleanedUp then
+    Exit;
+
+  ScriptCleanedUp := True;
+
+  try
+    SendSessionSummary();
+  except
+    WriteDebug('Failed to send session summary during cleanup: ' + GetExceptionMessage);
+  end;
+
+  if Discord.HTTP <> 0 then
+  begin
+    try
+      Discord.Free();
+    except
+      WriteDebug('Failed to free Discord client during cleanup: ' + GetExceptionMessage);
+    end;
+  end;
+
+  ReleaseRealInput();
+end;
+
 procedure TerminateScript(Reason: String); override;
 begin
   WriteLn(Reason);
-  SendSessionSummary();
-  ReleaseRealInput();
-  TerminateScript();
+  CleanupScript();
+  inherited TerminateScript(Reason);
 end;
 
 procedure TFarmRun.DoFarmRun();
@@ -4682,7 +4706,7 @@ end;
 procedure TAgilityGUI.FormCloseHandler(Sender: TObject; var CloseAction: TCloseAction);
 begin
   Self.SaveSettingsToIni();
-  TerminateScript();
+  TerminateScript('GUI closed by user.');
 end;
 
 procedure TAgilityGUI.Run(); override;
@@ -6398,9 +6422,6 @@ begin
       Loop();
     until false;
   finally
-    SendSessionSummary();
-    if Discord.HTTP <> 0 then
-      Discord.Free();
-    ReleaseRealInput();
+    CleanupScript();
   end;
 end.
