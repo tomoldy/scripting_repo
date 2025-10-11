@@ -1204,20 +1204,6 @@ begin
   Result := Bank.WalkOpen(RSObjects.BankChestFossilIsland);
 end;
 
-//Function responsible for getting to a bank
-//Probably switching gear
-//Withdrawing the needed things
-//Should return if it was successful
-function TBirdHouseInclude.OnStart() : Boolean;
-begin
-  Exit(true);
-end;
-
-procedure TBirdHouseInclude.OnComplete();
-begin
-  Exit;
-end;
-
 function TBirdHouseInclude.HasAllItemsForRun() : Boolean;
 var
   tools : TRSBankItemArray;
