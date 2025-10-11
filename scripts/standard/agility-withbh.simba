@@ -43,10 +43,11 @@ type
     Position: TPoint;
     Padding, Width: Int32;
     Runtime: TStopWatch;
-    procedure Init();
-    procedure Update();
-    procedure Clear();
   end;
+
+procedure Overlay_Init(var Overlay: TAgilityOverlay);
+procedure Overlay_Update(var Overlay: TAgilityOverlay);
+procedure Overlay_Clear();
 
 procedure AgilityGUI_LoadSettings();
 function AgilityGUI_GetActiveUsername(): String;
@@ -3738,7 +3739,7 @@ begin
   SystemUpdateOverlayMessage := Message;
 
   if Overlay.Enabled then
-    Overlay.Update();
+    Overlay_Update(Overlay);
 end;
 
 function IsPlayerBusyForSystemUpdate(): Boolean;
@@ -3976,7 +3977,7 @@ begin
   SendBreakWebhook('**' + Kind + ' break** for ' + DurationText + '.');
 
   if Overlay.Enabled then
-    Overlay.Update();
+    Overlay_Update(Overlay);
 end;
 
 procedure FinishBreakEvent(const Kind: String);
@@ -3986,7 +3987,7 @@ begin
   WriteLn(SRL.TimeStamp(), ':[Breaks]: ' + Kind + ' break finished.');
 
   if Overlay.Enabled then
-    Overlay.Update();
+    Overlay_Update(Overlay);
 end;
 
 function SafeToTakeBreak(): Boolean;
@@ -4268,7 +4269,7 @@ end;
 
 procedure ReleaseRealInput();
 begin
-  Overlay.Clear();
+  Overlay_Clear();
 
   if RealInputBlocked then
   begin
@@ -5438,21 +5439,21 @@ begin
   Result := SRL.MsToTime(BirdHouseRunner.ScriptIntervalTimer.TimeRemaining(), Time_Short);
 end;
 
-procedure TAgilityOverlay.Init();
+procedure Overlay_Init(var Overlay: TAgilityOverlay);
 begin
-  Self.Enabled := EnableOverlay;
-  Self.FontSize := 11;
-  Self.BackgroundColor := $2D2D30;
-  Self.BorderColor := $000000;
-  Self.TextColor := $FFFFFF;
-  Self.Position := Point(14, 70);
-  Self.Padding := 6;
-  Self.Width := 235;
-  Self.Runtime := Default(TStopWatch);
-  Self.Runtime.Start();
+  Overlay.Enabled := EnableOverlay;
+  Overlay.FontSize := 11;
+  Overlay.BackgroundColor := $2D2D30;
+  Overlay.BorderColor := $000000;
+  Overlay.TextColor := $FFFFFF;
+  Overlay.Position := Point(14, 70);
+  Overlay.Padding := 6;
+  Overlay.Width := 235;
+  Overlay.Runtime := Default(TStopWatch);
+  Overlay.Runtime.Start();
 end;
 
-procedure TAgilityOverlay.Update();
+procedure Overlay_Update(var Overlay: TAgilityOverlay);
 var
   runtimeMs, elapsedSinceBreak: UInt64;
   xpPerHour: Int32;
@@ -5463,13 +5464,13 @@ var
   box: TBox;
   i: Int32;
 begin
-  if not Self.Enabled then
+  if not Overlay.Enabled then
     Exit;
 
   if not RSClient.IsLoggedIn() then
     Exit;
 
-  runtimeMs := Self.Runtime.ElapsedTime();
+  runtimeMs := Overlay.Runtime.ElapsedTime();
 
   if runtimeMs = 0 then
     xpPerHour := 0
@@ -5518,34 +5519,34 @@ begin
   if SystemUpdateOverlayMessage <> '' then
     lines += '⚠ ' + SystemUpdateOverlayMessage;
 
-  lineSpacing := Self.FontSize + 4;
-  headerSpacing := Self.FontSize + 6;
-  height := (Self.Padding * 2) + headerSpacing + (lineSpacing * (Length(lines) - 1));
-  box := Box(Self.Position.X, Self.Position.Y, Self.Position.X + Self.Width, Self.Position.Y + height);
+  lineSpacing := Overlay.FontSize + 4;
+  headerSpacing := Overlay.FontSize + 6;
+  height := (Overlay.Padding * 2) + headerSpacing + (lineSpacing * (Length(lines) - 1));
+  box := Box(Overlay.Position.X, Overlay.Position.Y, Overlay.Position.X + Overlay.Width, Overlay.Position.Y + height);
 
   with RSClient.Image() do
   begin
-    DrawBoxFilled(box.Expand(1), False, Self.BorderColor);
-    DrawBoxFilled(box, False, Self.BackgroundColor);
+    DrawBoxFilled(box.Expand(1), False, Overlay.BorderColor);
+    DrawBoxFilled(box, False, Overlay.BackgroundColor);
     SetFontName('Arial');
 
-    y := box.Y1 + Self.Padding;
+    y := box.Y1 + Overlay.Padding;
 
-    SetFontSize(Self.FontSize + 1);
-    DrawText(lines[0], Point(box.X1 + Self.Padding, y), Self.TextColor);
+    SetFontSize(Overlay.FontSize + 1);
+    DrawText(lines[0], Point(box.X1 + Overlay.Padding, y), Overlay.TextColor);
     y += headerSpacing;
 
-    SetFontSize(Self.FontSize);
+    SetFontSize(Overlay.FontSize);
 
     for i := 1 to High(lines) do
     begin
-      DrawText(lines[i], Point(box.X1 + Self.Padding, y), Self.TextColor);
+      DrawText(lines[i], Point(box.X1 + Overlay.Padding, y), Overlay.TextColor);
       y += lineSpacing;
     end;
   end;
 end;
 
-procedure TAgilityOverlay.Clear();
+procedure Overlay_Clear();
 begin
   try
     RSClient.Image().Clear();
@@ -5781,7 +5782,7 @@ begin
   if WebhookEnabled and SendHourlyReports then
     HourlyReportTimer.Start();
 
-  Overlay.Init();
+  Overlay_Init(Overlay);
 
   if Options.GetNPCAttackOption() <> ERSAttackOption.HIDDEN then
     Options.SetNPCAttackOption(ERSAttackOption.HIDDEN);
@@ -5934,7 +5935,7 @@ begin
   FarmRunActive := False;
   BirdhouseRunActive := False;
 
-  Overlay.Update();
+  Overlay_Update(Overlay);
 end;
 
 function GetStep(): Int32;
@@ -6191,7 +6192,7 @@ begin
     NormalStep(Step);
   end;
 
-  Overlay.Update();
+  Overlay_Update(Overlay);
 
   MaybeHandleScheduledBreaks();
 
