@@ -156,8 +156,9 @@ const
 var
   Marks, WaitRand, Step, WaitTime, FarmRuns, BirdhouseRuns, BreakFor, BreakAfter, StartXP, CurrentXP, GainedXP, fc, gfc: Int32;
   BankTab: Int32 := 0;
-  ExtraAntiban, DoBirdhouseRuns, BlockInput, TakeSleeps, DoFarmRuns, UseRunePouch, HosidiusHerb, HosidiusFlower,
+  ExtraAntiban, DoBirdhouseRuns, TakeSleeps, DoFarmRuns, UseRunePouch, HosidiusHerb, HosidiusFlower,
   FarmRunNow, UseMagicSecateurs, BarbarianDibber, CatherbyHerb, CatherbyFlower: Boolean;
+  BlockInput: Boolean := True;
   InactivityTimer, ReportTimer, InfoTimer: TStopwatch;
   ReturnItemAmounts, FarmItemAmounts: TIntegerArray;
   ReturnItems, FarmItems: TRSItemArray;
@@ -3956,6 +3957,7 @@ begin
     SetToolTip('If this is checked, you can not manually interact with the client');
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(320));
+    SetChecked(True);
   end;
 
   Self.CreateAccountManager(Tab);
@@ -4063,7 +4065,10 @@ begin
   DoBirdhouseRuns := Self.BirdhouseCheckbox.IsChecked();
   TakeSleeps := Self.SleepCheckbox.IsChecked();
   DoFarmRuns := Self.FarmCheckbox.IsChecked();
-  BlockInput := Self.BlockInputCheckbox.IsChecked();
+  if Self.BlockInputCheckbox <> nil then
+    BlockInput := Self.BlockInputCheckbox.IsChecked()
+  else
+    BlockInput := True;
   BreakFor := Self.BreakForInput.GetText().ExtractInteger();
   BreakAfter := Self.BreakAfterInput.GetText().ExtractInteger();
   BankTab := Self.BankTabInput.GetText().ExtractInteger();
@@ -4552,12 +4557,12 @@ begin
 
   if BlockInput then
   begin
-    WriteDebug('Script started with real input disabled.');
+    WriteDebug('Blocking real input (default). Uncheck "Block Real Input" before starting to allow manual control.');
     WLSettings.RemoteInput.BlockInput := True;
     RSClient.RemoteInput.DisableRealInput();
   end else
   begin
-    WriteDebug('Script started with real input enabled.');
+    WriteDebug('Real input enabled; "Block Real Input" was unchecked.');
     WLSettings.RemoteInput.BlockInput := False;
     RSClient.RemoteInput.EnableRealInput();
   end;
