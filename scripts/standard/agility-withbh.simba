@@ -1980,58 +1980,60 @@ begin
   Self.Patches += [Empty, Planted, Harvest, Travel, Data, TPA, SearchBox, Seed];
 end;
 
+function TFarmPatch.TryFindPatchOnce(): Boolean;
+var
+  FilterPt: TPoint;
+  BorderTPA, SearchFiltered: TPointArray;
+  BorderATPA: T2DPointArray;
+  SearchPt: TPoint;
+  i: Int32;
+begin
+  FilterPt := ScriptWalker^.GetTileMS(Self.Data.Coords).Mean();
+
+  if not (FilterPt in Mainscreen.Bounds) then
+    Exit(False);
+
+  if SRL.FindColors(BorderTPA, Self.Data.BorderColor, MainScreen.Bounds) = 0 then
+    Exit(False);
+
+  BorderATPA := BorderTPA.Cluster(Mainscreen.NormalizeDistance(32));
+  for i := 0 to High(BorderATPA) do
+  begin
+    Self.TPA := BorderATPA[i].ConvexHull.Connect();
+
+    if SRL.PointInPoly(FilterPt, Self.TPA) then
+    begin
+      Self.TPA := Self.TPA.SortFrom(MainScreen.Center);
+      SearchFiltered := Self.TPA.FilterDist(0, MainScreen.NormalizeDistance(140), Self.TPA[0].X, Self.TPA[0].Y);
+      SearchFiltered := SearchFiltered.SortFrom(MainScreen.Center);
+      SearchPt := SearchFiltered.Mean();
+      Self.SearchBox := Box(SearchPt, MainScreen.NormalizeDistance(14), MainScreen.NormalizeDistance(14));
+      Self.SearchBox.LimitTo(MainScreen.Bounds);
+      RSClient.Image.Clear();
+
+      //RSClient.Image.DrawRect(Self.TPA.MinAreaRect, CHAT_COLOR_LIGHT_PURPLE);
+      //RSClient.Image.DrawBox(Self.SearchBox, CHAT_COLOR_MAROON);
+
+      Exit(True);
+    end;
+  end;
+
+  Self.SearchBox := [0, 0, 0, 0];
+  Self.TPA := [];
+  Exit(False);
+end;
+
 function TFarmPatch.Find(Retry: Boolean = True): Boolean;
 var
   Attempts: Int32;
-
-  function F(): Boolean
-  var
-    FilterPt: TPoint := ScriptWalker^.GetTileMS(Self.Data.Coords).Mean();
-    BorderTPA, SearchFiltered: TPointArray;
-    BorderATPA: T2DPointArray;
-    SearchPt: TPoint;
-    i: Int32;
-  begin
-    if not (FilterPt in Mainscreen.Bounds) then
-      Exit(False);
-
-    if SRL.FindColors(BorderTPA, Self.Data.BorderColor, MainScreen.Bounds) = 0 then
-      Exit(False);
-
-    BorderATPA := BorderTPA.Cluster(Mainscreen.NormalizeDistance(32));
-    for i := 0 to High(borderATPA) do
-    begin
-      Self.TPA := BorderATPA[i].ConvexHull.Connect();
-
-      if SRL.PointInPoly(FilterPt, Self.TPA) then
-      begin
-        Self.TPA := Self.TPA.SortFrom(MainScreen.Center);
-        SearchFiltered := Self.TPA.FilterDist(0, MainScreen.NormalizeDistance(140), Self.TPA[0].X, Self.TPA[0].Y);
-        SearchFiltered := SearchFiltered.SortFrom(MainScreen.Center);
-        SearchPt := SearchFiltered.Mean();
-        Self.SearchBox := Box(SearchPt, MainScreen.NormalizeDistance(14), MainScreen.NormalizeDistance(14));
-        Self.SearchBox.LimitTo(MainScreen.Bounds);
-        RSClient.Image.Clear();
-
-        //RSClient.Image.DrawRect(Self.TPA.MinAreaRect, CHAT_COLOR_LIGHT_PURPLE);
-        //RSClient.Image.DrawBox(Self.SearchBox, CHAT_COLOR_MAROON);
-
-        Exit(True);
-      end;
-    end;
-    Self.SearchBox := [0, 0, 0, 0];
-    Self.TPA := [];
-    Result := False;
-  end;
-
 begin
   if not Retry then
-    Exit(F());
+    Exit(Self.TryFindPatchOnce());
 
   Result := False;
   for Attempts := 0 to 3 do
   begin
-    if F() then
+    if Self.TryFindPatchOnce() then
       Exit(True);
 
     try
@@ -2093,43 +2095,42 @@ begin
   Result := ColorCount = Self.SearchBox.Area;
 end;
 
+function TFarmPatch.TryFindLeprechaunOnce(out Point: TPoint): Boolean;
+var
+  SearchTPA, LeprechaunTPA: TPointArray;
+  Cuboids: TCuboidExArray;
+  FindBox: TBox;
+begin
+  Cuboids := ScriptWalker^.GetCuboidArrayMS([Self.Data.LeprechaunCoords], [1.5, 1.5, 8], [0, 0]);
+
+  if Length(Cuboids) = 0 then
+    Exit(False);
+
+  FindBox := Cuboids[0].Bounds();
+  FindBox.LimitTo(MainScreen.Bounds);
+
+  if SRL.FindColors(SearchTPA, Self.Data.LeprechaunColor, FindBox) = 0 then
+    Exit(False);
+
+  LeprechaunTPA := Cuboids[0].Filter(SearchTPA);
+
+  if LeprechaunTPA.Len = 0 then
+    Exit(False);
+
+  Point := LeprechaunTPA.Mean();
+  Exit(True);
+end;
+
 function TFarmPatch.FindLeprechaun(out Point: TPoint; Retry: Boolean = True): Boolean;
 var
   Attempts: Int32;
-
-  function F(): Boolean;
-  var
-    SearchTPA, LeprechaunTPA: TPointArray;
-    Cuboids: TCuboidExArray;
-    FindBox: TBox;
-  begin
-    Cuboids := ScriptWalker^.GetCuboidArrayMS([Self.Data.LeprechaunCoords], [1.5, 1.5, 8], [0, 0]);
-
-    if Length(Cuboids) = 0 then
-      Exit();
-
-    FindBox := Cuboids[0].Bounds();
-    FindBox.LimitTo(MainScreen.Bounds);
-
-    if SRL.FindColors(SearchTPA, Self.Data.LeprechaunColor, FindBox) = 0 then
-      Exit();
-
-    LeprechaunTPA := Cuboids[0].Filter(SearchTPA);
-
-    if LeprechaunTPA.Len = 0 then
-      Exit();
-
-    Point := LeprechaunTPA.Mean();
-    Result := True;
-  end;
-
 begin
   if not Retry then
-    Exit(F());
+    Exit(Self.TryFindLeprechaunOnce(Point));
 
   for Attempts := 0 to 3 do
   begin
-    if F() then
+    if Self.TryFindLeprechaunOnce(Point) then
       Exit(True);
 
     case Attempts of
@@ -2145,6 +2146,8 @@ begin
       3: WriteLn('Failed to find leprechaun.');
     end;
   end;
+
+  Result := False;
 end;
 
 function TFarmPatch.GetState(): EPatchState;
