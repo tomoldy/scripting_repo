@@ -20,14 +20,14 @@ type
   ECourse = (DRAYNOR_ROOF, VARROCK_ROOF, FALADOR_ROOF, SEERS_ROOF, ARDOUGNE_ROOF);
 
   TAgilityGUI = record (TScriptForm)
-    AntibanCheckbox, BirdhouseCheckbox, SleepCheckbox, FarmRunNowCheckbox,
+    BirdhouseCheckbox, SleepCheckbox, FarmRunNowCheckbox,
     BlockInputCheckbox, FarmCheckbox: TLabeledCheckBox;
     BreakForInput, BreakAfterInput, BankTabInput: TLabeledEdit;
     FoodInput, CourseInput: TLabeledCombobox;
     MagicSecateursCheckbox, CatherbyHerbCheckbox, HosidiusHerbCheckbox,
     CatherbyFlowerCheckbox, HosidiusFlowerCheckbox, BarbarianDibberCheckbox,
     RunePouchCheckbox: TLabeledCheckBox;
-    ScriptInfo, ScriptTitle: TLabel;
+    ScriptInfo, ScriptTitle, AntibanNote: TLabel;
     CompostInput: TLabeledCombobox;
     SeedInput: TLabeledEdit;
   end;
@@ -156,7 +156,7 @@ const
 var
   Marks, WaitRand, Step, WaitTime, FarmRuns, BirdhouseRuns, BreakFor, BreakAfter, StartXP, CurrentXP, GainedXP, fc, gfc: Int32;
   BankTab: Int32 := 0;
-  ExtraAntiban, DoBirdhouseRuns, TakeSleeps, DoFarmRuns, UseRunePouch, HosidiusHerb, HosidiusFlower,
+  DoBirdhouseRuns, TakeSleeps, DoFarmRuns, UseRunePouch, HosidiusHerb, HosidiusFlower,
   FarmRunNow, UseMagicSecateurs, BarbarianDibber, CatherbyHerb, CatherbyFlower: Boolean;
   BlockInput: Boolean := True;
   InactivityTimer, ReportTimer, InfoTimer: TStopwatch;
@@ -3872,13 +3872,14 @@ begin
     SetText('10');
   end;
 
-  with Self.AntibanCheckbox do
+  with Self.AntibanNote do
   begin
     Create(Tab);
-    SetCaption('Extra antiban');
-    SetTooltip('Mimics an unfocused player by increased reactions and short breaks.');
+    SetCaption('Always-on antiban: slower reaction times, ambient waits, and micro-breaks are built in.');
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(270));
+    SetWidth(TControl.AdjustToDPI(320));
+    SetWordWrap(True);
   end;
 
   with Self.BirdhouseCheckbox do
@@ -4061,7 +4062,6 @@ end;
 
 procedure TAgilityGUI.StartScript(Sender: TObject); override;
 begin
-  ExtraAntiban := Self.AntibanCheckbox.IsChecked();
   DoBirdhouseRuns := Self.BirdhouseCheckbox.IsChecked();
   TakeSleeps := Self.SleepCheckbox.IsChecked();
   DoFarmRuns := Self.FarmCheckbox.IsChecked();
@@ -4291,8 +4291,7 @@ begin
 
   Self.Breaks := [];
 
-  if ExtraAntiban then
-    Self.AddBreak(ONE_SECOND * 200, ONE_SECOND * 15, 1, 0);
+  Self.AddBreak(ONE_SECOND * 200, ONE_SECOND * 15, 1, 0);
 
   if TakeSleeps then
   begin
@@ -4542,18 +4541,13 @@ begin
     DRAYNOR_ROOF: SetupDraynor();
   end;
 
-  if ExtraAntiban then
-    WaitTime := 775
-  else
-    WaitTime := 180;
+  WaitTime := 775;
+  WriteDebug('Always-on antiban profile active (slower reactions and micro-breaks).');
 
   WaitRand := (WaitTime - 10);
   AgilityRSW.AdaptiveWalk := True;
 
-  if ExtraAntiban then
-    Mouse.Speed := Random(11, 15)
-  else
-    Mouse.Speed := Random(20, 26);
+  Mouse.Speed := Random(11, 15);
 
   if BlockInput then
   begin
@@ -4602,7 +4596,7 @@ begin
   else
     Mouse.HumanMove(Pt);
 
-  if ExtraAntiban and SRL.Dice(15) then
+  if SRL.Dice(15) then
     RandomWait();
 
   Result := Mainscreen.IsUpText(UpText, WaitTime);
