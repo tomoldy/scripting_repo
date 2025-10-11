@@ -21,7 +21,8 @@ program agility;
 type
   ECourse = (DRAYNOR_ROOF, VARROCK_ROOF, FALADOR_ROOF, SEERS_ROOF, ARDOUGNE_ROOF);
 
-  TAgilityGUI = record (TScriptForm)
+  TAgilityGUI = record
+    Form: TScriptForm;
     BirdhouseCheckbox, SleepCheckbox, FarmRunNowCheckbox,
     BlockInputCheckbox, FarmCheckbox, HourlyReportCheckbox,
     SessionSummaryCheckbox, PlannedBreaksCheckbox: TLabeledCheckBox;
@@ -33,10 +34,6 @@ type
     RunePouchCheckbox: TLabeledCheckBox;
     ScriptInfo, ScriptTitle, AntibanNote: TLabel;
     CompostInput: TLabeledCombobox;
-    procedure Create();
-    function GetActiveUsername(): String;
-    procedure SaveSettingsToIni();
-    procedure FormCloseHandler(Sender: TObject; var CloseAction: TCloseAction);
   end;
 
   TAgilityOverlay = record
@@ -50,6 +47,16 @@ type
     procedure Update();
     procedure Clear();
   end;
+
+procedure AgilityGUI_LoadSettings();
+function AgilityGUI_GetActiveUsername(): String;
+procedure AgilityGUI_SaveSettingsToIni();
+procedure AgilityGUI_FormCloseHandler(Sender: TObject; var CloseAction: TCloseAction);
+procedure AgilityGUI_OnBirdhouseRunCheckboxChanged(Sender: TObject);
+procedure AgilityGUI_OnFarmRunCheckboxChanged(Sender: TObject);
+function AgilityGUI_CreateFarmRunSettings(): TTabSheet;
+procedure AgilityGUI_Run();
+procedure AgilityGUI_StartScript(Sender: TObject);
 
   TObstacle = record
     Tile, WalkTile: TPoint;
@@ -603,6 +610,7 @@ var
   chatTitle : string;
 begin
 
+  shouldSkip := False;
   Self.DebugLn("Moving");
   if not WaitUntil(Self.RSW.WalkBlind(Self.CurrentBirdHouse^.BirdhouseObject.Coordinates[0], 20), 150, 5000) then
     Exit(False);
@@ -4313,20 +4321,20 @@ begin
   ReadyTimer.Init(Self.GetNextTime());
 end;
 
-procedure TAgilityGUI.OnBirdhouseRunCheckboxChanged(Sender: TObject);
+procedure AgilityGUI_OnBirdhouseRunCheckboxChanged(Sender: TObject);
 var
   CheckBox: TCheckbox;
 begin
   CheckBox := Sender;
-  Self.GetTab('Birdhouse Settings').SetTabVisible(CheckBox.IsChecked());
+  GUI.Form.GetTab('Birdhouse Settings').SetTabVisible(CheckBox.IsChecked());
 end;
 
-procedure TAgilityGUI.OnFarmRunCheckboxChanged(Sender: TObject);
+procedure AgilityGUI_OnFarmRunCheckboxChanged(Sender: TObject);
 var
   CheckBox: TCheckbox;
 begin
   CheckBox := Sender;
-  Self.GetTab('Farm Run Settings').SetTabVisible(CheckBox.IsChecked());
+  GUI.Form.GetTab('Farm Run Settings').SetTabVisible(CheckBox.IsChecked());
 end;
 
 function TRSWalker.GetTileMSEx(Me, Loc: TPoint; Height:Double=0; Offx,Offy:Double=0): TRectangle; override;
@@ -4341,13 +4349,13 @@ begin
   Result := Minimap.VectorToMSRect(vec + [-offx, -offy, height], 1, 1, angle);
 end;
 
-function TAgilityGUI.CreateFarmRunSettings(): TTabSheet;
+function AgilityGUI_CreateFarmRunSettings(): TTabSheet;
 var
   Info: TLabel;
   HerbIdx, FlowerIdx: Int32;
 begin
-  Self.AddTab('Farm Run Settings');
-  Result := Self.GetTab('Farm Run Settings');
+  GUI.Form.AddTab('Farm Run Settings');
+  Result := GUI.Form.GetTab('Farm Run Settings');
   Result.SetToolTip('');
 
   with Info do
@@ -4362,7 +4370,7 @@ begin
     SetCaption('If you have problems with the settings, check the script page for instructions.');
   end;
 
-  with Self.HosidiusHerbCheckbox do
+  with GUI.HosidiusHerbCheckbox do
   begin
     Create(Result);
     SetCaption('Hosidius Herb');
@@ -4371,7 +4379,7 @@ begin
     SetTop(TControl.AdjustToDPI(130));
   end;
 
-  with Self.HosidiusFlowerCheckbox do
+  with GUI.HosidiusFlowerCheckbox do
   begin
     Create(Result);
     SetCaption('Hosidius Flower');
@@ -4380,7 +4388,7 @@ begin
     SetTop(TControl.AdjustToDPI(110));
   end;
 
-  with Self.CatherbyHerbCheckbox do
+  with GUI.CatherbyHerbCheckbox do
   begin
     Create(Result);
     SetCaption('Catherby Herb');
@@ -4389,7 +4397,7 @@ begin
     SetTop(TControl.AdjustToDPI(90));
   end;
 
-  with Self.CatherbyFlowerCheckbox do
+  with GUI.CatherbyFlowerCheckbox do
   begin
     Create(Result);
     SetCaption('Catherby Flower');
@@ -4398,7 +4406,7 @@ begin
     SetTop(TControl.AdjustToDPI(70));
   end;
 
-  with Self.MagicSecateursCheckbox do
+  with GUI.MagicSecateursCheckbox do
   begin
     Create(Result);
     SetCaption('Use Magic Secateurs');
@@ -4407,7 +4415,7 @@ begin
     SetTop(TControl.AdjustToDPI(160));
   end;
 
-  with Self.RunePouchCheckbox do
+  with GUI.RunePouchCheckbox do
   begin
     Create(Result);
     SetCaption('Use Rune Pouch');
@@ -4416,7 +4424,7 @@ begin
     SetTop(TControl.AdjustToDPI(185));
   end;
 
-  with Self.BarbarianDibberCheckbox do
+  with GUI.BarbarianDibberCheckbox do
   begin
     Create(Result);
     SetCaption('Barbarian Seed Dibber unlocked');
@@ -4425,7 +4433,7 @@ begin
     SetTop(TControl.AdjustToDPI(210));
   end;
 
-  with Self.FarmRunNowCheckbox do
+  with GUI.FarmRunNowCheckbox do
   begin
     Create(Result);
     SetCaption('Start with a farm run');
@@ -4434,7 +4442,7 @@ begin
     SetTop(TControl.AdjustToDPI(235));
   end;
 
-  with Self.CompostFlowersCheckbox do
+  with GUI.CompostFlowersCheckbox do
   begin
     Create(Result);
     SetCaption('Compost flower patches');
@@ -4443,7 +4451,7 @@ begin
     SetTop(TControl.AdjustToDPI(260));
   end;
 
-  with Self.CompostInput do
+  with GUI.CompostInput do
   begin
     Create(Result);
     SetLeft(TControl.AdjustToDPI(30));
@@ -4458,7 +4466,7 @@ begin
     SetItemIndex(HerbIdx);
   end;
 
-  with Self.HerbSeedCombo do
+  with GUI.HerbSeedCombo do
   begin
     Create(Result);
     SetLeft(TControl.AdjustToDPI(30));
@@ -4474,7 +4482,7 @@ begin
     SetItemIndex(HerbIdx);
   end;
 
-  with Self.FlowerSeedCombo do
+  with GUI.FlowerSeedCombo do
   begin
     Create(Result);
     SetLeft(TControl.AdjustToDPI(30));
@@ -4489,15 +4497,9 @@ begin
       FlowerIdx := 0;
     SetItemIndex(FlowerIdx);
   end;
-
-  if Self.FarmRunNowCheckbox.CheckBox <> nil then
-    Self.FarmRunNowCheckbox.SetChecked(FarmRunNow);
-
-  if Self.CompostFlowersCheckbox.CheckBox <> nil then
-    Self.CompostFlowersCheckbox.SetChecked(CompostFlowers);
 end;
 
-procedure TAgilityGUI.Create();
+procedure AgilityGUI_LoadSettings();
 var
   Username: String;
   CourseIdx, CompostIdx: Int32;
@@ -4511,7 +4513,7 @@ begin
   Course := DRAYNOR_ROOF;
   CompostMethod := ULTRA;
 
-  Username := Self.GetActiveUsername();
+  Username := AgilityGUI_GetActiveUsername();
   if Username = '' then
   begin
     WriteDebug('[Agility GUI] No active login username; using default GUI settings.');
@@ -4561,7 +4563,7 @@ begin
   end;
 end;
 
-function TAgilityGUI.GetActiveUsername(): String;
+function AgilityGUI_GetActiveUsername(): String;
 var
   Player: TRSLoginPlayer;
 begin
@@ -4584,14 +4586,14 @@ begin
     Exit;
 end;
 
-procedure TAgilityGUI.SaveSettingsToIni();
+procedure AgilityGUI_SaveSettingsToIni();
 var
   Username, HerbSeedName, FlowerSeedName, SavedWebhook: String;
   CourseIdx, CompostIdx, SavedBankTab: Int32;
   SavedBirdhouseRuns, SavedFarmRuns, SavedFarmRunNow, SavedCompostFlowers,
   SavedHourlyReports, SavedSessionSummary: Boolean;
 begin
-  Username := Self.GetActiveUsername();
+  Username := AgilityGUI_GetActiveUsername();
   if Username = '' then
   begin
     WriteDebug('[Agility GUI] No active login username; skipping INI save.');
@@ -4599,8 +4601,8 @@ begin
   end;
 
   try
-    if Self.BankTabInput.Edit <> nil then
-      SavedBankTab := Self.BankTabInput.GetText().ExtractInteger()
+    if GUI.BankTabInput.Edit <> nil then
+      SavedBankTab := GUI.BankTabInput.GetText().ExtractInteger()
     else
       SavedBankTab := BankTab;
 
@@ -4609,8 +4611,8 @@ begin
     else if SavedBankTab > 9 then
       SavedBankTab := 9;
 
-    if Self.CourseInput.ComboBox <> nil then
-      CourseIdx := Self.CourseInput.GetItemIndex()
+    if GUI.CourseInput.ComboBox <> nil then
+      CourseIdx := GUI.CourseInput.GetItemIndex()
     else
       CourseIdx := Ord(Course);
     if CourseIdx < 0 then
@@ -4618,8 +4620,8 @@ begin
     else if CourseIdx > Ord(High(ECourse)) then
       CourseIdx := Ord(High(ECourse));
 
-    if Self.CompostInput.ComboBox <> nil then
-      CompostIdx := Self.CompostInput.GetItemIndex()
+    if GUI.CompostInput.ComboBox <> nil then
+      CompostIdx := GUI.CompostInput.GetItemIndex()
     else
       CompostIdx := Ord(CompostMethod) - 2;
     if CompostIdx < 0 then
@@ -4627,52 +4629,52 @@ begin
     else if CompostIdx > 1 then
       CompostIdx := 1;
 
-    if Self.HerbSeedCombo.ComboBox <> nil then
-      HerbSeedName := Self.HerbSeedCombo.GetText()
+    if GUI.HerbSeedCombo.ComboBox <> nil then
+      HerbSeedName := GUI.HerbSeedCombo.GetText()
     else
       HerbSeedName := SavedHerbSeedName;
     if HerbSeedName = '' then
       HerbSeedName := 'Ranarr seed';
 
-    if Self.FlowerSeedCombo.ComboBox <> nil then
-      FlowerSeedName := Self.FlowerSeedCombo.GetText()
+    if GUI.FlowerSeedCombo.ComboBox <> nil then
+      FlowerSeedName := GUI.FlowerSeedCombo.GetText()
     else
       FlowerSeedName := SavedFlowerSeedName;
     if FlowerSeedName = '' then
       FlowerSeedName := 'Limpwurt seed';
 
-    if Self.WebhookInput.Edit <> nil then
-      SavedWebhook := Self.WebhookInput.GetText()
+    if GUI.WebhookInput.Edit <> nil then
+      SavedWebhook := GUI.WebhookInput.GetText()
     else
       SavedWebhook := WebhookURL;
 
-    if Self.BirdhouseCheckbox.CheckBox <> nil then
-      SavedBirdhouseRuns := Self.BirdhouseCheckbox.IsChecked()
+    if GUI.BirdhouseCheckbox.CheckBox <> nil then
+      SavedBirdhouseRuns := GUI.BirdhouseCheckbox.IsChecked()
     else
       SavedBirdhouseRuns := DoBirdhouseRuns;
 
-    if Self.FarmCheckbox.CheckBox <> nil then
-      SavedFarmRuns := Self.FarmCheckbox.IsChecked()
+    if GUI.FarmCheckbox.CheckBox <> nil then
+      SavedFarmRuns := GUI.FarmCheckbox.IsChecked()
     else
       SavedFarmRuns := DoFarmRuns;
 
-    if Self.FarmRunNowCheckbox.CheckBox <> nil then
-      SavedFarmRunNow := Self.FarmRunNowCheckbox.IsChecked()
+    if GUI.FarmRunNowCheckbox.CheckBox <> nil then
+      SavedFarmRunNow := GUI.FarmRunNowCheckbox.IsChecked()
     else
       SavedFarmRunNow := FarmRunNow;
 
-    if Self.CompostFlowersCheckbox.CheckBox <> nil then
-      SavedCompostFlowers := Self.CompostFlowersCheckbox.IsChecked()
+    if GUI.CompostFlowersCheckbox.CheckBox <> nil then
+      SavedCompostFlowers := GUI.CompostFlowersCheckbox.IsChecked()
     else
       SavedCompostFlowers := CompostFlowers;
 
-    if Self.HourlyReportCheckbox.CheckBox <> nil then
-      SavedHourlyReports := Self.HourlyReportCheckbox.IsChecked()
+    if GUI.HourlyReportCheckbox.CheckBox <> nil then
+      SavedHourlyReports := GUI.HourlyReportCheckbox.IsChecked()
     else
       SavedHourlyReports := SendHourlyReports;
 
-    if Self.SessionSummaryCheckbox.CheckBox <> nil then
-      SavedSessionSummary := Self.SessionSummaryCheckbox.IsChecked()
+    if GUI.SessionSummaryCheckbox.CheckBox <> nil then
+      SavedSessionSummary := GUI.SessionSummaryCheckbox.IsChecked()
     else
       SavedSessionSummary := SendSessionSummaryReports;
 
@@ -4707,22 +4709,22 @@ begin
   end;
 end;
 
-procedure TAgilityGUI.FormCloseHandler(Sender: TObject; var CloseAction: TCloseAction);
+procedure AgilityGUI_FormCloseHandler(Sender: TObject; var CloseAction: TCloseAction);
 begin
-  Self.SaveSettingsToIni();
+  AgilityGUI_SaveSettingsToIni();
   TerminateScript('GUI closed by user.');
 end;
 
-procedure TAgilityGUI.Run(); override;
+procedure AgilityGUI_Run();
 var
   Tab: TTabSheet;
 begin
-  Self.Setup('Agility', Point(800, 500), False);
-  Self.Form.SetOnClose(@Self.FormCloseHandler);
-  Self.Start.SetOnClick(@Self.StartScript);
-  Self.AddTab('Settings');
+  GUI.Form.Setup('Agility', Point(800, 500), False);
+  GUI.Form.Form.SetOnClose(@AgilityGUI_FormCloseHandler);
+  GUI.Form.Start.SetOnClick(@AgilityGUI_StartScript);
+  GUI.Form.AddTab('Settings');
 
-  Tab := Self.GetTab('Settings');
+  Tab := GUI.Form.GetTab('Settings');
   Tab.SetTooltip('');
 
   if BreakAfter <= 0 then
@@ -4731,7 +4733,7 @@ begin
   if BreakFor <= 0 then
     BreakFor := 15;
 
-  with Self.BankTabInput do
+  with GUI.BankTabInput do
   begin
     Create(Tab);
     SetLeft(TControl.AdjustToDPI(30));
@@ -4740,7 +4742,7 @@ begin
     SetText(ToStr(BankTab));
   end;
 
-  with Self.PlannedBreaksCheckbox do
+  with GUI.PlannedBreaksCheckbox do
   begin
     Create(Tab);
     SetLeft(TControl.AdjustToDPI(30));
@@ -4750,7 +4752,7 @@ begin
     SetToolTip('Takes a logout break every X minutes for Y minutes.');
   end;
 
-  with Self.BreakAfterInput do
+  with GUI.BreakAfterInput do
   begin
     Create(Tab);
     SetLeft(TControl.AdjustToDPI(30));
@@ -4760,7 +4762,7 @@ begin
     SetToolTip('Minutes between planned breaks when enabled.');
   end;
 
-  with Self.BreakForInput do
+  with GUI.BreakForInput do
   begin
     Create(Tab);
     SetLeft(TControl.AdjustToDPI(30));
@@ -4770,7 +4772,7 @@ begin
     SetToolTip('Approximate duration of each planned break.');
   end;
 
-  with Self.AntibanNote do
+  with GUI.AntibanNote do
   begin
     Create(Tab);
     SetCaption('Always-on antiban: slower reaction times, ambient waits, and micro-breaks are built in.');
@@ -4780,27 +4782,29 @@ begin
     SetWordWrap(True);
   end;
 
-  with Self.BirdhouseCheckbox do
+  with GUI.BirdhouseCheckbox do
   begin
     Create(Tab);
     SetLeft(TControl.AdjustToDPI(380));
     SetTop(TControl.AdjustToDPI(270));
     SetCaption('Do birdhouse runs');
     SetToolTip('');
-    CheckBox.SetOnChange(@Self.OnBirdhouseRunCheckboxChanged);
+    SetChecked(DoBirdhouseRuns);
+    CheckBox.SetOnChange(@AgilityGUI_OnBirdhouseRunCheckboxChanged);
   end;
 
-  with Self.FarmCheckbox do
+  with GUI.FarmCheckbox do
   begin
     Create(Tab);
     SetLeft(TControl.AdjustToDPI(380));
     SetTop(TControl.AdjustToDPI(295));
     SetCaption('Do farm runs');
     SetToolTip('');
-    CheckBox.SetOnChange(@Self.OnFarmRunCheckboxChanged);
+    SetChecked(DoFarmRuns);
+    CheckBox.SetOnChange(@AgilityGUI_OnFarmRunCheckboxChanged);
   end;
 
-  with Self.FoodInput do
+  with GUI.FoodInput do
   begin
     Create(Tab);
     SetCaption('Food:');
@@ -4809,7 +4813,7 @@ begin
     AddItemArray(["Salmon", "Tuna", "Lobster", "Bass", "Shark", "Manta ray"]);
   end;
 
-  with ScriptTitle do
+  with GUI.ScriptTitle do
   begin
     Create(Tab);
     SetFontSize(11);
@@ -4819,7 +4823,7 @@ begin
     SetWidth(200);
   end;
 
-  with ScriptInfo do
+  with GUI.ScriptInfo do
   begin
     Create(Tab);
     SetCaption('https://waspscripts.com/scripts/agility-with-bh-and-farm-runs-by-nll');
@@ -4831,7 +4835,7 @@ begin
     setCursor(crHandPoint);
   end;
 
-  with Self.CourseInput do
+  with GUI.CourseInput do
   begin
     Create(Tab);
     SetCaption('Course:');
@@ -4841,16 +4845,17 @@ begin
     SetItemIndex(Ord(Course));
   end;
 
-  with Self.SleepCheckbox do
+  with GUI.SleepCheckbox do
   begin
     Create(Tab);
     SetCaption('Take sleeps');
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(295));
     SetToolTip('Will go to sleep at approximately 12PM your local time for 6 hours.');
+    SetChecked(TakeSleeps);
   end;
 
-  with Self.BlockInputCheckbox do
+  with GUI.BlockInputCheckbox do
   begin
     Create(Tab);
     SetCaption('Block Real Input');
@@ -4860,7 +4865,7 @@ begin
     SetChecked(True);
   end;
 
-  with Self.WebhookInput do
+  with GUI.WebhookInput do
   begin
     Create(Tab);
     SetCaption('Discord webhook:');
@@ -4871,7 +4876,7 @@ begin
     SetText(WebhookURL);
   end;
 
-  with Self.HourlyReportCheckbox do
+  with GUI.HourlyReportCheckbox do
   begin
     Create(Tab);
     SetCaption('Send hourly report');
@@ -4881,7 +4886,7 @@ begin
     SetToolTip('Posts an hourly progress embed when a webhook is configured.');
   end;
 
-  with Self.SessionSummaryCheckbox do
+  with GUI.SessionSummaryCheckbox do
   begin
     Create(Tab);
     SetCaption('Send session summary');
@@ -4891,18 +4896,16 @@ begin
     SetToolTip('Posts a summary with screenshot when the script stops.');
   end;
 
-  Self.CreateAccountManager(Tab);
-  Self.CreateBirdhouseRunSettings();
-  Self.CreateFarmRunSettings();
+  GUI.Form.CreateAccountManager(Tab);
+  GUI.Form.CreateBirdhouseRunSettings();
+  AgilityGUI_CreateFarmRunSettings();
 
-  Self.BirdhouseCheckbox.SetChecked(DoBirdhouseRuns);
-  Self.FarmCheckbox.SetChecked(DoFarmRuns);
-  if Self.BirdhouseCheckbox.CheckBox <> nil then
-    Self.OnBirdhouseRunCheckboxChanged(Self.BirdhouseCheckbox.CheckBox);
-  if Self.FarmCheckbox.CheckBox <> nil then
-    Self.OnFarmRunCheckboxChanged(Self.FarmCheckbox.CheckBox);
+  if GUI.BirdhouseCheckbox.CheckBox <> nil then
+    AgilityGUI_OnBirdhouseRunCheckboxChanged(GUI.BirdhouseCheckbox.CheckBox);
+  if GUI.FarmCheckbox.CheckBox <> nil then
+    AgilityGUI_OnFarmRunCheckboxChanged(GUI.FarmCheckbox.CheckBox);
 
-  inherited;
+  GUI.Form.Run();
 end;
 
 procedure OnSleepStart(Task: PSleepTask);
@@ -4996,72 +4999,72 @@ begin
   Result := Self.EnterGame();
 end;
 
-procedure TAgilityGUI.StartScript(Sender: TObject); override;
+procedure AgilityGUI_StartScript(Sender: TObject);
 var
   HerbIdx, FlowerIdx: Int32;
 begin
-  DoBirdhouseRuns := Self.BirdhouseCheckbox.IsChecked();
-  TakeSleeps := Self.SleepCheckbox.IsChecked();
-  DoFarmRuns := Self.FarmCheckbox.IsChecked();
-  if Self.BlockInputCheckbox <> nil then
-  BlockInput := Self.BlockInputCheckbox.IsChecked()
+  DoBirdhouseRuns := GUI.BirdhouseCheckbox.IsChecked();
+  TakeSleeps := GUI.SleepCheckbox.IsChecked();
+  DoFarmRuns := GUI.FarmCheckbox.IsChecked();
+  if GUI.BlockInputCheckbox <> nil then
+    BlockInput := GUI.BlockInputCheckbox.IsChecked()
   else
     BlockInput := True;
-  WebhookURL := Self.WebhookInput.GetText();
-  SendHourlyReports := Self.HourlyReportCheckbox.IsChecked();
-  SendSessionSummaryReports := Self.SessionSummaryCheckbox.IsChecked();
-  PlannedBreaksEnabled := Self.PlannedBreaksCheckbox.IsChecked();
-  BreakFor := Self.BreakForInput.GetText().ExtractInteger();
+  WebhookURL := GUI.WebhookInput.GetText();
+  SendHourlyReports := GUI.HourlyReportCheckbox.IsChecked();
+  SendSessionSummaryReports := GUI.SessionSummaryCheckbox.IsChecked();
+  PlannedBreaksEnabled := GUI.PlannedBreaksCheckbox.IsChecked();
+  BreakFor := GUI.BreakForInput.GetText().ExtractInteger();
   if BreakFor <= 0 then
   begin
     BreakFor := 15;
-    Self.BreakForInput.SetText(ToStr(BreakFor));
+    GUI.BreakForInput.SetText(ToStr(BreakFor));
   end;
-  BreakAfter := Self.BreakAfterInput.GetText().ExtractInteger();
+  BreakAfter := GUI.BreakAfterInput.GetText().ExtractInteger();
   if BreakAfter <= 0 then
   begin
     BreakAfter := 90;
-    Self.BreakAfterInput.SetText(ToStr(BreakAfter));
+    GUI.BreakAfterInput.SetText(ToStr(BreakAfter));
   end;
   PlannedBreaksEnabled := PlannedBreaksEnabled and (BreakAfter > 0) and (BreakFor > 0);
-  BankTab := Self.BankTabInput.GetText().ExtractInteger();
+  BankTab := GUI.BankTabInput.GetText().ExtractInteger();
   if BankTab < 0 then
     BankTab := 0
   else if BankTab > 9 then
     BankTab := 9;
-  Self.BankTabInput.SetText(ToStr(BankTab));
-  Food := Self.FoodInput.GetText();
-  Course := ECourse(Self.CourseInput.GetItemIndex());
+  GUI.BankTabInput.SetText(ToStr(BankTab));
+  Food := GUI.FoodInput.GetText();
+  Course := ECourse(GUI.CourseInput.GetItemIndex());
 
   if DoFarmRuns then
   begin
-    CompostMethod := ECompostMethod(Self.CompostInput.GetItemIndex() + 2);
-    CatherbyHerb := Self.CatherbyHerbCheckbox.IsChecked();
-    CatherbyFlower := Self.CatherbyFlowerCheckbox.IsChecked();
-    HosidiusHerb := Self.HosidiusHerbCheckbox.IsChecked();
-    HosidiusFlower := Self.HosidiusFlowerCheckbox.IsChecked();
-    UseMagicSecateurs := Self.MagicSecateursCheckbox.IsChecked();
-    UseRunePouch := Self.RunePouchCheckbox.IsChecked();
-    BarbarianDibber := Self.BarbarianDibberCheckbox.IsChecked();
-    FarmRunNow := Self.FarmRunNowCheckbox.IsChecked();
-    CompostFlowers := Self.CompostFlowersCheckbox.IsChecked();
-    Seed := EnsureSeedInList(HERB_SEEDS, Self.HerbSeedCombo.GetText(), 'Ranarr seed');
-    FlowerSeed := EnsureSeedInList(FLOWER_SEEDS, Self.FlowerSeedCombo.GetText(), 'Limpwurt seed');
+    CompostMethod := ECompostMethod(GUI.CompostInput.GetItemIndex() + 2);
+    CatherbyHerb := GUI.CatherbyHerbCheckbox.IsChecked();
+    CatherbyFlower := GUI.CatherbyFlowerCheckbox.IsChecked();
+    HosidiusHerb := GUI.HosidiusHerbCheckbox.IsChecked();
+    HosidiusFlower := GUI.HosidiusFlowerCheckbox.IsChecked();
+    UseMagicSecateurs := GUI.MagicSecateursCheckbox.IsChecked();
+    UseRunePouch := GUI.RunePouchCheckbox.IsChecked();
+    BarbarianDibber := GUI.BarbarianDibberCheckbox.IsChecked();
+    FarmRunNow := GUI.FarmRunNowCheckbox.IsChecked();
+    CompostFlowers := GUI.CompostFlowersCheckbox.IsChecked();
+    Seed := EnsureSeedInList(HERB_SEEDS, GUI.HerbSeedCombo.GetText(), 'Ranarr seed');
+    FlowerSeed := EnsureSeedInList(FLOWER_SEEDS, GUI.FlowerSeedCombo.GetText(), 'Limpwurt seed');
 
     HerbIdx := GetSeedIndex(HERB_SEEDS, Seed);
     if HerbIdx < 0 then
       HerbIdx := 0;
-    Self.HerbSeedCombo.SetItemIndex(HerbIdx);
+    GUI.HerbSeedCombo.SetItemIndex(HerbIdx);
 
     FlowerIdx := GetSeedIndex(FLOWER_SEEDS, FlowerSeed);
     if FlowerIdx < 0 then
       FlowerIdx := 0;
-    Self.FlowerSeedCombo.SetItemIndex(FlowerIdx);
+    GUI.FlowerSeedCombo.SetItemIndex(FlowerIdx);
   end;
 
-  Self.SaveSettingsToIni();
+  AgilityGUI_SaveSettingsToIni();
 
-  inherited;
+  GUI.Form.StartScript(Sender);
 end;
 
 procedure SetGameSettings();
@@ -6418,8 +6421,8 @@ end;
 
 begin
   try
-    GUI.Create();
-    GUI.Run();
+    AgilityGUI_LoadSettings();
+    AgilityGUI_Run();
     Initiate();
 
     repeat
