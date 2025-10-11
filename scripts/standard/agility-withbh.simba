@@ -319,15 +319,30 @@ begin
 end;
 
 function TBirdHouseInclude.GetWithdrawList() : TRSBankItemArray;
+var
+  WithdrawList: TRSBankItemArray;
+  NextIndex: Int32;
+
+  procedure AppendItem(const Item: TRSBankItem);
+  begin
+    SetLength(WithdrawList, NextIndex + 1);
+    WithdrawList[NextIndex] := Item;
+    Inc(NextIndex);
+  end;
+
 begin
-  Result += TRSBankItem.Setup("Chisel", 1, false);
-  Result += TRSBankItem.Setup("Hammer", 1, false);
-  Result += TRSBankItem.Setup(Self.GetLogString(Self.LogType), 4, false);
+  NextIndex := 0;
+
+  AppendItem(TRSBankItem.Setup("Chisel", 1, False));
+  AppendItem(TRSBankItem.Setup("Hammer", 1, False));
+  AppendItem(TRSBankItem.Setup(Self.GetLogString(Self.LogType), 4, False));
 
   if Self.NeedClockworks then
-    Result += TRSBankItem.Setup("Clockwork", 1, false);
+    AppendItem(TRSBankItem.Setup("Clockwork", 1, False));
 
-  Result += TRSBankItem.Setup(Self.Seed, 40, false);
+  AppendItem(TRSBankItem.Setup(Self.Seed, 40, False));
+
+  Result := WithdrawList;
 end;
 
 function TRSBank.FindAll(items: TRSItemArray): Boolean; overload;
@@ -349,13 +364,16 @@ end;
 
 function TRSBankItemArray.ToItemArray() : TRSItemArray; constref;
 var
-  i : Int32;
+  i: Int32;
+  Items: TRSItemArray;
 
 begin
+  SetLength(Items, Length(Self));
+
   for i := 0 to High(Self) do
-  begin
-    Result += Self[i].Item;
-  end;
+    Items[i] := Self[i].Item;
+
+  Result := Items;
 end;
 
 function TBirdHouseInclude.HasTools() : Boolean;
@@ -1248,32 +1266,42 @@ end;
 
 function TBirdHouseInclude.GetReportStrings() : TStringArray;
 const
-  spacingStart : string := "[";
-    spacingEnd : string := "|]";
+  spacingStart: string = "[";
+  spacingEnd: string = "|]";
+var
+  listOfStrings, report: TStringArray;
+  i: Int32;
+
+  procedure AppendString(var Arr: TStringArray; const Value: string);
   var
-  listOfStrings : TStringArray;
-  i : Int32;
-begin
-  listOfStrings += spacingStart + "=================================" + spacingEnd;
-  listOfStrings += "Birdhouse Include by CJ";
-  listOfStrings += listOfStrings[0];
-  listOfStrings += "Next run in " + SRL.MsToTime(Self.ScriptIntervalTimer.TimeRemaining(), TTimeFormat.Time_Short);
-  listOfStrings += "Runs Completed: " + ToStr(Self.RunsCompleted);
-  listOfStrings += "XP Earned: " + ToStr(Self.TotalXPEarned);
-  listOfStrings += "Nests Looted: " + ToStr(Self.NestsLooted);
-  listOfStrings += listOfStrings[0];
-
-  //Header text
-  Result += listofStrings[0];
-  Result += spacingStart + PadL(" ", 3, " ") + PadR(listofStrings[1], 30, " ") + spacingEnd;
-  Result += listofStrings[2];
-
-  for i := 3 to High(listOfStrings) - 1 do
+    idx: Int32;
   begin
-    Result += spacingStart + PadL(" ", 3, " ") + PadR(listOfStrings[i], 30, " ") + spacingEnd;
+    idx := Length(Arr);
+    SetLength(Arr, idx + 1);
+    Arr[idx] := Value;
   end;
 
-  Result += listOfStrings[High(listOfStrings)];
+begin
+  AppendString(listOfStrings, spacingStart + "=================================" + spacingEnd);
+  AppendString(listOfStrings, "Birdhouse Include by CJ");
+  AppendString(listOfStrings, listOfStrings[0]);
+  AppendString(listOfStrings, "Next run in " + SRL.MsToTime(Self.ScriptIntervalTimer.TimeRemaining(), TTimeFormat.Time_Short));
+  AppendString(listOfStrings, "Runs Completed: " + ToStr(Self.RunsCompleted));
+  AppendString(listOfStrings, "XP Earned: " + ToStr(Self.TotalXPEarned));
+  AppendString(listOfStrings, "Nests Looted: " + ToStr(Self.NestsLooted));
+  AppendString(listOfStrings, listOfStrings[0]);
+
+  // Header text
+  AppendString(report, listOfStrings[0]);
+  AppendString(report, spacingStart + PadL(' ', 3, ' ') + PadR(listOfStrings[1], 30, ' ') + spacingEnd);
+  AppendString(report, listOfStrings[2]);
+
+  for i := 3 to High(listOfStrings) - 1 do
+    AppendString(report, spacingStart + PadL(' ', 3, ' ') + PadR(listOfStrings[i], 30, ' ') + spacingEnd);
+
+  AppendString(report, listOfStrings[High(listOfStrings)]);
+
+  Result := report;
 end;
 
 procedure TBirdHouseInclude.DisplayReport();
@@ -2292,8 +2320,18 @@ function TFarmRun.GetFarmRunesNeeded(): TRSItemArray;
 var
   CanSBS, NeedsSBS: Boolean;
   SpellBook: ERSSpellBook;
-  TmpRunes: TRSItemArray;
+  TmpRunes, UniqueRunes: TRSItemArray;
   i: Int32;
+
+  procedure AppendRune(const Rune: TRSItem);
+  var
+    idx: Int32;
+  begin
+    idx := Length(UniqueRunes);
+    SetLength(UniqueRunes, idx + 1);
+    UniqueRunes[idx] := Rune;
+  end;
+
 begin
   WriteLn('Getting runes needed for farm run.');
   WriteLn('Spellbook detected: ', SpellBook := Magic.GetSpellBook());
@@ -2363,11 +2401,22 @@ begin
     TmpRunes += ['Astral rune', 'Cosmic rune', 'Law rune'];
 
   Sort(TmpRunes);
-  Result += TmpRunes[0];
+
+  SetLength(UniqueRunes, 0);
+
+  if Length(TmpRunes) = 0 then
+  begin
+    Result := UniqueRunes;
+    Exit;
+  end;
+
+  AppendRune(TmpRunes[0]);
 
   for i := 1 to High(TmpRunes) do
-    if TmpRunes[i] <> Result[High(Result)] then
-      Result += TmpRunes[i];
+    if TmpRunes[i] <> UniqueRunes[High(UniqueRunes)] then
+      AppendRune(TmpRunes[i]);
+
+  Result := UniqueRunes;
 end;
 
 procedure TFarmRun.TravelToGiantSeaweed();
