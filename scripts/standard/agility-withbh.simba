@@ -2374,7 +2374,7 @@ begin
         BargeAttendant.SelectOption(['Quick-Travel'], 10);
 
         if WaitUntil(ScriptWalker^.GetMyPos().InBox([9113, 908, 9467, 1266]), 15, 5000) then
-          Break();
+          Break;
       end;
     end
     else
@@ -2391,7 +2391,7 @@ begin
           Mouse.Click(B, MOUSE_LEFT);
 
           if WaitUntil(ScriptWalker^.GetMyPos().InBox([9303, 530, 9657, 888]), 15, 5000) then
-            Break();
+            Break;
         end;
       end;
     end
@@ -2411,7 +2411,7 @@ begin
         end;
 
         if (ScriptWalker^.GetMyPos()).InBox([1129, 5407, 1769, 5824]) then
-          Break();
+          Break;
 
         if Chat.FindOption('it would be easier', [CHAT_COLOR_BLACK])then
           Chat.ClickContinue(True);
@@ -2425,7 +2425,7 @@ begin
             Chat.ClickContinue(True);
 
           if WaitUntil(ScriptWalker^.GetMyPos().InBox([1129, 5407, 1769, 5824]), 15, 5000) then
-            Break();
+            Break;
         end;
       end;
     end
@@ -2783,7 +2783,7 @@ begin
     end;
 
     if not Self.CurrentPatch.Find then
-      Continue();
+      Continue;
 
     if not Mainscreen.IsUpText(Self.CurrentPatch.PlantedUpText) then
     begin
@@ -2796,10 +2796,10 @@ begin
     if MainScreen.IsUpText(Self.CurrentPatch.PlantedUpText) then
     begin
       Mouse.Click(MOUSE_LEFT);
-      Break();
+      Break;
     end
     else if ChooseOption.Select(Self.CurrentPatch.PlantedUpText) then
-      Break();
+      Break;
     Mouse.RandomMovement();
   end;
 
@@ -2877,7 +2877,7 @@ begin
     end;
 
     if not Self.CurrentPatch.Find() then
-      Continue();
+      Continue;
 
     if not MainScreen.IsUpText(Self.CurrentPatch.EmptyUpText) or (Self.CurrentPatch.Data.PatchType = EPatchType.SEAWEED) then
     begin
@@ -2904,10 +2904,10 @@ begin
     if MainScreen.IsUpText(Self.CurrentPatch.EmptyUpText) then
     begin
       Mouse.Click(MOUSE_LEFT);
-      Break();
+      Break;
     end
     else if ChooseOption.Select(Self.CurrentPatch.EmptyUpText) then
-      Break();
+      Break;
 
     Mouse.RandomMovement();
   end;
@@ -2983,7 +2983,7 @@ begin
       until (ScriptWalker^.GetMyPos.DistanceTo([10030, 2320]) <= 50) or T.IsFinished();
 
       Self.CurrentPatch.Skip := True;
-      Break();
+      Break;
     end;
   until T.IsFinished();
 end;
@@ -3073,7 +3073,7 @@ begin
     HarvestWait();
 
     if Self.CurrentPatch.Skip = True then
-      Break();
+      Break;
   end;
 end;
 
@@ -3291,7 +3291,7 @@ begin
         MiniMap.SetCompassAngle(Random(106, 153))
       else
         MiniMap.SetCompassAngle(Random(209, 248));
-      Continue();
+      Continue;
     end;
 
     TPA := Primary.PointsInRangeOf(Secondary, 0, MainScreen.NormalizeDistance(38));
@@ -4215,13 +4215,13 @@ begin
           begin
             WriteLn('Patch complete.');
             Inc(Self.PatchesCompleted);
-            Break();
+            Break;
           end;
           EPatchState.SKIP:
           begin
             WriteLn('Skipping patch.');
             Inc(Self.PatchesSkipped);
-            Break();
+            Break;
           end;
         end;
 
@@ -5987,7 +5987,7 @@ begin
   for Pt in TPA do
   begin
     if SRL.Dice(25) then
-      Continue();
+      Continue;
 
     if HoverPoint(Pt, Obs.UpText) then
       Exit(True);
@@ -6320,10 +6320,10 @@ begin
     WaitUntil(Inventory.CountEmptySlots() > 25, 150, 2000);
 
     if not WithdrawFarmRun() then
-      Continue();
+      Continue;
 
     if WithdrawReturnItems() then
-      Break();
+      Break;
   end;
 
   WaitEx(850, 250);
@@ -6388,10 +6388,10 @@ begin
     WaitUntil(Inventory.CountEmptySlots() > 25, 150, 2000);
 
     if not Self.WithdrawNextRun() then
-      Continue();
+      Continue;
 
     if WithdrawReturnItems() then
-      Break();
+      Break;
   end;
 
   WaitEx(850, 250);
