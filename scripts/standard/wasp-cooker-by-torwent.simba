@@ -10,6 +10,18 @@ type
   ERSLocation = (HOSIDIUS, ROGUES_DEN, MYTHS_GUILD);
 
 const
+  REACTION_T1_MIN = 90;
+  REACTION_T1_MAX = 220;
+  REACTION_T2_MIN = 140;
+  REACTION_T2_MAX = 360;
+  REACTION_T3_MIN = 200;
+  REACTION_T3_MAX = 420;
+
+  MICRO_ROTATE_CHANCE     = 15;
+  MICRO_RIGHTCLICK_CHANCE = 8;
+  MICRO_KEYBOARD_CHANCE   = 8;
+  MICRO_LOSEFOCUS_CHANCE  = 14;
+
   RAW_FOOD: TRSItemArray = [
     'Custom',
     'Meat',
@@ -41,6 +53,8 @@ const
 var
   CurrentFood: TRSItem   := 'Anglerfish';
   CurrentLocation := ERSLocation.HOSIDIUS;
+  AmbientInitialized: Boolean = False;
+  NextAmbientCamJitterAt, NextAmbientBreakletAt: UInt64;
 
 type
   ECookerState = (
@@ -74,6 +88,107 @@ type
     Cooking: Boolean;
     UsingFire: Boolean;
   end;
+
+
+procedure EnsureAmbientSchedule();
+begin
+  if not AmbientInitialized then
+  begin
+    AmbientInitialized := True;
+    NextAmbientCamJitterAt := GetTickCount() + SRL.NormalRange(25000, 45000);
+    NextAmbientBreakletAt := GetTickCount() + SRL.NormalRange(480000, 840000);
+  end;
+end;
+
+procedure MaybeAmbient();
+var
+  now: UInt64;
+begin
+  EnsureAmbientSchedule();
+  now := GetTickCount();
+
+  if now >= NextAmbientCamJitterAt then
+  begin
+    Antiban.RandomRotate();
+    NextAmbientCamJitterAt := now + SRL.NormalRange(25000, 45000);
+  end;
+
+  if now >= NextAmbientBreakletAt then
+  begin
+    Antiban.RandomRightClick();
+    Antiban.RandomKeyboard();
+    WaitEx(1000, 400);
+    NextAmbientBreakletAt := now + SRL.NormalRange(480000, 840000);
+  end;
+end;
+
+procedure ReactionDelay(tier: Int32);
+var
+  minWait, maxWait, waitMs: Int32;
+  now: UInt64;
+begin
+  MaybeAmbient();
+
+  case tier of
+    1: begin minWait := REACTION_T1_MIN; maxWait := REACTION_T1_MAX; end;
+    2: begin minWait := REACTION_T2_MIN; maxWait := REACTION_T2_MAX; end;
+    3: begin minWait := REACTION_T3_MIN; maxWait := REACTION_T3_MAX; end;
+  else
+    begin minWait := REACTION_T2_MIN; maxWait := REACTION_T3_MAX; end;
+  end;
+
+  waitMs := SRL.NormalRange(minWait, maxWait);
+  Wait(waitMs);
+
+  now := GetTickCount();
+  if NextAmbientCamJitterAt < now + UInt64(waitMs) then
+    NextAmbientCamJitterAt := now + UInt64(waitMs) + 600;
+  if NextAmbientBreakletAt < now + UInt64(waitMs) then
+    NextAmbientBreakletAt := now + UInt64(waitMs) + 600;
+end;
+
+procedure MaybeMicroIdle();
+var
+  now: UInt64;
+  performed: Boolean := False;
+begin
+  MaybeAmbient();
+  now := GetTickCount();
+
+  if (now + 1200 >= NextAmbientCamJitterAt) or (now + 1200 >= NextAmbientBreakletAt) then
+    Exit;
+
+  if SRL.Dice(MICRO_ROTATE_CHANCE) then
+  begin
+    Antiban.RandomRotate();
+    NextAmbientCamJitterAt := now + SRL.NormalRange(25000, 45000);
+    performed := True;
+  end
+  else if SRL.Dice(MICRO_RIGHTCLICK_CHANCE) then
+  begin
+    Antiban.RandomRightClick();
+    performed := True;
+  end
+  else if SRL.Dice(MICRO_KEYBOARD_CHANCE) then
+  begin
+    Antiban.RandomKeyboard();
+    performed := True;
+  end
+  else if SRL.Dice(MICRO_LOSEFOCUS_CHANCE) then
+  begin
+    Antiban.LoseFocus(SRL.NormalRange(600, 1800));
+    performed := True;
+  end;
+
+  if performed then
+  begin
+    now := GetTickCount();
+    if NextAmbientCamJitterAt < now + 3000 then
+      NextAmbientCamJitterAt := now + SRL.NormalRange(20000, 32000);
+    if NextAmbientBreakletAt < now + 3000 then
+      NextAmbientBreakletAt := now + SRL.NormalRange(480000, 840000);
+  end;
+end;
 
 
 procedure TCooker.SetupItems();
@@ -168,6 +283,7 @@ begin
 
   inherited;
 
+  EnsureAmbientSchedule();
   Self.SetupItems();
   Self.SetupLocation();
 end;
@@ -218,6 +334,7 @@ begin
       end;
   end;
 
+  ReactionDelay(2);
   if CookingObj.WalkSelectOption(['Cook', 'Fire']) then
   begin
     Minimap.WaitPlayerMoving(300, 3000);
@@ -228,35 +345,60 @@ end;
 function TCooker.HandleMake(): Boolean;
 var
   i: Int32 := 0;
+  timeout: UInt64;
 begin
   if not Make.IsOpen() then //not sure if I can remove this.
     Exit;                 //it's probably not needed.
 
+  ReactionDelay(2);
   Result := Make.Select(i, Make.QUANTITY_ALL, Antiban.BioDice());
   Self.Cooking := Result;
 
   if Result then
-    WaitUntil(not Make.IsOpen(), 100, 4000);
+  begin
+    timeout := GetTickCount() + 4000;
+    repeat
+      MaybeMicroIdle();
+      Wait(100);
+    until (not Make.IsOpen()) or (GetTickCount() >= timeout);
+  end;
 end;
 
 
 function TCooker.IsCooking(waitTime: Int32 = 2500): Boolean;
 var
-  count: Int32;
+  count, current: Int32;
+  timeout: UInt64;
 begin
   count := Inventory.CountItem(Self.Ingredient.Item);
   if count = 0 then
     Exit;
 
-  Result := WaitUntil(count > Inventory.CountItem(Self.Ingredient.Item), 300, waitTime);
-  if Result then
-    WL.Activity.Restart();
+  timeout := GetTickCount() + UInt64(waitTime);
+  repeat
+    MaybeMicroIdle();
+    Wait(300);
+
+    current := Inventory.CountItem(Self.Ingredient.Item);
+    if current < count then
+    begin
+      Result := True;
+      WL.Activity.Restart();
+      Exit;
+    end;
+  until GetTickCount() >= timeout;
+
+  Result := False;
 end;
 
 function TCooker.WaitCooking(): Boolean;
 begin
+  MaybeMicroIdle();
   Result := Self.IsCooking();
   Self.Cooking := Result;
+
+  if Result then
+    MaybeMicroIdle();
 end;
 
 
@@ -337,11 +479,19 @@ begin
     Self.SetAction(ToString(Self.State));
 
     case Self.State of
-      ECookerState.OPEN_BANK: Banks.WalkOpen();
+      ECookerState.OPEN_BANK:
+        begin
+          ReactionDelay(3);
+          Banks.WalkOpen();
+        end;
       ECookerState.WITHDRAW_ITEMS: Self.Withdraw(Self.Ingredient);
       ECookerState.DEPOSIT_ITEMS: Self.Deposit();
 
-      ECookerState.OPEN_COLLECT: CollectBoxes.WalkOpen();
+      ECookerState.OPEN_COLLECT:
+        begin
+          ReactionDelay(3);
+          CollectBoxes.WalkOpen();
+        end;
       ECookerState.HANDLE_COLLECT: Self.HandleCollectBox([Self.Ingredient.Item]);
       ECookerState.CLOSE_INTERFACE: RSInterface.Close();
 
