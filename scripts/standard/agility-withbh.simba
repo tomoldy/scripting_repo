@@ -1007,6 +1007,7 @@ const
 var
   tpa : TPointArray;
   ropeClicked : Boolean;
+  attempt: Int32;
 
 begin
   if SRL.FindColors(tpa, CAVE_FLOOR_COL, Mainscreen.Bounds) < 1000 then
@@ -1015,7 +1016,7 @@ begin
     Exit(true);
   end;
 
-  for 0 to 5 do
+  for attempt := 0 to 5 do
   begin
     if SRL.FindColors(tpa, ROPE_COL, Mainscreen.Bounds) < 1 then
     begin
@@ -5631,7 +5632,7 @@ end;
 procedure Farm.OnStart(); override;
 var
   BankTimeout: TCountdown;
-  i: Int32
+  i, tries: Int32
 begin
   WriteDebug("Starting a farm run.");
 
@@ -5655,7 +5656,7 @@ begin
 
   OpenConfiguredBankTab();
 
-  for 0 to 4 do
+  for tries := 0 to 4 do
   begin
     if Inventory.CountEmptySlots() < 28 then
       Bank.DepositAll();
@@ -5694,7 +5695,7 @@ end;
 function TBirdHouseInclude.OnStart(): Boolean; override;
 var
   BankTimeout: TCountdown;
-  i: Int32;
+  i, tries: Int32;
 begin
   WriteDebug("Birdhouse Include OnStart");
 
@@ -5723,7 +5724,7 @@ begin
 
   OpenConfiguredBankTab();
 
-  for 0 to 4 do
+  for tries := 0 to 4 do
   begin
     if Inventory.CountEmptySlots() < 28 then
       Bank.DepositAll();
