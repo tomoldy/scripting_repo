@@ -635,7 +635,7 @@ begin
     begin
       Antiban.RandomRotate();
       Self.DebugLn("Failed to find bird house, rotating");
-      Exit(False);
+      continue;
     end;
 
     birdHouseATPA := birdHouseATPA.SortFrom(MainScreen.Center);
@@ -645,7 +645,7 @@ begin
     if not Self.ConfirmUptext(['nteract']) then
     begin
       Antiban.RandomRotate();
-      Exit(False);
+      continue;
     end;
 
     Mouse.Click(MOUSE_RIGHT);
@@ -707,6 +707,8 @@ var
   birdhouseATPA : T2DPointArray;
   birdHouseSpaceTPA : TPointArray;
   BirdSpaceTimeout : TCountDown;
+  attempt, maxAttempts : Int32;
+  spaceFound : Boolean;
 
 begin
 
@@ -720,14 +722,29 @@ begin
     if birdHouseSpaceTPA.Len() < 1 then
     begin
       Antiban.RandomRotate();
+      Wait(Random(210, 360));
       continue;
     end;
 
-    Mouse.Move(birdHouseSpaceTPA.RandomValue());
+    spaceFound := False;
+    maxAttempts := Min(5, birdHouseSpaceTPA.Len());
+    for attempt := 0 to maxAttempts - 1 do
+    begin
+      Mouse.Move(birdHouseSpaceTPA.RandomValue());
 
-    if not Mainscreen.IsUpText(['uild', 'pace']) then
+      if Mainscreen.IsUpText(['uild', 'pace']) then
+      begin
+        spaceFound := True;
+        break;
+      end;
+
+      Wait(Random(65, 135));
+    end;
+
+    if not spaceFound then
     begin
       Antiban.RandomRotate();
+      Wait(Random(210, 360));
       continue;
     end;
 
