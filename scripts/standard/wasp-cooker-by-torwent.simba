@@ -87,100 +87,7 @@ type
 
     Cooking: Boolean;
     UsingFire: Boolean;
-
-    NextCamJitterAt: UInt64;
-    NextFocusLossAt: UInt64;
-  end;
-
-
-procedure EnsureAmbientSchedule();
-begin
-  if not AmbientInitialized then
-  begin
-    AmbientInitialized := True;
-    NextAmbientCamJitterAt := GetTickCount() + SRL.NormalRange(25000, 45000);
-    NextAmbientBreakletAt := GetTickCount() + SRL.NormalRange(480000, 840000);
-  end;
-end;
-
-procedure MaybeAmbient();
-var
-  now: UInt64;
-begin
-  EnsureAmbientSchedule();
-  now := GetTickCount();
-
-  if now >= NextAmbientCamJitterAt then
-  begin
-    Antiban.RandomRotate();
-    NextAmbientCamJitterAt := now + SRL.NormalRange(25000, 45000);
-  end;
-
-  if now >= NextAmbientBreakletAt then
-  begin
-    Antiban.RandomRightClick();
-    Antiban.RandomKeyboard();
-    WaitEx(1000, 400);
-    NextAmbientBreakletAt := now + SRL.NormalRange(480000, 840000);
-  end;
-end;
-
-procedure ReactionDelay(tier: Int32);
-var
-  minWait, maxWait, waitMs: Int32;
-  now: UInt64;
-begin
-  MaybeAmbient();
-
-  case tier of
-    1: begin minWait := REACTION_T1_MIN; maxWait := REACTION_T1_MAX; end;
-    2: begin minWait := REACTION_T2_MIN; maxWait := REACTION_T2_MAX; end;
-    3: begin minWait := REACTION_T3_MIN; maxWait := REACTION_T3_MAX; end;
-  else
-    begin minWait := REACTION_T2_MIN; maxWait := REACTION_T3_MAX; end;
-  end;
-
-  waitMs := SRL.NormalRange(minWait, maxWait);
-  Wait(waitMs);
-
-  now := GetTickCount();
-  if NextAmbientCamJitterAt < now + UInt64(waitMs) then
-    NextAmbientCamJitterAt := now + UInt64(waitMs) + 600;
-  if NextAmbientBreakletAt < now + UInt64(waitMs) then
-    NextAmbientBreakletAt := now + UInt64(waitMs) + 600;
-end;
-
-procedure MaybeMicroIdle();
-var
-  now: UInt64;
-  performed: Boolean := False;
-begin
-  MaybeAmbient();
-  now := GetTickCount();
-
-  if (now + 1200 >= NextAmbientCamJitterAt) or (now + 1200 >= NextAmbientBreakletAt) then
-    Exit;
-
-  if SRL.Dice(MICRO_ROTATE_CHANCE) then
-  begin
-    Antiban.RandomRotate();
-    NextAmbientCamJitterAt := now + SRL.NormalRange(25000, 45000);
-    performed := True;
-  end
-  else if SRL.Dice(MICRO_RIGHTCLICK_CHANCE) then
-  begin
-    Antiban.RandomRightClick();
-    performed := True;
-  end
-  else if SRL.Dice(MICRO_KEYBOARD_CHANCE) then
-  begin
-    Antiban.RandomKeyboard();
-    performed := True;
-  end
-  else if SRL.Dice(MICRO_LOSEFOCUS_CHANCE) then
-  begin
-    Antiban.LoseFocus(SRL.NormalRange(600, 1800));
-    performed := True;
+    BreakWasCooking: Boolean;
   end;
 
   if performed then
@@ -280,6 +187,9 @@ end;
 
 procedure TCooker.Init(maxActions: UInt32; maxTime: UInt64); override;
 begin
+  if (Antiban = nil) or not (Antiban is TAntiban) then
+    Antiban := TAntiban.Create;
+
   Antiban.Skills := [ERSSkill.COOKING, ERSSkill.TOTAL];
   Antiban.MinZoom := 15;
   Antiban.MaxZoom := 60;
@@ -520,6 +430,95 @@ end;
 
 var
   Cooker: TCooker;
+
+procedure TAntiban.TakeBreak(var task: TBreakTask); override;
+var
+  countdown: TCountDown;
+  i: Int32;
+  activeTasks: PAntibanTaskArray;
+begin
+  activeTasks := Self.GetActiveTasks();
+  for i := 0 to High(activeTasks) do
+    activeTasks[i]^.countdown.Pause();
+
+  countdown.Init(Abs(Round(SRL.GaussRand(task.Length, task.Length * task.StdVar))));
+
+  WriteLn('Taking a break for ' + SRL.MsToTime(countdown.TimeRemaining(), TIME_FORMAL));
+
+  if (@Self.OnStartBreak <> nil) then
+    Self.OnStartBreak(@task);
+
+  if Cooker.Cooking or Cooker.BreakWasCooking then
+    WriteLn('Currently cooking - remaining idle instead of logging out')
+  else if Random() < task.LogoutChance then
+  begin
+    WriteLn('Logging out');
+    Logout.ClickLogout();
+  end;
+
+  if Random() < 0.50 then
+    Self.LoseFocus();
+
+  i := 0;
+  while not countdown.IsFinished() do
+  begin
+    if (Inc(i) mod 12 = 0) then
+      WriteLn('Break time remaining: ' + ToString(countdown.TimeRemaining() div 60000) + ' minutes');
+
+    if (@Self.OnBreaking <> nil) then
+      Self.OnBreaking(@task, countdown);
+
+    Wait(Min(countdown.TimeRemaining(), 5 * ONE_SECOND));
+  end;
+
+  WriteLn('Break finished');
+
+  if (@Self.OnFinishBreak <> nil) then
+    Self.OnFinishBreak(@task);
+
+  for i := 0 to High(Self.Breaks) do
+    Self.Breaks[i].NextAtTime += GetTickCount() - (countdown.Timeout - countdown.Length);
+
+  for i := 0 to High(activeTasks) do
+    activeTasks[i]^.countdown.Resume();
+
+  task.NextAtTime := GetTimeRunning() + Abs(SRL.GaussRand(task.Interval, task.Interval * task.StdVar));
+end;
+
+function TBaseScript.DoAntiban(checkBreaks: Boolean = True; checkSleeps: Boolean = True): Boolean; override;
+var
+  wasCooking: Boolean;
+begin
+  Result := False;
+  Antiban.DismissRandom();
+  Self.TimeRunning.Pause();
+  Self.OnAntiban := True;
+
+  wasCooking := Cooker.Cooking;
+  Cooker.BreakWasCooking := wasCooking;
+
+  if wasCooking then
+    Cooker.Cooking := False;
+
+  checkBreaks := checkBreaks and WLSettings.GetObject('antiban').getBoolean('breaks');
+  checkSleeps := checkSleeps and WLSettings.GetObject('antiban').getJSONObject('sleep').getBoolean('enabled');
+
+  if WLSettings.GetObject('antiban').getJSONObject('tasks').getBoolean('enabled') or checkBreaks or checkSleeps then
+    Result := Antiban.DoAntiban(checkBreaks, checkSleeps);
+
+  if Cooker.BreakWasCooking then
+    Cooker.Cooking := True;
+  Cooker.BreakWasCooking := False;
+
+  Self.TimeRunning.Resume();
+  Self.OnAntiban := False;
+
+  if not RSClient.IsLoggedIn() then
+  begin
+    Login.LoginPlayer();
+    Cooker.Cooking := False;
+  end;
+end;
 
 function TRSMake.Select(Index: Int32; Quantity: Int32; UseKeyboard: Boolean = True): Boolean; override;
 var
