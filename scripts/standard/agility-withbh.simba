@@ -1934,7 +1934,10 @@ var
 begin
   for i := 0 to High(Seeds) do
     if SameText(Seeds[i], Seed) then
-      Exit(i);
+    begin
+      Result := i;
+      Exit;
+    end;
 
   Result := -1;
 end;
@@ -1942,7 +1945,10 @@ end;
 function EnsureSeedInList(const Seeds: TRSItemArray; const Seed, DefaultSeed: TRSItem): TRSItem;
 begin
   if GetSeedIndex(Seeds, Seed) <> -1 then
-    Exit(Seed);
+  begin
+    Result := Seed;
+    Exit;
+  end;
 
   Result := DefaultSeed;
 end;
@@ -1951,9 +1957,12 @@ function TFarmRun.GetNextTime(): Int32;
 begin
   if Length(Self.Patches) = 2 then
     if ('seaweed' in Self.Patches[0].Data.Name) and ('seaweed' in Self.Patches[1].Data.Name) then
-      Exit(Random(46*ONE_MINUTE, 55*ONE_MINUTE));
+    begin
+      Result := Random(46*ONE_MINUTE, 55*ONE_MINUTE);
+      Exit;
+    end;
 
-  Exit(Random(86*ONE_MINUTE, 97*ONE_MINUTE));
+  Result := Random(86*ONE_MINUTE, 97*ONE_MINUTE);
 end;
 
 function TRSInventory.Count(): Int32; override;
@@ -3896,7 +3905,10 @@ var
   Span: UInt64;
 begin
   if MaxValue <= MinValue then
-    Exit(MinValue);
+  begin
+    Result := MinValue;
+    Exit;
+  end;
 
   Span := MaxValue - MinValue;
   if Span >= UInt64(High(Int32)) then
@@ -3910,7 +3922,10 @@ var
   Span: Int32;
 begin
   if MaxValue <= MinValue then
-    Exit(MinValue);
+  begin
+    Result := MinValue;
+    Exit;
+  end;
 
   Span := MaxValue - MinValue;
   Result := MinValue + Random(Span + 1);
@@ -6004,9 +6019,12 @@ var
 begin
   for i := 0 to High(Obstacles) do
     if Obstacles[i].Area.Contains(Pos) then
-      Exit(i);
+    begin
+      Result := i;
+      Exit;
+    end;
 
-  Exit(-1);
+  Result := -1;
 end;
 
 function HoverPoint(Pt: TPoint; UpText: TStringArray): Boolean;
