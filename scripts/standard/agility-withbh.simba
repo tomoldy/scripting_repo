@@ -605,7 +605,7 @@ begin
 
   Self.DebugLn("Moving");
   if not WaitUntil(Self.RSW.WalkBlind(Self.CurrentBirdHouse^.BirdhouseObject.Coordinates[0], 20), 150, 5000) then
-    Exit;
+    Exit(False);
 
   WaitUntil(not Minimap.IsPlayerMoving(), 50, 5000);
   Self.DebugLn("Done Moving");
@@ -626,7 +626,7 @@ begin
     begin
       Antiban.RandomRotate();
       Self.DebugLn("Failed to find bird house, rotating");
-      continue;
+      Exit(False);
     end;
 
     birdHouseATPA := birdHouseATPA.SortFrom(MainScreen.Center);
@@ -636,17 +636,17 @@ begin
     if not Self.ConfirmUptext(['nteract']) then
     begin
       Antiban.RandomRotate();
-      continue;
+      Exit(False);
     end;
 
     Mouse.Click(MOUSE_RIGHT);
     Self.DebugLn("Dismantling birdhouse");
 
     if not WaitUntil(ChooseOption.IsOpen, 100, 1200) then
-      continue;
+      Exit(False);
 
     if not ChooseOption.Select(['mpty'], MOUSE_LEFT, false, true) then
-      continue;
+      Exit(False);
 
     xpTimeout.Init(8000);
     while not xpTimeout.IsFinished() do
@@ -688,6 +688,8 @@ begin
       Exit(Result);
     end;
   end;
+
+  Result := False;
 end;
 
 //At this point we should have a birdhouse in the inventory that we can use.
