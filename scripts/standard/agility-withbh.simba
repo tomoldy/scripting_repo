@@ -36,7 +36,7 @@ type
     CompostInput: TLabeledCombobox;
   end;
 
-  TAgilityOverlay = record
+  TStatusOverlay = record
     Enabled: Boolean;
     FontSize: Int32;
     BackgroundColor, BorderColor, TextColor: TColor;
@@ -45,9 +45,9 @@ type
     Runtime: TStopWatch;
   end;
 
-procedure Overlay_Init(var Overlay: TAgilityOverlay);
-procedure Overlay_Update(var Overlay: TAgilityOverlay);
-procedure Overlay_Clear();
+procedure StatusOverlay_Init(var Overlay: TStatusOverlay);
+procedure StatusOverlay_Update(var Overlay: TStatusOverlay);
+procedure StatusOverlay_Clear();
 
 procedure AgilityGUI_LoadSettings();
 function AgilityGUI_GetActiveUsername(): String;
@@ -221,7 +221,7 @@ var
   GUI: TAgilityGUI;
   Course: ECourse := DRAYNOR_ROOF;
   Farm: TFarmRun;
-  Overlay: TAgilityOverlay;
+  StatusOverlay: TStatusOverlay;
   Discord: TDiscordClient;
   WebhookURL: String := '';
 
@@ -3738,8 +3738,8 @@ begin
 
   SystemUpdateOverlayMessage := Message;
 
-  if Overlay.Enabled then
-    Overlay_Update(Overlay);
+  if StatusOverlay.Enabled then
+    StatusOverlay_Update(StatusOverlay);
 end;
 
 function IsPlayerBusyForSystemUpdate(): Boolean;
@@ -3976,8 +3976,8 @@ begin
   WriteLn(SRL.TimeStamp(), ':[Breaks]: ' + Message);
   SendBreakWebhook('**' + Kind + ' break** for ' + DurationText + '.');
 
-  if Overlay.Enabled then
-    Overlay_Update(Overlay);
+  if StatusOverlay.Enabled then
+    StatusOverlay_Update(StatusOverlay);
 end;
 
 procedure FinishBreakEvent(const Kind: String);
@@ -3986,8 +3986,8 @@ begin
   LastBreakEventAt := GetTimeRunning();
   WriteLn(SRL.TimeStamp(), ':[Breaks]: ' + Kind + ' break finished.');
 
-  if Overlay.Enabled then
-    Overlay_Update(Overlay);
+  if StatusOverlay.Enabled then
+    StatusOverlay_Update(StatusOverlay);
 end;
 
 function SafeToTakeBreak(): Boolean;
@@ -4269,7 +4269,7 @@ end;
 
 procedure ReleaseRealInput();
 begin
-  Overlay_Clear();
+  StatusOverlay_Clear();
 
   if RealInputBlocked then
   begin
@@ -5439,7 +5439,7 @@ begin
   Result := SRL.MsToTime(BirdHouseRunner.ScriptIntervalTimer.TimeRemaining(), Time_Short);
 end;
 
-procedure Overlay_Init(var Overlay: TAgilityOverlay);
+procedure StatusOverlay_Init(var Overlay: TStatusOverlay);
 begin
   Overlay.Enabled := EnableOverlay;
   Overlay.FontSize := 11;
@@ -5453,7 +5453,7 @@ begin
   Overlay.Runtime.Start();
 end;
 
-procedure Overlay_Update(var Overlay: TAgilityOverlay);
+procedure StatusOverlay_Update(var Overlay: TStatusOverlay);
 var
   runtimeMs, elapsedSinceBreak: UInt64;
   xpPerHour: Int32;
@@ -5546,7 +5546,7 @@ begin
   end;
 end;
 
-procedure Overlay_Clear();
+procedure StatusOverlay_Clear();
 begin
   try
     RSClient.Image().Clear();
@@ -5782,7 +5782,7 @@ begin
   if WebhookEnabled and SendHourlyReports then
     HourlyReportTimer.Start();
 
-  Overlay_Init(Overlay);
+  StatusOverlay_Init(StatusOverlay);
 
   if Options.GetNPCAttackOption() <> ERSAttackOption.HIDDEN then
     Options.SetNPCAttackOption(ERSAttackOption.HIDDEN);
@@ -5935,7 +5935,7 @@ begin
   FarmRunActive := False;
   BirdhouseRunActive := False;
 
-  Overlay_Update(Overlay);
+  StatusOverlay_Update(StatusOverlay);
 end;
 
 function GetStep(): Int32;
@@ -6192,7 +6192,7 @@ begin
     NormalStep(Step);
   end;
 
-  Overlay_Update(Overlay);
+  StatusOverlay_Update(StatusOverlay);
 
   MaybeHandleScheduledBreaks();
 
