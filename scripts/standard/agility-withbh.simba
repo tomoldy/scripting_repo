@@ -32,6 +32,18 @@ type
     CompostInput: TLabeledCombobox;
   end;
 
+  TAgilityOverlay = record
+    Enabled: Boolean;
+    FontSize: Int32;
+    BackgroundColor, BorderColor, TextColor: TColor;
+    Position: TPoint;
+    Padding, Width: Int32;
+    Runtime: TStopWatch;
+    procedure Init();
+    procedure Update();
+    procedure Clear();
+  end;
+
   TObstacle = record
     Tile, WalkTile: TPoint;
     UpText: TStringArray;
@@ -160,6 +172,7 @@ var
   DoBirdhouseRuns, TakeSleeps, DoFarmRuns, UseRunePouch, HosidiusHerb, HosidiusFlower,
   FarmRunNow, UseMagicSecateurs, BarbarianDibber, CatherbyHerb, CatherbyFlower,
   CompostFlowers: Boolean;
+  EnableOverlay: Boolean := True;
   RealInputBlocked: Boolean := False;
   BlockInput: Boolean := True;
   InactivityTimer, ReportTimer, InfoTimer: TStopwatch;
@@ -174,6 +187,7 @@ var
   GUI: TAgilityGUI;
   Course: ECourse;
   Farm: TFarmRun;
+  Overlay: TAgilityOverlay;
 
   BirdHouseRunner : TBirdHouseInclude;
   BHWriteDebug : Boolean := true;
@@ -3752,6 +3766,8 @@ end;
 
 procedure ReleaseRealInput();
 begin
+  Overlay.Clear();
+
   if RealInputBlocked then
   begin
     WriteDebug('Re-enabling real input.');
@@ -4375,6 +4391,149 @@ begin
   ReportTimer.Reset();
 end;
 
+function GetCurrentObstacleName(): String;
+var
+  upText: TStringArray;
+begin
+  if Step < 0 then
+    Exit('Recovering');
+
+  if Length(Obstacles) = 0 then
+    Exit('Setting up');
+
+  if Step > High(Obstacles) then
+    Exit('Traversing');
+
+  if Step < Low(Obstacles) then
+    Exit('Starting');
+
+  upText := Obstacles[Step].UpText;
+
+  if Length(upText) > 0 then
+    Exit(upText[0]);
+
+  Result := 'Obstacle #' + IntToStr(Step);
+end;
+
+function GetFarmRunOverlayText(): String;
+begin
+  if not DoFarmRuns then
+    Exit('Disabled');
+
+  if Farm.ReadyTimer.Length = 0 then
+    Exit('Configuring');
+
+  if Farm.ReadyTimer.IsFinished() then
+    Exit('Ready');
+
+  Result := SRL.MsToTime(Farm.ReadyTimer.TimeRemaining(), Time_Short);
+end;
+
+function GetBirdhouseOverlayText(): String;
+begin
+  if not DoBirdhouseRuns then
+    Exit('Disabled');
+
+  if BirdHouseRunner.ScriptIntervalTimer.Length = 0 then
+    Exit('Configuring');
+
+  if BirdHouseRunner.ScriptIntervalTimer.IsFinished() then
+    Exit('Ready');
+
+  Result := SRL.MsToTime(BirdHouseRunner.ScriptIntervalTimer.TimeRemaining(), Time_Short);
+end;
+
+procedure TAgilityOverlay.Init();
+begin
+  Self.Enabled := EnableOverlay;
+  Self.FontSize := 11;
+  Self.BackgroundColor := $2D2D30;
+  Self.BorderColor := $000000;
+  Self.TextColor := $FFFFFF;
+  Self.Position := Point(14, 70);
+  Self.Padding := 6;
+  Self.Width := 235;
+  Self.Runtime := Default(TStopWatch);
+  Self.Runtime.Start();
+end;
+
+procedure TAgilityOverlay.Update();
+var
+  runtimeMs: UInt64;
+  xpPerHour: Int32;
+  headerSpacing, lineSpacing, height, y: Int32;
+  lines: TStringArray;
+  xpLine, farmLine, birdLine: String;
+  lootLine: String;
+  box: TBox;
+  i: Int32;
+begin
+  if not Self.Enabled then
+    Exit;
+
+  if not RSClient.IsLoggedIn() then
+    Exit;
+
+  runtimeMs := Self.Runtime.ElapsedTime();
+
+  if runtimeMs = 0 then
+    xpPerHour := 0
+  else
+    xpPerHour := Round(GainedXP / (runtimeMs / 3600000));
+
+  xpLine := ToStr('XP: ', GainedXP, ' (', xpPerHour, '/h)');
+  farmLine := 'Farm: ' + GetFarmRunOverlayText();
+  birdLine := 'Birdhouse: ' + GetBirdhouseOverlayText();
+  lootLine := 'Loot: Marks ' + IntToStr(Marks);
+
+  if DoBirdhouseRuns then
+    lootLine += ' | Nests ' + IntToStr(BirdHouseRunner.NestsLooted);
+
+  lines := [];
+
+  lines += 'Agility with BH';
+  lines += 'Runtime: ' + SRL.MsToTime(runtimeMs, Time_Short);
+  lines += xpLine;
+  lines += 'Obstacle: ' + GetCurrentObstacleName();
+  lines += farmLine;
+  lines += birdLine;
+  lines += lootLine;
+
+  lineSpacing := Self.FontSize + 4;
+  headerSpacing := Self.FontSize + 6;
+  height := (Self.Padding * 2) + headerSpacing + (lineSpacing * (Length(lines) - 1));
+  box := Box(Self.Position.X, Self.Position.Y, Self.Position.X + Self.Width, Self.Position.Y + height);
+
+  with RSClient.Image() do
+  begin
+    DrawBoxFilled(box.Expand(1), False, Self.BorderColor);
+    DrawBoxFilled(box, False, Self.BackgroundColor);
+    SetFontName('Arial');
+
+    y := box.Y1 + Self.Padding;
+
+    SetFontSize(Self.FontSize + 1);
+    DrawText(lines[0], Point(box.X1 + Self.Padding, y), Self.TextColor);
+    y += headerSpacing;
+
+    SetFontSize(Self.FontSize);
+
+    for i := 1 to High(lines) do
+    begin
+      DrawText(lines[i], Point(box.X1 + Self.Padding, y), Self.TextColor);
+      y += lineSpacing;
+    end;
+  end;
+end;
+
+procedure TAgilityOverlay.Clear();
+begin
+  try
+    RSClient.Image().Clear();
+  except
+  end;
+end;
+
 procedure PrintInfo();
 var
   Info: String;
@@ -4565,6 +4724,8 @@ begin
 
   NP_MarkProgress();
 
+  Overlay.Init();
+
   if Options.GetNPCAttackOption() <> ERSAttackOption.HIDDEN then
     Options.SetNPCAttackOption(ERSAttackOption.HIDDEN);
 
@@ -4706,6 +4867,8 @@ begin
 
   InactivityTimer.Start();
   ReportTimer.Start();
+
+  Overlay.Update();
 end;
 
 function GetStep(): Int32;
@@ -4949,6 +5112,8 @@ begin
   else
     NormalStep(Step);
   end;
+
+  Overlay.Update();
 
   AB_MaybeAmbient();
   Antiban.DoAntiban();
