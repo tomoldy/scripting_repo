@@ -25,7 +25,8 @@ type
     BreakForInput, BreakAfterInput, BankTabInput: TLabeledEdit;
     FoodInput, CourseInput: TLabeledCombobox;
     MagicSecateursCheckbox, CatherbyHerbCheckbox, HosidiusHerbCheckbox,
-    CatherbyFlowerCheckbox, HosidiusFlowerCheckbox, BarbarianDibberCheckbox,
+    CatherbyFlowerCheckbox, HosidiusFlowerCheckbox, CompostFlowersCheckbox,
+    BarbarianDibberCheckbox,
     RunePouchCheckbox: TLabeledCheckBox;
     ScriptInfo, ScriptTitle, AntibanNote: TLabel;
     CompostInput: TLabeledCombobox;
@@ -85,6 +86,7 @@ type
     HarvestQuantities: TIntegerArray;
     LeprechaunItems: TRSItemArray;
     CompostMethod: ECompostMethod;
+    CompostFlowers: Boolean;
     Patches: array of TFarmPatch;
     CurrentPatch: TFarmPatch;
     Runtime: TStopWatch;
@@ -157,7 +159,8 @@ var
   Marks, WaitRand, Step, WaitTime, FarmRuns, BirdhouseRuns, BreakFor, BreakAfter, StartXP, CurrentXP, GainedXP, fc, gfc: Int32;
   BankTab: Int32 := 0;
   DoBirdhouseRuns, TakeSleeps, DoFarmRuns, UseRunePouch, HosidiusHerb, HosidiusFlower,
-  FarmRunNow, UseMagicSecateurs, BarbarianDibber, CatherbyHerb, CatherbyFlower: Boolean;
+  FarmRunNow, UseMagicSecateurs, BarbarianDibber, CatherbyHerb, CatherbyFlower,
+  CompostFlowers: Boolean;
   BlockInput: Boolean := True;
   InactivityTimer, ReportTimer, InfoTimer: TStopwatch;
   ReturnItemAmounts, FarmItemAmounts: TIntegerArray;
@@ -2110,7 +2113,16 @@ begin
     Exit(EPatchState.PLANT);
 
   if Message.Contains('not been') then
-    Exit(EpatchState.COMPOST);
+  begin
+    if (Self.Data.PatchType = EPatchType.FLOWER) and (not Farm.CompostFlowers) then
+    begin
+      WriteLn('Inspection shows un-composted flower patch at ' + Self.Data.Name + '; skipping per settings.');
+      Self.Complete := True;
+      Exit(EPatchState.COMPLETE);
+    end;
+
+    Exit(EPatchState.COMPOST);
+  end;
 
   if Message.Contains('fully grown') then
     Exit(EPatchState.HARVEST);
@@ -2593,6 +2605,13 @@ begin
   if not RSClient.IsLoggedIn() then
     Exit();
 
+  if (Self.CurrentPatch.Data.PatchType = EPatchType.FLOWER) and (not Self.CompostFlowers) then
+  begin
+    WriteLn('Skipping compost at ' + Self.CurrentPatch.Data.Name + ' flower patch per settings.');
+    Self.CurrentPatch.Complete := True;
+    Exit();
+  end;
+
   if not Self.CurrentPatch.Find then
   begin
     WriteLn('Could not find patch to compost!');
@@ -2763,7 +2782,11 @@ begin
     begin
       if MainScreen.IsUpText(Self.CurrentPatch.HarvestUpText) then
         Self.Harvest()
-      else
+      else if (Self.CurrentPatch.Data.PatchType = EPatchType.FLOWER) and (not Self.CompostFlowers) then
+      begin
+        WriteLn('Skipping compost at ' + Self.CurrentPatch.Data.Name + ' flower patch per settings.');
+        Self.CurrentPatch.Complete := True;
+      end else
         Self.CompostPatch();
 
       Exit();
@@ -2789,17 +2812,17 @@ begin
 
   if Chat.HasContinue() then
   begin
-    if Self.CurrentPatch.Data.PatchType <> EPatchType.FLOWER then
-      Self.CompostPatch
+    if (Self.CurrentPatch.Data.PatchType = EPatchType.FLOWER) and (not Self.CompostFlowers) then
+      Self.CurrentPatch.Complete := True
     else
-      Self.CurrentPatch.Complete := True;
+      Self.CompostPatch();
     Exit();
   end;
 
   if not Self.CurrentPatch.Find(False) then
     Exit();
 
-  if Self.CurrentPatch.Data.PatchType <> EPatchType.FLOWER then
+  if (Self.CurrentPatch.Data.PatchType <> EPatchType.FLOWER) or Self.CompostFlowers then
   begin
     if (Self.CompostMethod <> ECompostMethod.FERTILE_SOIL) then
     begin
@@ -2821,10 +2844,10 @@ begin
   begin
     Wait(338, 562);
 
-    if Self.CurrentPatch.Data.PatchType <> EPatchType.FLOWER then
-      Self.CompostPatch
+    if (Self.CurrentPatch.Data.PatchType = EPatchType.FLOWER) and (not Self.CompostFlowers) then
+      Self.CurrentPatch.Complete := True
     else
-      Self.CurrentPatch.Complete := True;
+      Self.CompostPatch();
   end;
 end;
 
@@ -3524,6 +3547,8 @@ end;
 procedure TFarmRun.Report();
 begin
   WriteLn('Thanks to XJ and Student, we finished another farm run!');
+  if not Self.CompostFlowers then
+    WriteLn('Flower composting skipped per settings.');
 end;
 
 operator in(Left: TBox; Right: TBoxArray): Boolean;
@@ -3633,7 +3658,15 @@ begin
         EPatchState.HARVEST_CACTUS: Self.HarvestCactus;
         EPatchState.HARVEST: Self.Harvest;
         EPatchState.PLANT: Self.Plant;
-        EPatchState.COMPOST: Self.CompostPatch;
+        EPatchState.COMPOST:
+        begin
+          if (Self.CurrentPatch.Data.PatchType = EPatchType.FLOWER) and (not Self.CompostFlowers) then
+          begin
+            WriteLn('Skipping compost at ' + Self.CurrentPatch.Data.Name + ' flower patch per settings.');
+            Self.CurrentPatch.Complete := True;
+          end else
+            Self.CompostPatch();
+        end;
         EPatchState.DISEASED: Self.HandleDiseasedPatch;
         EPatchState.DEAD: Self.HandleDeadPatch;
         EPatchState.TELEPORT_TO: Self.TeleportTo(Self.CurrentPatch.TravelMethod, True);
@@ -3813,6 +3846,15 @@ begin
     SetTooltip('');
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(235));
+  end;
+
+  with Self.CompostFlowersCheckbox do
+  begin
+    Create(Result);
+    SetCaption('Compost flower patches');
+    SetTooltip('When unchecked, flower patches will be planted without compost.');
+    SetLeft(TControl.AdjustToDPI(30));
+    SetTop(TControl.AdjustToDPI(260));
   end;
 
   with Self.CompostInput do
@@ -4091,6 +4133,7 @@ begin
     UseRunePouch := Self.RunePouchCheckbox.IsChecked();
     BarbarianDibber := Self.BarbarianDibberCheckbox.IsChecked();
     FarmRunNow := Self.FarmRunNowCheckbox.IsChecked();
+    CompostFlowers := Self.CompostFlowersCheckbox.IsChecked();
     Seed := Self.SeedInput.GetText();
   end;
 
@@ -4452,6 +4495,7 @@ begin
   if DoFarmRuns then
   begin
     Farm.CompostMethod := CompostMethod;
+    Farm.CompostFlowers := CompostFlowers;
 
     if HosidiusHerb then
     begin
@@ -4525,6 +4569,8 @@ begin
     WriteDebug(ToStr('Hosidius Flower / Herb: ', HosidiusFlower, ' / ', HosidiusHerb));
     WriteDebug(ToStr('Catherby Flower / Herb: ', CatherbyFlower, ' / ', CatherbyHerb));
     WriteDebug(ToStr('Farm Run Timer: ', Farm.ReadyTimer.TimeRemaining()));
+    if not CompostFlowers then
+      WriteDebug('Flower composting disabled; limpwurt patches will be skipped for compost.');
   end;
 
   if BirdhouseRuns or FarmRuns then
