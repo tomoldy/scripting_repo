@@ -87,6 +87,9 @@ type
 
     Cooking: Boolean;
     UsingFire: Boolean;
+
+    NextCamJitterAt: UInt64;
+    NextFocusLossAt: UInt64;
   end;
 
 
@@ -286,6 +289,7 @@ begin
   EnsureAmbientSchedule();
   Self.SetupItems();
   Self.SetupLocation();
+  Self.SetupAntibanProfile();
 end;
 
 
@@ -503,6 +507,9 @@ begin
 
       ECookerState.END_SCRIPT: Break;
     end;
+
+    if not RSInterface.IsOpen() then
+      Self.MaybeAmbient();
 
     Self.DoAntiban();
   until Self.ShouldStop();
