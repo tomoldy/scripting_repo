@@ -1,6 +1,10 @@
 {$DEFINE SCRIPT_ID := 'eedfc292-6c08-40a3-a5ec-c8d9d25df87c'}
 {$DEFINE SCRIPT_REVISION := '14'}
 program agility;
+
+{$DEFINE CJ_BIRDHOUSE_RUNNER}
+{$DEFINE XJ_FARM_RUNNER}
+
 {$I SRL-T/osr.simba}
 {$I WaspLib/osr.simba}
 {$I WaspLib/optional/handlers/discord.simba}
