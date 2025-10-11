@@ -472,9 +472,12 @@ end;
 function TBirdHouseInclude.GetNearestUnfilledBirdHouse(myPos : TPoint; out bestIndex : Int32) : Boolean;
 var
   dist : Int32;
-  bestDist : Int32 = 99999;
+  bestDist : Int32;
   i : Int8;
 begin
+  bestDist := 99999;
+  Result := False;
+  bestIndex := -1;
   for i := 0 to High(Self.birdHouses) do
   begin
     if Self.birdHouses[i].IsFilled then
