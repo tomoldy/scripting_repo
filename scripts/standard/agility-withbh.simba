@@ -139,6 +139,20 @@ const
                                 'Grimy kwuarm', 'Grimy snapdragon', 'Grimy cadantine', 'Grimy lantadyme',
                                 'Grimy dwarf weed', 'Grimy torstol'];
 
+  // Lightweight anti-ban profile tuning
+  AB_REACT_MIN = 90;       // ms
+  AB_REACT_MAX = 420;      // ms
+  AB_ROTATE_CHANCE     = 15; // %
+  AB_RIGHTCLICK_CHANCE = 8;  // %
+  AB_KEYBOARD_CHANCE   = 8;  // %
+  AB_LOSEFOCUS_CHANCE  = 14; // %
+
+  // No-progress watchdog configuration
+  NP_MINUTES_NO_PROGRESS = 6;     // reset if no progress in X minutes
+  NP_SHORT_BREAK_MIN  = 15000;    // ms
+  NP_SHORT_BREAK_MAX  = 45000;    // ms
+  NP_LOG_EVERY        = 60000;    // ms throttle for console spam
+
 var
   Marks, WaitRand, Step, WaitTime, FarmRuns, BirdhouseRuns, BreakFor, BreakAfter, StartXP, CurrentXP, GainedXP, fc, gfc: Int32;
   ExtraAntiban, DoBirdhouseRuns, BlockInput, TakeSleeps, DoFarmRuns, UseRunePouch, HosidiusHerb, HosidiusFlower,
@@ -162,6 +176,10 @@ var
   BHIncludeGUISeed : TRSItem := 'Potato seed';
   BHIncludeGUIRunIntervalMinutes : Int32 := 51;
   PatchData: array of TPatchData;
+
+  NP_LastProgressTime, NP_LastLog: UInt64;
+  ABNextCamJitterAt, ABNextBreakletAt: UInt64;
+  ABMouseSpeed, ABMouseGravity, ABMouseWind, ABMouseMiss: Int32;
 
 function TMushroom.GetMushButton() : ERSMushTreeButton;
 begin
@@ -4084,6 +4102,91 @@ begin
     WaitEx(1000, 850);
 end;
 
+procedure AB_Reaction(minMS, maxMS: Int32);
+begin
+  Wait(SRL.NormalRange(minMS, maxMS));
+end;
+
+procedure AB_MicroIdle();
+begin
+  // Fire one tiny behavior at low probability (no zoom fiddling to avoid breaking loops)
+  if SRL.Dice(AB_ROTATE_CHANCE) then
+    Antiban.RandomRotate()
+  else if SRL.Dice(AB_RIGHTCLICK_CHANCE) then
+    Antiban.RandomRightClick()
+  else if SRL.Dice(AB_KEYBOARD_CHANCE) then
+    Antiban.RandomKeyboard()
+  else if SRL.Dice(AB_LOSEFOCUS_CHANCE) then
+    Antiban.LoseFocus(SRL.NormalRange(600, 1800));
+end;
+
+procedure NP_MarkProgress();
+begin
+  NP_LastProgressTime := GetTickCount();
+end;
+
+procedure NP_CheckAndRecover();
+var
+  dt: UInt64;
+begin
+  if NP_LastProgressTime = 0 then Exit;
+
+  dt := GetTickCount() - NP_LastProgressTime;
+  if dt >= (NP_MINUTES_NO_PROGRESS * ONE_MINUTE) then
+  begin
+    if (GetTickCount() - NP_LastLog) > NP_LOG_EVERY then
+    begin
+      WriteLn('[Failsafe] No progress for ', dt div 1000, 's. Soft reset.');
+      NP_LastLog := GetTickCount();
+    end;
+
+    Antiban.RandomRotate();
+    Antiban.LoseFocus(SRL.NormalRange(600, 1800));
+    Wait(SRL.NormalRange(NP_SHORT_BREAK_MIN, NP_SHORT_BREAK_MAX));
+    try RSClient.Image.Clear(); except end;
+
+    InactivityTimer.Reset();
+    NP_LastProgressTime := GetTickCount();
+  end;
+end;
+
+procedure AB_InitProfile();
+begin
+  ABMouseSpeed   := SRL.NormalRange(16, 22);
+  ABMouseGravity := SRL.NormalRange(10, 18);
+  ABMouseWind    := SRL.NormalRange(2, 5);
+  ABMouseMiss    := SRL.NormalRange(6, 12);
+
+  Mouse.Speed := ABMouseSpeed;
+  Mouse.Gravity := ABMouseGravity;
+  Mouse.Wind := ABMouseWind;
+  Mouse.MissChance := ABMouseMiss;
+
+  ABNextCamJitterAt := GetTickCount() + SRL.NormalRange(25000, 45000);
+  ABNextBreakletAt  := GetTickCount() + SRL.NormalRange(480000, 840000);
+end;
+
+procedure AB_MaybeAmbient();
+var
+  now: UInt64;
+begin
+  now := GetTickCount();
+
+  if now >= ABNextCamJitterAt then
+  begin
+    Antiban.RandomRotate();
+    ABNextCamJitterAt := now + SRL.NormalRange(25000, 45000);
+  end;
+
+  if now >= ABNextBreakletAt then
+  begin
+    Antiban.RandomRightClick();
+    Antiban.RandomKeyboard();
+    WaitEx(1000, 400);
+    ABNextBreakletAt := now + SRL.NormalRange(480000, 840000);
+  end;
+end;
+
 function HasGainedXP(): Boolean;
 var
   TempValue: Int32;
@@ -4094,6 +4197,9 @@ begin
   TempValue := GainedXP;
   GainedXP  := CurrentXP - StartXP;
   Result := GainedXP > TempValue;
+
+  if Result then
+    NP_MarkProgress();
 end;
 
 procedure WriteDebug(Message: String);
@@ -4294,11 +4400,15 @@ begin
   if not RSClient.IsLoggedIn() then
     Login.LoginPlayer();
 
+  AB_InitProfile();
+
   if WaitUntil(RSClient.IsLoggedIn(), 250, 12000) then
     StartXP := XPBar.Read();
 
   if StartXP < 1024 then
     TerminateScript('Failed to read XP, make sure XPBar is set up!');
+
+  NP_MarkProgress();
 
   if Options.GetNPCAttackOption() <> ERSAttackOption.HIDDEN then
     Options.SetNPCAttackOption(ERSAttackOption.HIDDEN);
@@ -4653,8 +4763,10 @@ begin
   if HasGainedXP() then
     InactivityTimer.Reset();
 
-  if InactivityTimer.ElapsedTime() > 300000 then
-    TerminateScript('No Gained XP in 5 mins, stopping!');
+  NP_CheckAndRecover();
+
+  if InactivityTimer.ElapsedTime() > 900000 then
+    TerminateScript('No Gained XP in 15 mins, stopping!');
 
   if not RSClient.IsLoggedIn() then
     Login.LoginPlayer();
@@ -4682,7 +4794,9 @@ begin
     NormalStep(Step);
   end;
 
+  AB_MaybeAmbient();
   Antiban.DoAntiban();
+  AB_MicroIdle();
 
   WaitEx(WaitTime, WaitRand);
 end;
