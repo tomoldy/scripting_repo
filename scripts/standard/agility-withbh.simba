@@ -23,7 +23,7 @@ type
   TAgilityGUI = record (TScriptForm)
     BirdhouseCheckbox, SleepCheckbox, FarmRunNowCheckbox,
     BlockInputCheckbox, FarmCheckbox, HourlyReportCheckbox,
-    SessionSummaryCheckbox: TLabeledCheckBox;
+    SessionSummaryCheckbox, PlannedBreaksCheckbox: TLabeledCheckBox;
     BreakForInput, BreakAfterInput, BankTabInput, WebhookInput: TLabeledEdit;
     FoodInput, CourseInput, HerbSeedCombo, FlowerSeedCombo: TLabeledCombobox;
     MagicSecateursCheckbox, CatherbyHerbCheckbox, HosidiusHerbCheckbox,
@@ -168,6 +168,17 @@ const
   NP_SHORT_BREAK_MAX  = 45000;    // ms
   NP_LOG_EVERY        = 60000;    // ms throttle for console spam
 
+  // BigAussie-style break defaults
+  MINI_BREAK_CHANCE_PCT_DEFAULT = 40;        // % chance when window fires
+  MINI_GAP_MIN_MS_DEFAULT       = 25 * ONE_MINUTE;
+  MINI_GAP_MAX_MS_DEFAULT       = 55 * ONE_MINUTE;
+  MINI_LEN_MIN_MS_DEFAULT       = 30000;     // 30s
+  MINI_LEN_MAX_MS_DEFAULT       = 120000;    // 120s
+
+  PLANNED_CADENCE_JITTER_PCT_DEFAULT = 10;   // ±10% cadence jitter
+  PLANNED_LENGTH_JITTER_PCT_DEFAULT  = 20;   // ±20% duration jitter
+  PLANNED_BREAK_RESUME_FUZZ_MS       = 5000; // add a small buffer when resuming timers
+
 var
   Marks, WaitRand, Step, WaitTime, FarmRuns, BirdhouseRuns, BreakFor, BreakAfter, StartXP, CurrentXP, GainedXP, fc, gfc,
   LapsCompleted: Int32;
@@ -175,6 +186,7 @@ var
   DoBirdhouseRuns, TakeSleeps, DoFarmRuns, UseRunePouch, HosidiusHerb, HosidiusFlower,
   FarmRunNow, UseMagicSecateurs, BarbarianDibber, CatherbyHerb, CatherbyFlower,
   CompostFlowers: Boolean;
+  PlannedBreaksEnabled: Boolean := True;
   EnableOverlay: Boolean := True;
   RealInputBlocked: Boolean := False;
   BlockInput: Boolean := True;
@@ -206,6 +218,9 @@ var
 
   NP_LastProgressTime, NP_LastLog: UInt64;
   ABNextCamJitterAt, ABNextBreakletAt: UInt64;
+  NextMiniBreakAt, NextPlannedBreakAt: UInt64;
+  MiniGapMinMs, MiniGapMaxMs, MiniLenMinMs, MiniLenMaxMs: UInt64;
+  MiniBreakRemainingMs, PlannedBreakRemainingMs: UInt64;
   SystemUpdateCheckTimer: TCountdown;
   SystemUpdateWarningShown: Boolean;
   SystemUpdateOverlayMessage: String;
@@ -213,7 +228,11 @@ var
   SystemUpdateThresholdMinutes: Int32;
   SystemUpdateLogoutDelayedLogged: Boolean;
   FarmRunActive, BirdhouseRunActive: Boolean;
+  MiniBreakPaused, PlannedBreakPaused, LastBreakInProgress: Boolean;
   ABMouseSpeed, ABMouseGravity, ABMouseWind, ABMouseMiss: Int32;
+  MiniBreakChancePct, PlannedCadenceJitterPct, PlannedLengthJitterPct: Int32;
+  LastBreakEventSummary: String;
+  LastBreakEventAt: UInt64;
 
 procedure ReleaseRealInput(); forward;
 procedure CheckSystemUpdate(); forward;
@@ -1347,10 +1366,12 @@ end;
 procedure TBirdHouseInclude.DoBirdHouseRun();
 begin
   BirdhouseRunActive := True;
+  PauseBreakTimers();
   try
     Self.BirdhouseRun();
   finally
     BirdhouseRunActive := False;
+    ResumeBreakTimers();
     CheckSystemUpdate();
   end;
 
@@ -3836,6 +3857,283 @@ begin
   end;
 end;
 
+function RandomUIntRange(MinValue, MaxValue: UInt64): UInt64;
+var
+  Span: UInt64;
+begin
+  if MaxValue <= MinValue then
+    Exit(MinValue);
+
+  Span := MaxValue - MinValue;
+  if Span >= UInt64(High(Int32)) then
+    Span := UInt64(High(Int32) - 1);
+
+  Result := MinValue + UInt64(Random(Int32(Span) + 1));
+end;
+
+function RandomIntRange(MinValue, MaxValue: Int32): Int32;
+var
+  Span: Int32;
+begin
+  if MaxValue <= MinValue then
+    Exit(MinValue);
+
+  Span := MaxValue - MinValue;
+  Result := MinValue + Random(Span + 1);
+end;
+
+procedure ScheduleNextMiniBreak();
+var
+  MinGap, MaxGap: UInt64;
+begin
+  MinGap := MiniGapMinMs;
+  MaxGap := MiniGapMaxMs;
+
+  if MinGap = 0 then
+    MinGap := MINI_GAP_MIN_MS_DEFAULT;
+
+  if MaxGap < MinGap then
+    MaxGap := MinGap;
+
+  NextMiniBreakAt := GetTimeRunning() + RandomUIntRange(MinGap, MaxGap);
+end;
+
+procedure ScheduleNextPlannedBreak();
+var
+  BaseMs, Jitter: Int64;
+  JitterPct: Int32;
+begin
+  if (not PlannedBreaksEnabled) or (BreakAfter <= 0) then
+  begin
+    NextPlannedBreakAt := 0;
+    Exit;
+  end;
+
+  BaseMs := Int64(BreakAfter) * ONE_MINUTE;
+  JitterPct := RandomIntRange(-PlannedCadenceJitterPct, PlannedCadenceJitterPct);
+  Jitter := (BaseMs * JitterPct) div 100;
+  BaseMs := BaseMs + Jitter;
+
+  if BaseMs < Int64(ONE_MINUTE) then
+    BaseMs := Int64(ONE_MINUTE);
+
+  NextPlannedBreakAt := GetTimeRunning() + UInt64(BaseMs);
+end;
+
+procedure SendBreakWebhook(const Message: String);
+begin
+  if (Message = '') or (not WebhookEnabled) then
+    Exit;
+
+  {$IF DECLARED(Discord)}
+    {$IF DECLARED(ENABLEWEBHOOKS)}
+    if ENABLEWEBHOOKS and (Discord.HTTP <> 0) then
+    begin
+      try
+        Discord.Webhook.ClearAll();
+        Discord.Webhook.Content := Message;
+        Discord.Send();
+      except
+        WriteLn('[Discord] Failed to send break notification: ' + GetExceptionMessage);
+      end;
+    end;
+    {$ENDIF}
+  {$ENDIF}
+end;
+
+procedure StartBreakEvent(const Kind: String; DurationMs: UInt64);
+var
+  DurationText, Message: String;
+begin
+  DurationText := SRL.MsToTime(DurationMs, Time_Short);
+  LastBreakEventSummary := Kind + ' (' + DurationText + ')';
+  LastBreakInProgress := True;
+  LastBreakEventAt := GetTimeRunning();
+
+  Message := 'Starting ' + Kind + ' break for ' + DurationText + '.';
+  WriteLn(SRL.TimeStamp(), ':[Breaks]: ' + Message);
+  SendBreakWebhook('**' + Kind + ' break** for ' + DurationText + '.');
+
+  if Overlay.Enabled then
+    Overlay.Update();
+end;
+
+procedure FinishBreakEvent(const Kind: String);
+begin
+  LastBreakInProgress := False;
+  LastBreakEventAt := GetTimeRunning();
+  WriteLn(SRL.TimeStamp(), ':[Breaks]: ' + Kind + ' break finished.');
+
+  if Overlay.Enabled then
+    Overlay.Update();
+end;
+
+function SafeToTakeBreak(): Boolean;
+var
+  PlayerBox: TBox;
+begin
+  if FarmRunActive or BirdhouseRunActive then
+    Exit(False);
+
+  if not RSClient.IsLoggedIn() then
+    Exit(False);
+
+  if Minimap.IsPlayerMoving() then
+    Exit(False);
+
+  PlayerBox := Mainscreen.GetPlayerBox();
+  Result := not SRL.IsAnimating(PlayerBox, Mainscreen.NormalizeDistance(450), 350, 2);
+end;
+
+procedure PauseBreakTimers();
+var
+  NowMs: UInt64;
+begin
+  NowMs := GetTimeRunning();
+
+  if not MiniBreakPaused then
+  begin
+    if (NextMiniBreakAt > NowMs) and (NextMiniBreakAt <> 0) then
+      MiniBreakRemainingMs := NextMiniBreakAt - NowMs
+    else
+      MiniBreakRemainingMs := 0;
+    MiniBreakPaused := True;
+  end;
+
+  if not PlannedBreakPaused then
+  begin
+    if (NextPlannedBreakAt > NowMs) and (NextPlannedBreakAt <> 0) then
+      PlannedBreakRemainingMs := NextPlannedBreakAt - NowMs
+    else
+      PlannedBreakRemainingMs := 0;
+    PlannedBreakPaused := True;
+  end;
+end;
+
+procedure ResumeBreakTimers();
+var
+  NowMs: UInt64;
+begin
+  NowMs := GetTimeRunning();
+
+  if MiniBreakPaused then
+  begin
+    if NextMiniBreakAt <> 0 then
+    begin
+      if MiniBreakRemainingMs > 0 then
+        NextMiniBreakAt := NowMs + MiniBreakRemainingMs
+      else
+        NextMiniBreakAt := NowMs + UInt64(PLANNED_BREAK_RESUME_FUZZ_MS);
+    end else
+      ScheduleNextMiniBreak();
+
+    MiniBreakPaused := False;
+  end;
+
+  if PlannedBreakPaused then
+  begin
+    if PlannedBreaksEnabled and (BreakAfter > 0) then
+    begin
+      if PlannedBreakRemainingMs > 0 then
+        NextPlannedBreakAt := NowMs + PlannedBreakRemainingMs
+      else
+        NextPlannedBreakAt := NowMs + UInt64(PLANNED_BREAK_RESUME_FUZZ_MS);
+    end else
+      NextPlannedBreakAt := 0;
+
+    PlannedBreakPaused := False;
+  end;
+end;
+
+procedure MaybeDoMiniBreak();
+var
+  LenMs: UInt64;
+begin
+  if MiniBreakPaused or (NextMiniBreakAt = 0) then
+    Exit;
+
+  if GetTimeRunning() < NextMiniBreakAt then
+    Exit;
+
+  ScheduleNextMiniBreak();
+
+  if (MiniBreakChancePct <= 0) or (Random(100) >= MiniBreakChancePct) then
+    Exit;
+
+  if not SafeToTakeBreak() then
+    Exit;
+
+  if MiniLenMinMs = 0 then
+    MiniLenMinMs := MINI_LEN_MIN_MS_DEFAULT;
+  if MiniLenMaxMs = 0 then
+    MiniLenMaxMs := MINI_LEN_MAX_MS_DEFAULT;
+
+  LenMs := RandomUIntRange(MiniLenMinMs, MiniLenMaxMs);
+  if LenMs = 0 then
+    Exit;
+
+  StartBreakEvent('Mini', LenMs);
+  InactivityTimer.Pause();
+  try
+    Wait(UInt32(LenMs));
+    if Random(100) < 30 then
+      Minimap.RotateWithinAngles(-15, 15);
+  finally
+    InactivityTimer.Resume();
+  end;
+  FinishBreakEvent('Mini');
+end;
+
+procedure MaybeDoPlannedBreak();
+var
+  LenMs: Int64;
+  Jitter: Int64;
+begin
+  if (not PlannedBreaksEnabled) or PlannedBreakPaused then
+    Exit;
+
+  if (BreakAfter <= 0) or (BreakFor <= 0) then
+  begin
+    NextPlannedBreakAt := 0;
+    Exit;
+  end;
+
+  if (NextPlannedBreakAt = 0) or (GetTimeRunning() < NextPlannedBreakAt) then
+    Exit;
+
+  if not SafeToTakeBreak() then
+    Exit;
+
+  LenMs := Int64(BreakFor) * ONE_MINUTE;
+  Jitter := (LenMs * RandomIntRange(-PlannedLengthJitterPct, PlannedLengthJitterPct)) div 100;
+  LenMs := LenMs + Jitter;
+
+  if LenMs < Int64(ONE_MINUTE) then
+    LenMs := Int64(ONE_MINUTE)
+  else if LenMs > Int64(120 * ONE_MINUTE) then
+    LenMs := Int64(120 * ONE_MINUTE);
+
+  StartBreakEvent('Planned', UInt64(LenMs));
+  InactivityTimer.Pause();
+  try
+    Logout.ClickLogout();
+    Wait(UInt32(LenMs));
+    if not Login.LoginPlayer() then
+      TerminateScript('Failed to log in after planned break');
+  finally
+    InactivityTimer.Resume();
+  end;
+  FinishBreakEvent('Planned');
+
+  ScheduleNextPlannedBreak();
+end;
+
+procedure MaybeHandleScheduledBreaks();
+begin
+  MaybeDoPlannedBreak();
+  MaybeDoMiniBreak();
+end;
+
 procedure TFarmRun.Run();
 var
   AntibanMinZ, AntibanMaxZ: Int32;
@@ -3846,6 +4144,7 @@ begin
     Login.LoginPlayer();
 
   FarmRunActive := True;
+  PauseBreakTimers();
   try
     Antiban.DebugLn('Starting farm run.');
     Self.Runtime.Start();
@@ -3941,6 +4240,7 @@ begin
     Self.Report();
   finally
     FarmRunActive := False;
+    ResumeBreakTimers();
     CheckSystemUpdate();
   end;
 end;
@@ -4155,6 +4455,12 @@ begin
   Tab := Self.GetTab('Settings');
   Tab.SetTooltip('');
 
+  if BreakAfter <= 0 then
+    BreakAfter := 90;
+
+  if BreakFor <= 0 then
+    BreakFor := 15;
+
   with Self.BankTabInput do
   begin
     Create(Tab);
@@ -4164,13 +4470,24 @@ begin
     SetText(ToStr(BankTab));
   end;
 
+  with Self.PlannedBreaksCheckbox do
+  begin
+    Create(Tab);
+    SetLeft(TControl.AdjustToDPI(30));
+    SetTop(TControl.AdjustToDPI(135));
+    SetCaption('Enable planned breaks');
+    SetChecked(PlannedBreaksEnabled);
+    SetToolTip('Takes a logout break every X minutes for Y minutes.');
+  end;
+
   with Self.BreakAfterInput do
   begin
     Create(Tab);
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(160));
-    SetCaption('Break after:');
-    SetText('60');
+    SetCaption('Planned break every (min):');
+    SetText(ToStr(BreakAfter));
+    SetToolTip('Minutes between planned breaks when enabled.');
   end;
 
   with Self.BreakForInput do
@@ -4178,8 +4495,9 @@ begin
     Create(Tab);
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(210));
-    SetCaption('Break for:');
-    SetText('10');
+    SetCaption('Planned break length (min):');
+    SetText(ToStr(BreakFor));
+    SetToolTip('Approximate duration of each planned break.');
   end;
 
   with Self.AntibanNote do
@@ -4317,6 +4635,7 @@ var
   T: PSleepTask;
 begin
   InactivityTimer.Pause();
+  PauseBreakTimers();
   T := Task;
 end;
 
@@ -4324,6 +4643,7 @@ procedure OnSleepEnd(Task: PSleepTask);
 var
   T: PSleepTask;
 begin
+  ResumeBreakTimers();
   InactivityTimer.Resume();
   T := Task;
 end;
@@ -4409,14 +4729,26 @@ begin
   TakeSleeps := Self.SleepCheckbox.IsChecked();
   DoFarmRuns := Self.FarmCheckbox.IsChecked();
   if Self.BlockInputCheckbox <> nil then
-    BlockInput := Self.BlockInputCheckbox.IsChecked()
+  BlockInput := Self.BlockInputCheckbox.IsChecked()
   else
     BlockInput := True;
   WebhookURL := Self.WebhookInput.GetText();
   SendHourlyReports := Self.HourlyReportCheckbox.IsChecked();
   SendSessionSummaryReports := Self.SessionSummaryCheckbox.IsChecked();
+  PlannedBreaksEnabled := Self.PlannedBreaksCheckbox.IsChecked();
   BreakFor := Self.BreakForInput.GetText().ExtractInteger();
+  if BreakFor <= 0 then
+  begin
+    BreakFor := 15;
+    Self.BreakForInput.SetText(ToStr(BreakFor));
+  end;
   BreakAfter := Self.BreakAfterInput.GetText().ExtractInteger();
+  if BreakAfter <= 0 then
+  begin
+    BreakAfter := 90;
+    Self.BreakAfterInput.SetText(ToStr(BreakAfter));
+  end;
+  PlannedBreaksEnabled := PlannedBreaksEnabled and (BreakAfter > 0) and (BreakFor > 0);
   BankTab := Self.BankTabInput.GetText().ExtractInteger();
   if BankTab < 0 then
     BankTab := 0
@@ -4842,12 +5174,12 @@ end;
 
 procedure TAgilityOverlay.Update();
 var
-  runtimeMs: UInt64;
+  runtimeMs, elapsedSinceBreak: UInt64;
   xpPerHour: Int32;
   headerSpacing, lineSpacing, height, y: Int32;
   lines: TStringArray;
   xpLine, farmLine, birdLine: String;
-  lootLine: String;
+  lootLine, breakLine: String;
   box: TBox;
   i: Int32;
 begin
@@ -4881,6 +5213,27 @@ begin
   lines += farmLine;
   lines += birdLine;
   lines += lootLine;
+
+  elapsedSinceBreak := 0;
+  breakLine := '';
+
+  if LastBreakEventSummary <> '' then
+  begin
+    if LastBreakInProgress then
+      breakLine := 'Break: ' + LastBreakEventSummary + ' (in progress)'
+    else
+    begin
+      if GetTimeRunning() >= LastBreakEventAt then
+        elapsedSinceBreak := GetTimeRunning() - LastBreakEventAt
+      else
+        elapsedSinceBreak := 0;
+      breakLine := 'Last break: ' + LastBreakEventSummary + ' (' +
+        SRL.MsToTime(elapsedSinceBreak, Time_Short) + ' ago)';
+    end;
+  end;
+
+  if breakLine <> '' then
+    lines += breakLine;
 
   if SystemUpdateOverlayMessage <> '' then
     lines += '⚠ ' + SystemUpdateOverlayMessage;
@@ -4961,7 +5314,31 @@ begin
 
   Self.Breaks := [];
 
-  Self.AddBreak(ONE_SECOND * 200, ONE_SECOND * 15, 1, 0);
+  MiniBreakChancePct := MINI_BREAK_CHANCE_PCT_DEFAULT;
+  MiniGapMinMs := MINI_GAP_MIN_MS_DEFAULT;
+  MiniGapMaxMs := MINI_GAP_MAX_MS_DEFAULT;
+  MiniLenMinMs := MINI_LEN_MIN_MS_DEFAULT;
+  MiniLenMaxMs := MINI_LEN_MAX_MS_DEFAULT;
+
+  PlannedCadenceJitterPct := PLANNED_CADENCE_JITTER_PCT_DEFAULT;
+  PlannedLengthJitterPct := PLANNED_LENGTH_JITTER_PCT_DEFAULT;
+
+  MiniBreakPaused := False;
+  PlannedBreakPaused := False;
+  MiniBreakRemainingMs := 0;
+  PlannedBreakRemainingMs := 0;
+  NextMiniBreakAt := 0;
+  NextPlannedBreakAt := 0;
+  LastBreakEventSummary := '';
+  LastBreakEventAt := 0;
+  LastBreakInProgress := False;
+
+  ScheduleNextMiniBreak();
+
+  if PlannedBreaksEnabled and (BreakAfter > 0) and (BreakFor > 0) then
+    ScheduleNextPlannedBreak()
+  else
+    NextPlannedBreakAt := 0;
 
   if TakeSleeps then
   begin
@@ -4974,8 +5351,6 @@ begin
     Self.OnStartSleep := nil;
     Self.OnFinishSleep := nil;
   end;
-
-  Self.AddBreak(BreakAfter * ONE_MINUTE, BreakFor * ONE_MINUTE, 0.3, 1);
   Self.OnStartBreak := @PauseTimer;
   Self.OnFinishBreak := @ResumeTimer;
   Self.OnFinishTask := @Self.HandleFinishTask;
@@ -5361,6 +5736,8 @@ begin
       if AgilityRSW.GetMyPos.InBox(Obstacles[0].Area) then
         BirdHouseRunner.DoBirdHouseRun();
 
+  MaybeHandleScheduledBreaks();
+
   Found := FindObstacle(Obstacles[0]);
   RSClient.Image.Clear();
 
@@ -5536,8 +5913,11 @@ begin
 
   Overlay.Update();
 
+  MaybeHandleScheduledBreaks();
+
   AB_MaybeAmbient();
-  Antiban.DoAntiban();
+  Antiban.DoBreak();
+  Antiban.DoAntiban(False);
   AB_MicroIdle();
 
   WaitEx(WaitTime, WaitRand);
