@@ -36,18 +36,9 @@ type
     CompostInput: TLabeledCombobox;
   end;
 
-  TAgilityStatusUI = record
-    Enabled: Boolean;
-    FontSize: Int32;
-    BackgroundColor, BorderColor, TextColor: TColor;
-    Position: TPoint;
-    Padding, Width: Int32;
-    Runtime: TStopWatch;
-  end;
-
-procedure AgilityStatusUI_Init(var UI: TAgilityStatusUI);
-procedure AgilityStatusUI_Update(var UI: TAgilityStatusUI);
-procedure AgilityStatusUI_Clear();
+procedure DrawUIOverlay(drawBox: TBox; title, status, runtime, xpRate, revision: String; useHeaderColor: Boolean = False);
+procedure DrawStatusOverlay(isPreviewMode: Boolean = False; previewBox: TBox = [0, 0, 0, 0]);
+procedure ClearStatusOverlay();
 
 procedure AgilityGUI_LoadSettings();
 function AgilityGUI_GetActiveUsername(): String;
@@ -202,14 +193,14 @@ var
   FarmRunNow, UseMagicSecateurs, BarbarianDibber, CatherbyHerb, CatherbyFlower,
   CompostFlowers: Boolean;
   PlannedBreaksEnabled: Boolean := True;
-  EnableStatusUI: Boolean := True;
+  UIEnabled: Boolean := True;
   RealInputBlocked: Boolean := False;
   BlockInput: Boolean := True;
   SendHourlyReports: Boolean := True;
   SendSessionSummaryReports: Boolean := True;
   WebhookEnabled, SessionSummarySent: Boolean;
   ScriptCleanedUp: Boolean := False;
-  InactivityTimer, ReportTimer, InfoTimer, HourlyReportTimer, RuntimeTimer: TStopwatch;
+  InactivityTimer, ReportTimer, InfoTimer, HourlyReportTimer, RunningTime: TStopwatch;
   ReturnItemAmounts, FarmItemAmounts: TIntegerArray;
   ReturnItems, FarmItems: TRSItemArray;
   Obstacles: Array of TObstacle;
@@ -221,7 +212,11 @@ var
   GUI: TAgilityGUI;
   Course: ECourse := DRAYNOR_ROOF;
   Farm: TFarmRun;
-  AgilityStatusUI: TAgilityStatusUI;
+  UIFontSize: Int32 := 11;
+  UIBackgroundColor: TColor := $2D2D30;
+  UITextColor: TColor := $FFFFFF;
+  UIPosition: TPoint;
+  UISize: TPoint;
   Discord: TDiscordClient;
   WebhookURL: String := '';
 
@@ -3755,8 +3750,8 @@ begin
 
   SystemUpdateUIMessage := Message;
 
-  if AgilityStatusUI.Enabled then
-    AgilityStatusUI_Update(AgilityStatusUI);
+  if UIEnabled then
+    DrawStatusOverlay();
 end;
 
 function IsPlayerBusyForSystemUpdate(): Boolean;
@@ -3993,8 +3988,8 @@ begin
   WriteLn(SRL.TimeStamp(), ':[Breaks]: ' + Message);
   SendBreakWebhook('**' + Kind + ' break** for ' + DurationText + '.');
 
-  if AgilityStatusUI.Enabled then
-    AgilityStatusUI_Update(AgilityStatusUI);
+  if UIEnabled then
+    DrawStatusOverlay();
 end;
 
 procedure FinishBreakEvent(const Kind: String);
@@ -4003,8 +3998,8 @@ begin
   LastBreakEventAt := GetTimeRunning();
   WriteLn(SRL.TimeStamp(), ':[Breaks]: ' + Kind + ' break finished.');
 
-  if AgilityStatusUI.Enabled then
-    AgilityStatusUI_Update(AgilityStatusUI);
+  if UIEnabled then
+    DrawStatusOverlay();
 end;
 
 function SafeToTakeBreak(): Boolean;
@@ -4286,7 +4281,7 @@ end;
 
 procedure ReleaseRealInput();
 begin
-  AgilityStatusUI_Clear();
+  ClearStatusOverlay();
 
   if RealInputBlocked then
   begin
@@ -5281,7 +5276,7 @@ begin
   if not (WebhookEnabled and SendHourlyReports) then
     Exit;
 
-  runtimeMs := RuntimeTimer.ElapsedTime();
+  runtimeMs := RunningTime.ElapsedTime();
 
   if RSClient.IsLoggedIn() then
     CurrentXP := XPBar.Read();
@@ -5356,7 +5351,7 @@ begin
   if not (WebhookEnabled and SendSessionSummaryReports) then
     Exit;
 
-  runtimeMs := RuntimeTimer.ElapsedTime();
+  runtimeMs := RunningTime.ElapsedTime();
 
   if RSClient.IsLoggedIn() then
     CurrentXP := XPBar.Read();
@@ -5456,61 +5451,56 @@ begin
   Result := SRL.MsToTime(BirdHouseRunner.ScriptIntervalTimer.TimeRemaining(), Time_Short);
 end;
 
-procedure AgilityStatusUI_Init(var UI: TAgilityStatusUI);
-begin
-  UI.Enabled := EnableStatusUI;
-  UI.FontSize := 11;
-  UI.BackgroundColor := $2D2D30;
-  UI.BorderColor := $000000;
-  UI.TextColor := $FFFFFF;
-  UI.Position := Point(14, 70);
-  UI.Padding := 6;
-  UI.Width := 235;
-  UI.Runtime := Default(TStopWatch);
-  UI.Runtime.Start();
-end;
-
-procedure AgilityStatusUI_Update(var UI: TAgilityStatusUI);
+procedure DrawUIOverlay(drawBox: TBox; title, status, runtime, xpRate, revision: String; useHeaderColor: Boolean = False);
 var
-  runtimeMs, elapsedSinceBreak: UInt64;
-  xpPerHour: Int32;
-  headerSpacing, lineSpacing, height, y: Int32;
-  lines: TStringArray;
-  xpLine, farmLine, birdLine: String;
+  yPos, lineSpacing, headerSpacing: Int32;
+  headerColor: TColor;
   lootLine, breakLine: String;
-  box: TBox;
-  i: Int32;
+  elapsedSinceBreak: UInt64;
 begin
-  if not UI.Enabled then
+  {$IFNDEF SRL_DISABLE_REMOTEINPUT}
+  if not UIEnabled then
     Exit;
 
-  if not RSClient.IsLoggedIn() then
-    Exit;
+  lineSpacing := UIFontSize + 2;
+  headerSpacing := UIFontSize + 4;
 
-  runtimeMs := UI.Runtime.ElapsedTime();
-
-  if runtimeMs = 0 then
-    xpPerHour := 0
+  if useHeaderColor then
+    headerColor := $00D4FF
   else
-    xpPerHour := Round(GainedXP / (runtimeMs / 3600000));
+    headerColor := UITextColor;
 
-  xpLine := ToStr('XP: ', GainedXP, ' (', xpPerHour, '/h)');
-  farmLine := 'Farm: ' + GetFarmRunUIText();
-  birdLine := 'Birdhouse: ' + GetBirdhouseUIText();
+  RSClient.Image().DrawBoxFilled(drawBox, False, UIBackgroundColor);
+  RSClient.Image().DrawBoxFilled(drawBox.Expand(1), False, UITextColor);
+  RSClient.Image().DrawBoxFilled(drawBox, False, UIBackgroundColor);
+
+  RSClient.Image().SetFontName('Arial');
+
+  yPos := drawBox.Y1 + 6;
+
+  RSClient.Image().SetFontSize(UIFontSize + 1);
+  RSClient.Image().DrawText(title, Point(drawBox.X1 + 3, yPos), headerColor);
+  yPos += headerSpacing;
+
+  RSClient.Image().SetFontSize(UIFontSize - 1);
+  RSClient.Image().DrawText('Status: ' + status, Point(drawBox.X1 + 3, yPos), UITextColor);
+  yPos += lineSpacing;
+  RSClient.Image().DrawText('Runtime: ' + runtime, Point(drawBox.X1 + 3, yPos), UITextColor);
+  yPos += lineSpacing;
+  RSClient.Image().DrawText('XP/HR: ' + xpRate, Point(drawBox.X1 + 3, yPos), UITextColor);
+  yPos += lineSpacing;
+  RSClient.Image().DrawText('Farm: ' + GetFarmRunUIText(), Point(drawBox.X1 + 3, yPos), UITextColor);
+  yPos += lineSpacing;
+  RSClient.Image().DrawText('Birdhouse: ' + GetBirdhouseUIText(), Point(drawBox.X1 + 3, yPos), UITextColor);
+  yPos += lineSpacing;
+
   lootLine := 'Loot: Marks ' + IntToStr(Marks);
 
   if DoBirdhouseRuns then
     lootLine += ' | Nests ' + IntToStr(BirdHouseRunner.NestsLooted);
 
-  lines := [];
-
-  lines += 'Agility with BH';
-  lines += 'Runtime: ' + SRL.MsToTime(runtimeMs, Time_Short);
-  lines += xpLine;
-  lines += 'Obstacle: ' + GetCurrentObstacleName();
-  lines += farmLine;
-  lines += birdLine;
-  lines += lootLine;
+  RSClient.Image().DrawText(lootLine, Point(drawBox.X1 + 3, yPos), UITextColor);
+  yPos += lineSpacing;
 
   elapsedSinceBreak := 0;
   breakLine := '';
@@ -5525,50 +5515,94 @@ begin
         elapsedSinceBreak := GetTimeRunning() - LastBreakEventAt
       else
         elapsedSinceBreak := 0;
+
       breakLine := 'Last break: ' + LastBreakEventSummary + ' (' +
         SRL.MsToTime(elapsedSinceBreak, Time_Short) + ' ago)';
     end;
   end;
 
   if breakLine <> '' then
-    lines += breakLine;
+  begin
+    RSClient.Image().DrawText(breakLine, Point(drawBox.X1 + 3, yPos), UITextColor);
+    yPos += lineSpacing;
+  end;
 
   if SystemUpdateUIMessage <> '' then
-    lines += '⚠ ' + SystemUpdateUIMessage;
-
-  lineSpacing := UI.FontSize + 4;
-  headerSpacing := UI.FontSize + 6;
-  height := (UI.Padding * 2) + headerSpacing + (lineSpacing * (Length(lines) - 1));
-  box := Box(UI.Position.X, UI.Position.Y, UI.Position.X + UI.Width, UI.Position.Y + height);
-
-  with RSClient.Image() do
   begin
-    DrawBoxFilled(box.Expand(1), False, UI.BorderColor);
-    DrawBoxFilled(box, False, UI.BackgroundColor);
-    SetFontName('Arial');
-
-    y := box.Y1 + UI.Padding;
-
-    SetFontSize(UI.FontSize + 1);
-    DrawText(lines[0], Point(box.X1 + UI.Padding, y), UI.TextColor);
-    y += headerSpacing;
-
-    SetFontSize(UI.FontSize);
-
-    for i := 1 to High(lines) do
-    begin
-      DrawText(lines[i], Point(box.X1 + UI.Padding, y), UI.TextColor);
-      y += lineSpacing;
-    end;
+    RSClient.Image().DrawText('⚠ ' + SystemUpdateUIMessage, Point(drawBox.X1 + 3, yPos), UITextColor);
+    yPos += lineSpacing;
   end;
+
+  RSClient.Image().DrawText('Script Revision: ' + revision, Point(drawBox.X1 + 3, yPos), UITextColor);
+  {$ENDIF}
 end;
 
-procedure AgilityStatusUI_Clear();
+procedure DrawStatusOverlay(isPreviewMode: Boolean = False; previewBox: TBox = [0, 0, 0, 0]);
+var
+  statusBox, adjustedBox: TBox;
+  currentActivity, title, runtime, xpRate: String;
+  fontSize, lineSpacing, headerSpacing, requiredHeight, requiredWidth: Int32;
+  xpPerHour: Int32;
 begin
+  {$IFNDEF SRL_DISABLE_REMOTEINPUT}
+  if not UIEnabled then
+    Exit;
+
+  fontSize := UIFontSize;
+
+  if fontSize < 6 then
+    fontSize := 6;
+
+  if fontSize > 20 then
+    fontSize := 20;
+
+  lineSpacing := fontSize + 2;
+  headerSpacing := fontSize + 4;
+  requiredWidth := Round(fontSize * 12) + 20;
+  requiredHeight := 12 + headerSpacing + (lineSpacing * 8) + fontSize - 2;
+
+  if isPreviewMode then
+  begin
+    if previewBox.X1 = 0 then
+      Exit;
+
+    adjustedBox := Box(previewBox.X1, previewBox.Y1,
+                       previewBox.X1 + requiredWidth, previewBox.Y1 + requiredHeight);
+    DrawUIOverlay(adjustedBox, 'Agility with BH', 'Preview', '1h 23m', '45000',
+                  {$MACRO SCRIPT_REVISION}, True);
+  end
+  else
+  begin
+    statusBox := Box(UIPosition.X, UIPosition.Y,
+                     UIPosition.X + requiredWidth, UIPosition.Y + requiredHeight);
+
+    currentActivity := GetCurrentObstacleName();
+
+    if RunningTime.ElapsedTime() = 0 then
+      xpPerHour := 0
+    else
+      xpPerHour := Round(GainedXP / (RunningTime.ElapsedTime() / 3600000));
+
+    runtime := SRL.MsToTime(RunningTime.ElapsedTime(), Time_Short);
+    xpRate := SRL.FormatNumber(xpPerHour, 0);
+    title := 'Agility with BH';
+
+    DrawUIOverlay(statusBox, title, currentActivity, runtime, xpRate,
+                  {$MACRO SCRIPT_REVISION}, True);
+  end;
+
+  UISize := Point(requiredWidth, requiredHeight);
+  {$ENDIF}
+end;
+
+procedure ClearStatusOverlay();
+begin
+  {$IFNDEF SRL_DISABLE_REMOTEINPUT}
   try
-    RSClient.Image().Clear();
+    RSClient.Image.Clear;
   except
   end;
+  {$ENDIF}
 end;
 
 procedure PrintInfo();
@@ -5790,8 +5824,8 @@ begin
   LapsCompleted := 0;
   SessionSummarySent := False;
 
-  RuntimeTimer := Default(TStopWatch);
-  RuntimeTimer.Start();
+  RunningTime := Default(TStopWatch);
+  RunningTime.Start();
 
   ConfigureDiscord();
 
@@ -5799,7 +5833,15 @@ begin
   if WebhookEnabled and SendHourlyReports then
     HourlyReportTimer.Start();
 
-  AgilityStatusUI_Init(AgilityStatusUI);
+  UIEnabled := True;
+  UIFontSize := 11;
+  UIBackgroundColor := $2D2D30;
+  UITextColor := $FFFFFF;
+  UIPosition := Point(14, 70);
+  UISize := Point(0, 0);
+
+  if UIEnabled then
+    DrawStatusOverlay();
 
   if Options.GetNPCAttackOption() <> ERSAttackOption.HIDDEN then
     Options.SetNPCAttackOption(ERSAttackOption.HIDDEN);
@@ -5952,7 +5994,7 @@ begin
   FarmRunActive := False;
   BirdhouseRunActive := False;
 
-  AgilityStatusUI_Update(AgilityStatusUI);
+  DrawStatusOverlay();
 end;
 
 function GetStep(): Int32;
@@ -6209,7 +6251,7 @@ begin
     NormalStep(Step);
   end;
 
-  AgilityStatusUI_Update(AgilityStatusUI);
+  DrawStatusOverlay();
 
   MaybeHandleScheduledBreaks();
 
