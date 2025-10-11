@@ -187,6 +187,7 @@ var
   ABMouseSpeed, ABMouseGravity, ABMouseWind, ABMouseMiss: Int32;
 
 procedure ReleaseRealInput(); forward;
+procedure WriteDebug(Message: String); forward;
 
 function TMushroom.GetMushButton() : ERSMushTreeButton;
 begin
