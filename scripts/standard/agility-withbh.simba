@@ -255,20 +255,20 @@ procedure CheckSystemUpdate(); forward;
 function TMushroom.GetMushButton() : ERSMushTreeButton;
 begin
   case Self.location of
-    ERSMushroomLocation.HILL_HOUSE : ResultA := ERSMushTreeBUtton.VERDANT_VALLEY;
-    ERSMushroomLocation.VERD_VALLEY : ResultAb := ERSMushTreeBUtton.MUSHROOM_MEADOW;
-    ERSMushroomLocation.SHROOM_MEADOW : ResultAc := ERSMushTreeBUtton.HOUSE_ON_THE_HILL;
+    ERSMushroomLocation.HILL_HOUSE : Result := ERSMushTreeBUtton.VERDANT_VALLEY;
+    ERSMushroomLocation.VERD_VALLEY : Result := ERSMushTreeBUtton.MUSHROOM_MEADOW;
+    ERSMushroomLocation.SHROOM_MEADOW : Result := ERSMushTreeBUtton.HOUSE_ON_THE_HILL;
   end;
 end;
 
 function TRSMushTree.Click(mushroom : ERSMushTreeButton) : Boolean;
 begin
-  ResultA := Self.GetButton(mushroom).Click();
+  Result := Self.GetButton(mushroom).Click();
 end;
 
 function TBirdHouseInclude.GetNewRunInterval() : Uint64;
 begin
-  ResultA := Round(Random(Self.TaskInterval * 1.043598435, Self.TaskInterval * 1.35))
+  Result := Round(Random(Self.TaskInterval * 1.043598435, Self.TaskInterval * 1.35))
 end;
 
 procedure TBirdHouseInclude.DebugLn(message : string);
@@ -286,23 +286,23 @@ var
   ATPA : T2DPointArray;
   msC : TPoint := Mainscreen.Center;
 begin
-  SRL.FindColors(ResultA, SPACE_COLOR, Mainscreen.Bounds);
-  ResultA := ResultA.Grow(3);
-  ATPA := ResultA.Cluster(10);
+  SRL.FindColors(Result, SPACE_COLOR, Mainscreen.Bounds);
+  Result := Result.Grow(3);
+  ATPA := Result.Cluster(10);
   ATPA := ATPA.SortFrom(msC);
 
   if ATPA.Len() < 1 then
-    ResultA := []
+    Result := []
   else
-    ResultA := ATPA[0];
+    Result := ATPA[0];
 end;
 
 function TBirdHouseInclude.GetLogString(log : ERSLogType) : string;
 begin
   case log of
-    ERSLogType.REGULAR_LOGS : ResultA := "Logs";
+    ERSLogType.REGULAR_LOGS : Result := "Logs";
     else
-      ResultA := ToStr(Log).Before("_") + " logs";
+      Result := ToStr(Log).Before("_") + " logs";
   end;
 end;
 
@@ -312,22 +312,22 @@ var
 
 begin
   case log of
-    ERSLogType.REGULAR_LOGS : ResultA := baseBirdHouse;
+    ERSLogType.REGULAR_LOGS : Result := baseBirdHouse;
     else
-      ResultA := ToStr(Log).Before("_") + " " + baseBirdHouse;
+      Result := ToStr(Log).Before("_") + " " + baseBirdHouse;
   end;
 end;
 
 function TBirdHouseInclude.GetWithdrawList() : TRSBankItemArray;
 begin
-  ResultA += TRSBankItem.Setup("Chisel", 1, false);
-  ResultA += TRSBankItem.Setup("Hammer", 1, false);
-  ResultA += TRSBankItem.Setup(Self.GetLogString(Self.LogType), 4, false);
+  Result += TRSBankItem.Setup("Chisel", 1, false);
+  Result += TRSBankItem.Setup("Hammer", 1, false);
+  Result += TRSBankItem.Setup(Self.GetLogString(Self.LogType), 4, false);
 
   if Self.NeedClockworks then
-    ResultA += TRSBankItem.Setup("Clockwork", 1, false);
+    Result += TRSBankItem.Setup("Clockwork", 1, false);
 
-  ResultA += TRSBankItem.Setup(Self.Seed, 40, false);
+  Result += TRSBankItem.Setup(Self.Seed, 40, false);
 end;
 
 function TRSBank.FindAll(items: TRSItemArray): Boolean; overload;
@@ -344,7 +344,7 @@ begin
       Exit(false);
   end;
 
-  ResultA := true;
+  Result := true;
 end;
 
 function TRSBankItemArray.ToItemArray() : TRSItemArray; constref;
@@ -354,7 +354,7 @@ var
 begin
   for i := 0 to High(Self) do
   begin
-    ResultA += Self[i].Item;
+    Result += Self[i].Item;
   end;
 end;
 
@@ -391,8 +391,8 @@ begin
   end;
 
   i := Inventory.CountItemStack(Self.Seed);
-  ResultA :=  i >= 5;
-  if not ResultA then
+  Result :=  i >= 5;
+  if not Result then
     Self.DebugLn("Seed count: " + ToStr(i));
 
 end;
@@ -470,7 +470,7 @@ end;
 
 function TBirdHouseInclude.GetHouseOnHillRegion() : TBox;
 begin
-  ResultA := Box(10024, 865, 10314, 1114)
+  Result := Box(10024, 865, 10314, 1114)
 end;
 
 function TBirdHouseInclude.GetNearestUnfilledBirdHouse(myPos : TPoint; out bestIndex : Int32) : Boolean;
@@ -480,7 +480,7 @@ var
   i : Int8;
 begin
   bestDist := 99999;
-  ResultA := False;
+  Result := False;
   bestIndex := -1;
   for i := 0 to High(Self.birdHouses) do
   begin
@@ -493,7 +493,7 @@ begin
     begin
       bestDist := dist;
       bestIndex := i;
-      ResultA := true;
+      Result := true;
     end;
   end;
 end;
@@ -574,8 +574,8 @@ var
   bestDist, dist : Int32;
   i : Int8;
 begin
-  ResultA := evalObjects[0];
-  bestDist := Distance(position, ResultA.Coordinates[0]);
+  Result := evalObjects[0];
+  bestDist := Distance(position, Result.Coordinates[0]);
 
   for i := 0 to High(evalObjects) do
   begin
@@ -584,7 +584,7 @@ begin
     if dist < bestDist then
     begin
       bestDist := dist;
-      ResultA := evalObjects[i];
+      Result := evalObjects[i];
     end;
   end;
 end;
@@ -595,7 +595,7 @@ const
 var
   tpa : TPointArray;
 begin
-  ResultA := (Mainscreen.IsUpText(textToCheck))
+  Result := (Mainscreen.IsUpText(textToCheck))
              and (SRL.FindColors(tpa, TEXT_COLOR, MainScreen.UpTextArea) > 0);
 end;
 
@@ -685,15 +685,15 @@ begin
       Wait(120);
     end;
 
-    ResultA := WaitUntil(Length(Self.GetBirdHouseSpace()) > 1, 200, 2000);
-    if ResultA then
+    Result := WaitUntil(Length(Self.GetBirdHouseSpace()) > 1, 200, 2000);
+    if Result then
     begin
       Self.DebugLn("Cleared this birdhouse");
-      Exit(ResultA);
+      Exit(Result);
     end;
   end;
 
-  ResultA := False;
+  Result := False;
 end;
 
 //At this point we should have a birdhouse in the inventory that we can use.
@@ -759,7 +759,7 @@ begin
   //If we click the space so we need to make sure we're not moving and we've found our current birdhouse.
   if WaitUntil(not Minimap.IsPlayerMoving()
       and ((Mainscreen.IsUpText(['eeds', 'mpty'])) or (Self.CurrentBirdHouse^.BirdhouseObject.Find(birdhouseATPA))), 75, 8000) then
-    ResultA := true;
+    Result := true;
 end;
 
 function TBirdHouseInclude.FillBirdHouse() : Boolean;
@@ -816,7 +816,7 @@ begin
     Exit;
   end;
 
-  ResultA := WaitUntil(seedCount > Inventory.CountItemStack(Self.Seed), 100, 6000);
+  Result := WaitUntil(seedCount > Inventory.CountItemStack(Self.Seed), 100, 6000);
 end;
 
 function TBirdHouseInclude.BuildBirdHouseItem() : Boolean;
@@ -833,9 +833,9 @@ begin
     Exit(false);
   end;
 
-  ResultA := Inventory.ContainsItem(birdHouseItem);
+  Result := Inventory.ContainsItem(birdHouseItem);
 
-  if not ResultA then
+  if not Result then
   begin
     Self.DebugLn("No birdhouse in inventory, making one");
 
@@ -860,7 +860,7 @@ begin
       Exit;
     end;
 
-    ResultA := true;
+    Result := true;
   end;
 end;
 
@@ -908,7 +908,7 @@ begin
     Self.DebugLn("Filled birdhouse " + ToStr(Self.CurrentBirdHouse^.BirdhouseObject));
     Self.CurrentBirdHouse^.IsFilled := true;
     Self.BirdHousesFilled += 1;
-    ResultA := true;
+    Result := true;
   end;
 end;
 
@@ -919,7 +919,7 @@ begin
   for i := 0 to High(Self.birdHouses) do
   begin
     if Self.birdHouses[i].IsFilled then
-      Inc(ResultA);
+      Inc(Result);
   end;
 end;
 
@@ -1021,7 +1021,7 @@ begin
   if not Self.Mushrooms[indexToUse].Mushroom.WalkClick() then
     Self.Debugln("Failed to get to mushroom")
   else
-    ResultA := WaitUntil(Mushtree.IsOpen(), 300, 10000);
+    Result := WaitUntil(Mushtree.IsOpen(), 300, 10000);
 end;
 
 function TBirdHouseInclude.HandleMushroomTeleport(index : Int32 = -1) : Boolean;
@@ -1045,7 +1045,7 @@ begin
   if WaitUntil(not mushroomBox.Contains(Self.RSW.GetMyPos()), 400, 6000) then
   begin
     Self.DebugLn("Successfully teleported to mushroom");
-    ResultA := true;
+    Result := true;
     if index = -1 then
       Self.MushIndex := Min(MushIndex + 1, High(Self.Mushrooms));
 
@@ -1096,7 +1096,7 @@ begin
   if not ropeClicked then
     Exit(false);
 
-  ResultA := WaitUntil(SRL.CountColor(CAVE_FLOOR_COL, Mainscreen.Bounds) < 1000, Random(250, 600), 10000);
+  Result := WaitUntil(SRL.CountColor(CAVE_FLOOR_COL, Mainscreen.Bounds) < 1000, Random(250, 600), 10000);
 end;
 
 function TBirdHouseInclude.HandleNavigating() : Boolean;
@@ -1131,7 +1131,7 @@ begin
 
   Self.RSW.ScreenWalk := true;
   Self.RSW.AdaptiveWalk := true;
-  ResultA := true;
+  Result := true;
 end;
 
 function TBirdHouseInclude.GetLogForHunterLevel(level : Int32) : ERSLogType;
@@ -1141,23 +1141,23 @@ var
 begin
   Self.DebugLn("Detected hunter level: " + ToStr(level) + " detected crafting level: " + ToStr(craftLevel));
   if (level >= 89) and (craftLevel >= 90) then
-    ResultA := ERSLogType.REDWOOD_LOGS
+    Result := ERSLogType.REDWOOD_LOGS
   else if (level >= 74) and (craftLevel >= 75) then
-    ResultA := ERSLogType.MAGIC_LOGS
+    Result := ERSLogType.MAGIC_LOGS
   else if (level >= 59) and (craftLevel >= 60) then
-    ResultA := ERSLogType.YEW_LOGS
+    Result := ERSLogType.YEW_LOGS
   else if (level >= 49) and (craftLevel >= 50) then
-    ResultA := ERSLogType.MAHOGANY_LOGS
+    Result := ERSLogType.MAHOGANY_LOGS
   else if (level >= 44) and (craftLevel >= 45) then
-    ResultA := ERSLogType.MAPLE_LOGS
+    Result := ERSLogType.MAPLE_LOGS
   else if (level >= 34) and (craftLevel >= 35) then
-    ResultA := ERSLogType.TEAK_LOGS
+    Result := ERSLogType.TEAK_LOGS
   else if (level >= 24) and (craftLevel >= 25) then
-    ResultA := ERSLogType.WILLOW_LOGS
+    Result := ERSLogType.WILLOW_LOGS
   else if (level >= 14) and (craftLevel >= 15) then
-    ResultA := ERSLogType.OAK_LOGS
+    Result := ERSLogType.OAK_LOGS
   else
-    ResultA := ERSLogType.REGULAR_LOGS;
+    Result := ERSLogType.REGULAR_LOGS;
 end;
 
 function TRSBank.FindAny(items: TRSItemArray): Boolean; overload;
@@ -1201,7 +1201,7 @@ begin
   if Self.AlwaysUseBestLog then
     Self.SuggestedLogType := Self.GetLogForHunterLevel(Stats.GetLevel(ERSSkill.HUNTER, false));
 
-  ResultA := Bank.WalkOpen(RSObjects.BankChestFossilIsland);
+  Result := Bank.WalkOpen(RSObjects.BankChestFossilIsland);
 end;
 
 //Function responsible for getting to a bank
@@ -1248,15 +1248,15 @@ begin
     end;
   end;
 
-  ResultA := true;
+  Result := true;
 end;
 
 function TBirdHouseInclude.TeleportToIsland() : Boolean;
 var
   transporter: TUniversalTransport;
 begin
-  ResultA := transporter.Run(RSTEleports.FOSSIL_ISLAND);
-  if not ResultA then
+  Result := transporter.Run(RSTEleports.FOSSIL_ISLAND);
+  if not Result then
     Self.DebugLn("Could not teleport");
 end;
 
@@ -1278,16 +1278,16 @@ begin
   listOfStrings += listOfStrings[0];
 
   //Header text
-  ResultA += listofStrings[0];
-  ResultA += spacingStart + PadL(" ", 3, " ") + PadR(listofStrings[1], 30, " ") + spacingEnd;
-  ResultA += listofStrings[2];
+  Result += listofStrings[0];
+  Result += spacingStart + PadL(" ", 3, " ") + PadR(listofStrings[1], 30, " ") + spacingEnd;
+  Result += listofStrings[2];
 
   for i := 3 to High(listOfStrings) - 1 do
   begin
-    ResultA += spacingStart + PadL(" ", 3, " ") + PadR(listOfStrings[i], 30, " ") + spacingEnd;
+    Result += spacingStart + PadL(" ", 3, " ") + PadR(listOfStrings[i], 30, " ") + spacingEnd;
   end;
 
-  ResultA += listOfStrings[High(listOfStrings)];
+  Result += listOfStrings[High(listOfStrings)];
 end;
 
 procedure TBirdHouseInclude.DisplayReport();
@@ -1394,7 +1394,7 @@ begin
     Exit(false);
   end;
 
-  ResultA := true;
+  Result := true;
 end;
 
 procedure TBirdHouseInclude.DoBirdHouseRun();
@@ -1494,7 +1494,7 @@ begin
     Exit(false);
   end;
 
-  ResultA := true;
+  Result := true;
 end;
 
 //If you don't use the GUI's TScriptForm.CreateBirdhouseRunSettings
@@ -1579,7 +1579,7 @@ var
 
 begin
   Self.AddTab('Birdhouse Settings');
-  ResultA := Self.Tabs[High(Self.Tabs)];
+  Result := Self.Tabs[High(Self.Tabs)];
 
   fullWidth := Self.Size.X;
   space := Floor(fullWidth * 0.1);
@@ -1588,7 +1588,7 @@ begin
 
   with logTypeCombo do
   begin
-    Create(ResultA);
+    Create(Result);
     SetCaption('Log type to use:');
     SetStyle(csDropDownList);
     AddItemArray(['Regular', 'Oak', 'Willow', 'Teak',
@@ -1602,7 +1602,7 @@ begin
 
   with seedCombo do
   begin
-    Create(ResultA);
+    Create(Result);
     SetTop(logTypeCombo.GetTop());
     SetLeft(logTypeCombo.GetRight() + TControl.AdjustToDPI(H_SPACING));
     SetWidth(250);
@@ -1622,7 +1622,7 @@ begin
 
   with intervalLabel do
   begin
-    Create(ResultA);
+    Create(Result);
     SetCaption("When should the next run start?"
                + #13#10 + "Runs afterwards will continue every 50 - 60 minutes automatically.");
     SetLeft(logTypeCombo.GetLeft());
@@ -1632,7 +1632,7 @@ begin
 
   with nowRadio do
   begin
-    Create(ResultA);
+    Create(Result);
     SetName("bh_nowradio");
     SetLeft(intervalLabel.GetLeft());
     SetTop(intervalLabel.GetTop() + TControl.AdjustToDPI(33));
@@ -1643,7 +1643,7 @@ begin
 
   with laterRadio do
   begin
-    Create(ResultA);
+    Create(Result);
     SetName("bh_laterradio");
     SetCaption("Do a run later (in about 50 - 60 minutes)");
     SetLeft(nowRadio.getLeft());
@@ -1936,7 +1936,7 @@ begin
     if SameText(Seeds[i], Seed) then
       Exit(i);
 
-  ResultA := -1;
+  Result := -1;
 end;
 
 function EnsureSeedInList(const Seeds: TRSItemArray; const Seed, DefaultSeed: TRSItem): TRSItem;
@@ -1944,7 +1944,7 @@ begin
   if GetSeedIndex(Seeds, Seed) <> -1 then
     Exit(Seed);
 
-  ResultA := DefaultSeed;
+  Result := DefaultSeed;
 end;
 
 function TFarmRun.GetNextTime(): Int32;
@@ -1965,7 +1965,7 @@ begin
 
   for Slot := 0 to 27 do
     if Self.IsSlotUsed(Slot) then
-      Inc(ResultA)
+      Inc(Result)
 end;
 
 procedure TFarmRun.AddPatch(Patch: EFarmPatch; Travel: ETravelMethod; Seed: TRSItem);
@@ -2026,14 +2026,14 @@ var
     end;
     Self.SearchBox := [0, 0, 0, 0];
     Self.TPA := [];
-    ResultA := False;
+    Result := False;
   end;
 
 begin
   if not Retry then
     Exit(F());
 
-  ResultA := False;
+  Result := False;
   for Attempts := 0 to 3 do
   begin
     if F() then
@@ -2073,7 +2073,7 @@ var
   ColorCount: Int32;
 begin
   ColorCount := SRL.CountColor(CTS2(6050153, 7, 2.73, 0.61), Self.SearchBox);
-  ResultA := ColorCount > MainScreen.NormalizeDistance(24);
+  Result := ColorCount > MainScreen.NormalizeDistance(24);
 
   if ColorCount > 0 then
     WriteLn('Found dead patch colors. Count: ', ColorCount);
@@ -2084,7 +2084,7 @@ var
   ColorCount: Int32;
 begin
   ColorCount := SRL.CountColor(CTS2(1272942, 14, 0.03, 2.31), Self.SearchBox);
-  ResultA := ColorCount > MainScreen.NormalizeDistance(40);
+  Result := ColorCount > MainScreen.NormalizeDistance(40);
 
   if ColorCount > 0 then
     WriteLn('Found diseased patch colors. Count: ', ColorCount);
@@ -2095,7 +2095,7 @@ var
   ColorCount: Int32;
 begin
   ColorCount := SRL.CountColor(Self.Data.SoilColor, Self.SearchBox);
-  ResultA := ColorCount = Self.SearchBox.Area;
+  Result := ColorCount = Self.SearchBox.Area;
 end;
 
 function TFarmPatch.FindLeprechaun(out Point: TPoint; Retry: Boolean = True): Boolean;
@@ -2125,7 +2125,7 @@ var
       Exit();
 
     Point := LeprechaunTPA.Mean();
-    ResultA := True;
+    Result := True;
   end;
 
 begin
@@ -2287,7 +2287,7 @@ begin
   while (not Timeout.IsFinished) and (not ('Select' in Self.GetChatTitle())) and Self.ClickContinue() do
     Wait(0, 2500, wdLeft);
 
-  ResultA := 'Select' in Self.GetChatTitle();
+  Result := 'Select' in Self.GetChatTitle();
 end;
 
 function TFarmRun.GetFarmRunesNeeded(): TRSItemArray;
@@ -2365,11 +2365,11 @@ begin
     TmpRunes += ['Astral rune', 'Cosmic rune', 'Law rune'];
 
   Sort(TmpRunes);
-  ResultA += TmpRunes[0];
+  Result += TmpRunes[0];
 
   for i := 1 to High(TmpRunes) do
-    if TmpRunes[i] <> ResultA[High(ResultA)] then
-      ResultA += TmpRunes[i];
+    if TmpRunes[i] <> Result[High(Result)] then
+      Result += TmpRunes[i];
 end;
 
 procedure TFarmRun.TravelToGiantSeaweed();
@@ -3758,7 +3758,7 @@ function IsPlayerBusyForSystemUpdate(): Boolean;
 var
   PlayerBox: TBox;
 begin
-  ResultA := False;
+  Result := False;
 
   if FarmRunActive or BirdhouseRunActive then
     Exit(True);
@@ -3770,7 +3770,7 @@ begin
     Exit(True);
 
   PlayerBox := Mainscreen.GetPlayerBox();
-  ResultA := SRL.IsAnimating(PlayerBox, Mainscreen.NormalizeDistance(450), 350, 2);
+  Result := SRL.IsAnimating(PlayerBox, Mainscreen.NormalizeDistance(450), 350, 2);
 end;
 
 procedure SendSystemUpdateWebhook(const Message: String);
@@ -3902,7 +3902,7 @@ begin
   if Span >= UInt64(High(Int32)) then
     Span := UInt64(High(Int32) - 1);
 
-  ResultA := MinValue + UInt64(Random(Int32(Span) + 1));
+  Result := MinValue + UInt64(Random(Int32(Span) + 1));
 end;
 
 function RandomIntRange(MinValue, MaxValue: Int32): Int32;
@@ -3913,7 +3913,7 @@ begin
     Exit(MinValue);
 
   Span := MaxValue - MinValue;
-  ResultA := MinValue + Random(Span + 1);
+  Result := MinValue + Random(Span + 1);
 end;
 
 procedure ScheduleNextMiniBreak();
@@ -4016,7 +4016,7 @@ begin
     Exit(False);
 
   PlayerBox := Mainscreen.GetPlayerBox();
-  ResultA := not SRL.IsAnimating(PlayerBox, Mainscreen.NormalizeDistance(450), 350, 2);
+  Result := not SRL.IsAnimating(PlayerBox, Mainscreen.NormalizeDistance(450), 350, 2);
 end;
 
 procedure PauseBreakTimers();
@@ -4359,7 +4359,7 @@ begin
   angle := Minimap.GetCompassAngle(False);
   vec   := Vec3(Loc.X,loc.Y).RotateXY(angle, Minimap.Center.X, Minimap.Center.Y);
 
-  ResultA := Minimap.VectorToMSRect(vec + [-offx, -offy, height], 1, 1, angle);
+  Result := Minimap.VectorToMSRect(vec + [-offx, -offy, height], 1, 1, angle);
 end;
 
 function AgilityGUI_CreateFarmRunSettings(): TTabSheet;
@@ -4368,12 +4368,12 @@ var
   HerbIdx, FlowerIdx: Int32;
 begin
   GUI.Form.AddTab('Farm Run Settings');
-  ResultA := GUI.Form.GetTab('Farm Run Settings');
-  ResultA.SetToolTip('');
+  Result := GUI.Form.GetTab('Farm Run Settings');
+  Result.SetToolTip('');
 
   with Info do
   begin
-    Create(ResultA);
+    Create(Result);
     SetLeft(30);
     SetTop(30);
     SetHeight(80);
@@ -4385,7 +4385,7 @@ begin
 
   with GUI.HosidiusHerbCheckbox do
   begin
-    Create(ResultA);
+    Create(Result);
     SetCaption('Hosidius Herb');
     SetTooltip('');
     SetLeft(TControl.AdjustToDPI(380));
@@ -4394,7 +4394,7 @@ begin
 
   with GUI.HosidiusFlowerCheckbox do
   begin
-    Create(ResultA);
+    Create(Result);
     SetCaption('Hosidius Flower');
     SetTooltip('');
     SetLeft(TControl.AdjustToDPI(380));
@@ -4403,7 +4403,7 @@ begin
 
   with GUI.CatherbyHerbCheckbox do
   begin
-    Create(ResultA);
+    Create(Result);
     SetCaption('Catherby Herb');
     SetTooltip('');
     SetLeft(TControl.AdjustToDPI(380));
@@ -4412,7 +4412,7 @@ begin
 
   with GUI.CatherbyFlowerCheckbox do
   begin
-    Create(ResultA);
+    Create(Result);
     SetCaption('Catherby Flower');
     SetTooltip('');
     SetLeft(TControl.AdjustToDPI(380));
@@ -4421,7 +4421,7 @@ begin
 
   with GUI.MagicSecateursCheckbox do
   begin
-    Create(ResultA);
+    Create(Result);
     SetCaption('Use Magic Secateurs');
     SetTooltip('');
     SetLeft(TControl.AdjustToDPI(30));
@@ -4430,7 +4430,7 @@ begin
 
   with GUI.RunePouchCheckbox do
   begin
-    Create(ResultA);
+    Create(Result);
     SetCaption('Use Rune Pouch');
     SetTooltip('');
     SetLeft(TControl.AdjustToDPI(30));
@@ -4439,7 +4439,7 @@ begin
 
   with GUI.BarbarianDibberCheckbox do
   begin
-    Create(ResultA);
+    Create(Result);
     SetCaption('Barbarian Seed Dibber unlocked');
     SetTooltip('');
     SetLeft(TControl.AdjustToDPI(30));
@@ -4448,7 +4448,7 @@ begin
 
   with GUI.FarmRunNowCheckbox do
   begin
-    Create(ResultA);
+    Create(Result);
     SetCaption('Start with a farm run');
     SetTooltip('');
     SetLeft(TControl.AdjustToDPI(30));
@@ -4457,7 +4457,7 @@ begin
 
   with GUI.CompostFlowersCheckbox do
   begin
-    Create(ResultA);
+    Create(Result);
     SetCaption('Compost flower patches');
     SetTooltip('When unchecked, flower patches will be planted without compost.');
     SetLeft(TControl.AdjustToDPI(30));
@@ -4466,7 +4466,7 @@ begin
 
   with GUI.CompostInput do
   begin
-    Create(ResultA);
+    Create(Result);
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(70));
     AddItemArray(["Ultracompost", "Bottomless Compost"]);
@@ -4481,7 +4481,7 @@ begin
 
   with GUI.HerbSeedCombo do
   begin
-    Create(ResultA);
+    Create(Result);
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(110));
     SetCaption('Herb Seed:');
@@ -4497,7 +4497,7 @@ begin
 
   with GUI.FlowerSeedCombo do
   begin
-    Create(ResultA);
+    Create(Result);
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(150));
     SetCaption('Flower Seed:');
@@ -4580,22 +4580,22 @@ function AgilityGUI_GetActiveUsername(): String;
 var
   Player: TRSLoginPlayer;
 begin
-  ResultA := '';
+  Result := '';
 
   try
     if (Login.PlayerIndex >= 0) and (Login.PlayerIndex <= High(Login.Players)) then
-      ResultA := Login.Players[Login.PlayerIndex].User;
+      Result := Login.Players[Login.PlayerIndex].User;
 
-    if ResultA = '' then
+    if Result = '' then
     begin
       Player := Login.GetPlayer();
-      ResultA := Player.User;
+      Result := Player.User;
     end;
   except
-    ResultA := '';
+    Result := '';
   end;
 
-  if ResultA = '' then
+  if Result = '' then
     Exit;
 end;
 
@@ -5009,7 +5009,7 @@ begin
     Inc(attempts);
   end;
 
-  ResultA := Self.EnterGame();
+  Result := Self.EnterGame();
 end;
 
 procedure AgilityGUI_StartScript(UISender: TObject);
@@ -5210,9 +5210,9 @@ begin
 
   TempValue := GainedXP;
   GainedXP  := CurrentXP - StartXP;
-  ResultA := GainedXP > TempValue;
+  Result := GainedXP > TempValue;
 
-  if ResultA then
+  if Result then
     NP_MarkProgress();
 end;
 
@@ -5420,7 +5420,7 @@ begin
   if Length(upText) > 0 then
     Exit(upText[0]);
 
-  ResultA := 'Obstacle #' + IntToStr(Step);
+  Result := 'Obstacle #' + IntToStr(Step);
 end;
 
 function GetFarmRunUIText(): String;
@@ -5434,7 +5434,7 @@ begin
   if Farm.ReadyTimer.IsFinished() then
     Exit('Ready');
 
-  ResultA := SRL.MsToTime(Farm.ReadyTimer.TimeRemaining(), Time_Short);
+  Result := SRL.MsToTime(Farm.ReadyTimer.TimeRemaining(), Time_Short);
 end;
 
 function GetBirdhouseUIText(): String;
@@ -5448,7 +5448,7 @@ begin
   if BirdHouseRunner.ScriptIntervalTimer.IsFinished() then
     Exit('Ready');
 
-  ResultA := SRL.MsToTime(BirdHouseRunner.ScriptIntervalTimer.TimeRemaining(), Time_Short);
+  Result := SRL.MsToTime(BirdHouseRunner.ScriptIntervalTimer.TimeRemaining(), Time_Short);
 end;
 
 procedure DrawUIOverlay(drawBox: TBox; title, status, runtime, xpRate, revision: String; useHeaderColor: Boolean = False);
@@ -6019,7 +6019,7 @@ begin
   if SRL.Dice(15) then
     RandomWait();
 
-  ResultA := Mainscreen.IsUpText(UpText, WaitTime);
+  Result := Mainscreen.IsUpText(UpText, WaitTime);
 end;
 
 function FindObstacle(Obs: TObstacle): Boolean;
@@ -6316,9 +6316,9 @@ begin
     WaitEx(500, 450);
   end;
 
-  ResultA := WaitUntil(Inventory.ContainsAll(ReturnItems), 250, 2750);
+  Result := WaitUntil(Inventory.ContainsAll(ReturnItems), 250, 2750);
 
-  if (not ResultA) and (Bank.GetCurrentTab() <> 0) then
+  if (not Result) and (Bank.GetCurrentTab() <> 0) then
   begin
     WriteDebug('Failed to withdraw return items on tab ' + ToStr(Bank.GetCurrentTab()) + '; retrying with all items tab.');
     Bank.OpenTab(0);
@@ -6340,9 +6340,9 @@ begin
     WaitEx(500, 450);
   end;
 
-  ResultA := WaitUntil(Inventory.ContainsAll(FarmItems), 250, 2750);
+  Result := WaitUntil(Inventory.ContainsAll(FarmItems), 250, 2750);
 
-  if (not ResultA) and (Bank.GetCurrentTab() <> 0) then
+  if (not Result) and (Bank.GetCurrentTab() <> 0) then
   begin
     WriteDebug('Failed to withdraw all farm items on tab ' + ToStr(Bank.GetCurrentTab()) + '; retrying with all items tab.');
     Bank.OpenTab(0);
@@ -6460,7 +6460,7 @@ begin
 
   WaitEx(850, 250);
 
-  ResultA := Bank.Close(60);
+  Result := Bank.Close(60);
 end;
 
 procedure TBirdHouseInclude.OnComplete(); override;
