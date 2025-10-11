@@ -22,7 +22,7 @@ type
   TAgilityGUI = record (TScriptForm)
     AntibanCheckbox, BirdhouseCheckbox, SleepCheckbox, FarmRunNowCheckbox,
     BlockInputCheckbox, FarmCheckbox: TLabeledCheckBox;
-    BreakForInput, BreakAfterInput: TLabeledEdit;
+    BreakForInput, BreakAfterInput, BankTabInput: TLabeledEdit;
     FoodInput, CourseInput: TLabeledCombobox;
     MagicSecateursCheckbox, CatherbyHerbCheckbox, HosidiusHerbCheckbox,
     CatherbyFlowerCheckbox, HosidiusFlowerCheckbox, BarbarianDibberCheckbox,
@@ -155,6 +155,7 @@ const
 
 var
   Marks, WaitRand, Step, WaitTime, FarmRuns, BirdhouseRuns, BreakFor, BreakAfter, StartXP, CurrentXP, GainedXP, fc, gfc: Int32;
+  BankTab: Int32 := 0;
   ExtraAntiban, DoBirdhouseRuns, BlockInput, TakeSleeps, DoFarmRuns, UseRunePouch, HosidiusHerb, HosidiusFlower,
   FarmRunNow, UseMagicSecateurs, BarbarianDibber, CatherbyHerb, CatherbyFlower: Boolean;
   InactivityTimer, ReportTimer, InfoTimer: TStopwatch;
@@ -1366,13 +1367,23 @@ begin
     itemList[i].Quantity := itemNumNeeded;
     if not Bank.WithdrawItem(itemList[i], false) then
     begin
-      Self.DebugLn("Bank is missing: " + ToStr(itemList[i].Item));
+      Self.DebugLn('Bank is missing: ' + ToStr(itemList[i].Item));
+      if Bank.GetCurrentTab() <> 0 then
+      begin
+        Self.DebugLn('Retrying withdraw on all items tab.');
+        Bank.OpenTab(0);
+      end;
       Exit(false);
     end;
 
     if not WaitUntil(Inventory.ContainsItem(itemList[i].Item), 100, 2000) then
     begin
-      Self.DebugLn("Could not withdraw item: " + ToStr(itemList[i].Item));
+      Self.DebugLn('Could not withdraw item: ' + ToStr(itemList[i].Item));
+      if Bank.GetCurrentTab() <> 0 then
+      begin
+        Self.DebugLn('Retrying withdraw on all items tab.');
+        Bank.OpenTab(0);
+      end;
       Exit(false);
     end;
   end;
@@ -3833,6 +3844,15 @@ begin
   Tab := Self.GetTab('Settings');
   Tab.SetTooltip('');
 
+  with Self.BankTabInput do
+  begin
+    Create(Tab);
+    SetLeft(TControl.AdjustToDPI(30));
+    SetTop(TControl.AdjustToDPI(110));
+    SetCaption('Bank tab:');
+    SetText(ToStr(BankTab));
+  end;
+
   with Self.BreakAfterInput do
   begin
     Create(Tab);
@@ -4046,6 +4066,12 @@ begin
   BlockInput := Self.BlockInputCheckbox.IsChecked();
   BreakFor := Self.BreakForInput.GetText().ExtractInteger();
   BreakAfter := Self.BreakAfterInput.GetText().ExtractInteger();
+  BankTab := Self.BankTabInput.GetText().ExtractInteger();
+  if BankTab < 0 then
+    BankTab := 0
+  else if BankTab > 9 then
+    BankTab := 9;
+  Self.BankTabInput.SetText(ToStr(BankTab));
   Food := Self.FoodInput.GetText();
   Course := ECourse(Self.CourseInput.GetItemIndex());
 
@@ -4801,6 +4827,44 @@ begin
   WaitEx(WaitTime, WaitRand);
 end;
 
+procedure OpenConfiguredBankTab();
+var
+  desiredTab: Int32;
+begin
+  if not Bank.IsOpen() then
+    Exit;
+
+  desiredTab := BankTab;
+
+  if desiredTab < 0 then
+    desiredTab := 0;
+
+  if desiredTab = 0 then
+  begin
+    BankTab := 0;
+    Bank.OpenTab(0);
+    Exit;
+  end;
+
+  if Bank.GetTabBox(desiredTab) = [] then
+  begin
+    WriteDebug('Configured bank tab ' + ToStr(desiredTab) + ' is unavailable, defaulting to all items.');
+    BankTab := 0;
+    Bank.OpenTab(0);
+    Exit;
+  end;
+
+  if not Bank.OpenTab(desiredTab) then
+  begin
+    WriteDebug('Failed to open bank tab ' + ToStr(desiredTab) + ', defaulting to all items.');
+    BankTab := 0;
+    Bank.OpenTab(0);
+    Exit;
+  end;
+
+  BankTab := desiredTab;
+end;
+
 function WithdrawReturnItems(): Boolean;
 var
   Item: TRSBankItem;
@@ -4817,6 +4881,12 @@ begin
   end;
 
   Result := WaitUntil(Inventory.ContainsAll(ReturnItems), 250, 2750);
+
+  if (not Result) and (Bank.GetCurrentTab() <> 0) then
+  begin
+    WriteDebug('Failed to withdraw return items on tab ' + ToStr(Bank.GetCurrentTab()) + '; retrying with all items tab.');
+    Bank.OpenTab(0);
+  end;
 end;
 
 function WithdrawFarmRun(): Boolean;
@@ -4835,6 +4905,12 @@ begin
   end;
 
   Result := WaitUntil(Inventory.ContainsAll(FarmItems), 250, 2750);
+
+  if (not Result) and (Bank.GetCurrentTab() <> 0) then
+  begin
+    WriteDebug('Failed to withdraw all farm items on tab ' + ToStr(Bank.GetCurrentTab()) + '; retrying with all items tab.');
+    Bank.OpenTab(0);
+  end;
 end;
 
 procedure Farm.OnStart(); override;
@@ -4861,6 +4937,8 @@ begin
 
   if not Bank.IsOpen() then
     Exit();
+
+  OpenConfiguredBankTab();
 
   for 0 to 4 do
   begin
@@ -4924,9 +5002,11 @@ begin
 
   if not Bank.IsOpen() then
   begin
-    Self.DebugLn("Failed to get to bank");
+    Self.DebugLn('Failed to get to bank');
     Exit(False);
   end;
+
+  OpenConfiguredBankTab();
 
   for 0 to 4 do
   begin
