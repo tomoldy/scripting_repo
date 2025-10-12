@@ -1471,7 +1471,7 @@ function TScriptForm.CreateBirdhouseRunSettings(): TTabSheet;
     radio := sender;
     case radio.getName() of
       'bh_nowradio' : BirdHouseRunner.TaskInterval := 0;
-      'bh_laterradio' : BirdHouseRunner.TaskInterval := BirdHouseRunner.TaskInterval := 50 * ONE_MINUTE;
+      'bh_laterradio' : BirdHouseRunner.TaskInterval := 50 * ONE_MINUTE;
     end;
   end;
 
