@@ -3729,7 +3729,8 @@ begin
 
     until InactivityTimer.IsFinished();
 
-    Self.CurrentPatch.Skip := Self.CurrentPatch.Complete := False;
+    Self.CurrentPatch.Skip := False;
+    Self.CurrentPatch.Complete := False;
 
     if Self.DoReport then
       Self.Report();
