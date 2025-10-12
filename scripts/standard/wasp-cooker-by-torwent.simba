@@ -314,7 +314,7 @@ end;
 
 procedure TCooker.Init(maxActions: UInt32; maxTime: UInt64); override;
 begin
-  Antiban := TAntiban.Create;
+  Antiban := Default(TAntiban);
 
   Antiban.Skills := [ERSSkill.COOKING, ERSSkill.TOTAL];
   Antiban.MinZoom := 15;
