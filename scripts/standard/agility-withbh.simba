@@ -3991,7 +3991,8 @@ begin
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(270));
     SetWidth(TControl.AdjustToDPI(320));
-    SetWordWrap(True);
+    AutoSize := False;
+    WordWrap := True;
   end;
 
   with Self.BirdhouseCheckbox do
