@@ -101,8 +101,10 @@ begin
         maxDelay := REACTION_T3_MAX;
       end;
   else
+  begin
     minDelay := REACTION_T1_MIN;
     maxDelay := REACTION_T3_MAX;
+  end;
   end;
 
   meanDelay := (minDelay + maxDelay) div 2;
