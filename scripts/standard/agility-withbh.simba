@@ -3951,6 +3951,8 @@ end;
 procedure TAgilityGUI.Run(); override;
 var
   Tab: TTabSheet;
+  accountPanel: TPanel;
+  settingsTop, settingsSpacing: Int32;
 begin
   Self.Setup('Agility', Point(800, 500), False);
   Self.Start.SetOnClick(@Self.StartScript);
@@ -3959,30 +3961,34 @@ begin
   Tab := Self.GetTab('Settings');
   Tab.SetTooltip('');
 
-  with Self.BankTabInput do
-  begin
-    Create(Tab);
-    SetLeft(TControl.AdjustToDPI(30));
-    SetTop(TControl.AdjustToDPI(110));
-    SetCaption('Bank tab:');
-    SetText(ToStr(BankTab));
-  end;
+  accountPanel := Self.CreateAccountManager(Tab);
+  settingsTop := accountPanel.GetBottom() + TControl.AdjustToDPI(20);
+  settingsSpacing := TControl.AdjustToDPI(50);
 
   with Self.MaxRuntimeInput do
   begin
     Create(Tab);
     SetLeft(TControl.AdjustToDPI(30));
-    SetTop(TControl.AdjustToDPI(60));
+    SetTop(settingsTop);
     SetCaption('Max runtime (hours):');
     SetText('0');
     SetTooltip('Stops the script after the specified hours. Use 0 to disable.');
+  end;
+
+  with Self.BankTabInput do
+  begin
+    Create(Tab);
+    SetLeft(TControl.AdjustToDPI(30));
+    SetTop(settingsTop + settingsSpacing);
+    SetCaption('Bank tab:');
+    SetText(ToStr(BankTab));
   end;
 
   with Self.BreakAfterInput do
   begin
     Create(Tab);
     SetLeft(TControl.AdjustToDPI(30));
-    SetTop(TControl.AdjustToDPI(160));
+    SetTop(settingsTop + (settingsSpacing * 2));
     SetCaption('Break after:');
     SetText('60');
   end;
@@ -3991,7 +3997,7 @@ begin
   begin
     Create(Tab);
     SetLeft(TControl.AdjustToDPI(30));
-    SetTop(TControl.AdjustToDPI(210));
+    SetTop(settingsTop + (settingsSpacing * 3));
     SetCaption('Break for:');
     SetText('10');
   end;
@@ -4001,7 +4007,7 @@ begin
     Create(Tab);
     SetCaption('Always-on antiban: slower reaction times, ambient waits, and micro-breaks are built in.');
     SetLeft(TControl.AdjustToDPI(30));
-    SetTop(TControl.AdjustToDPI(270));
+    SetTop(settingsTop + (settingsSpacing * 4));
     SetWidth(TControl.AdjustToDPI(320));
     SetAutoSize(False);
   end;
@@ -4085,7 +4091,6 @@ begin
     SetChecked(True);
   end;
 
-  Self.CreateAccountManager(Tab);
   Self.CreateBirdhouseRunSettings();
   Self.CreateFarmRunSettings();
 
