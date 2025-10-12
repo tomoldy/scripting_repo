@@ -22,7 +22,7 @@ type
   TAgilityGUI = record (TScriptForm)
     BirdhouseCheckbox, SleepCheckbox, FarmRunNowCheckbox,
     BlockInputCheckbox, FarmCheckbox: TLabeledCheckBox;
-    BreakForInput, BreakAfterInput, BankTabInput: TLabeledEdit;
+    BreakForInput, BreakAfterInput, BankTabInput, MaxRuntimeInput: TLabeledEdit;
     FoodInput, CourseInput, HerbSeedCombo, FlowerSeedCombo: TLabeledCombobox;
     MagicSecateursCheckbox, CatherbyHerbCheckbox, HosidiusHerbCheckbox,
     CatherbyFlowerCheckbox, HosidiusFlowerCheckbox, CompostFlowersCheckbox,
@@ -155,8 +155,9 @@ const
   NP_LOG_EVERY        = 60000;    // ms throttle for console spam
 
 var
-  Marks, WaitRand, Step, WaitTime, FarmRuns, BirdhouseRuns, BreakFor, BreakAfter, StartXP, CurrentXP, GainedXP, fc, gfc: Int32;
+  Marks, WaitRand, Step, WaitTime, FarmRuns, BirdhouseRuns, BreakFor, BreakAfter, StartXP, CurrentXP, GainedXP, fc, gfc, MaxRuntimeHours: Int32;
   BankTab: Int32 := 0;
+  MaxRuntimeLimit: UInt64;
   DoBirdhouseRuns, TakeSleeps, DoFarmRuns, UseRunePouch, HosidiusHerb, HosidiusFlower,
   FarmRunNow, UseMagicSecateurs, BarbarianDibber, CatherbyHerb, CatherbyFlower,
   CompostFlowers: Boolean;
@@ -3967,6 +3968,16 @@ begin
     SetText(ToStr(BankTab));
   end;
 
+  with Self.MaxRuntimeInput do
+  begin
+    Create(Tab);
+    SetLeft(TControl.AdjustToDPI(30));
+    SetTop(TControl.AdjustToDPI(60));
+    SetCaption('Max runtime (hours):');
+    SetText('0');
+    SetTooltip('Stops the script after the specified hours. Use 0 to disable.');
+  end;
+
   with Self.BreakAfterInput do
   begin
     Create(Tab);
@@ -4181,6 +4192,14 @@ begin
   TakeSleeps := Self.SleepCheckbox.IsChecked();
   DoFarmRuns := Self.FarmCheckbox.IsChecked();
   BlockInput := True;
+  MaxRuntimeHours := Self.MaxRuntimeInput.GetText().ExtractInteger();
+  if MaxRuntimeHours < 0 then
+    MaxRuntimeHours := 0;
+  Self.MaxRuntimeInput.SetText(ToStr(MaxRuntimeHours));
+  if MaxRuntimeHours > 0 then
+    MaxRuntimeLimit := UInt64(MaxRuntimeHours) * ONE_HOUR
+  else
+    MaxRuntimeLimit := 0;
   BreakFor := Self.BreakForInput.GetText().ExtractInteger();
   BreakAfter := Self.BreakAfterInput.GetText().ExtractInteger();
   BankTab := Self.BankTabInput.GetText().ExtractInteger();
@@ -4564,6 +4583,14 @@ begin
 
   NP_MarkProgress();
 
+  if MaxRuntimeHours > 0 then
+  begin
+    if MaxRuntimeHours = 1 then
+      WriteDebug('Max runtime limit set to 1 hour.')
+    else
+      WriteDebug(ToStr('Max runtime limit set to ', MaxRuntimeHours, ' hours.'));
+  end;
+
   if Options.GetNPCAttackOption() <> ERSAttackOption.HIDDEN then
     Options.SetNPCAttackOption(ERSAttackOption.HIDDEN);
 
@@ -4919,6 +4946,14 @@ begin
     InactivityTimer.Reset();
 
   NP_CheckAndRecover();
+
+  if (MaxRuntimeLimit > 0) and (GetTimeRunning() >= MaxRuntimeLimit) then
+  begin
+    if MaxRuntimeHours = 1 then
+      TerminateScript('Max runtime of 1 hour reached.')
+    else
+      TerminateScript(ToStr('Max runtime of ', MaxRuntimeHours, ' hours reached.'));
+  end;
 
   if InactivityTimer.ElapsedTime() > 900000 then
     TerminateScript('No Gained XP in 15 mins, stopping!');
