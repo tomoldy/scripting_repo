@@ -3993,7 +3993,6 @@ begin
     SetTop(TControl.AdjustToDPI(270));
     SetWidth(TControl.AdjustToDPI(320));
     SetAutoSize(False);
-    SetWordWrap(True);
   end;
 
   with Self.BirdhouseCheckbox do
@@ -4181,10 +4180,7 @@ begin
   DoBirdhouseRuns := Self.BirdhouseCheckbox.IsChecked();
   TakeSleeps := Self.SleepCheckbox.IsChecked();
   DoFarmRuns := Self.FarmCheckbox.IsChecked();
-  if Self.BlockInputCheckbox <> nil then
-    BlockInput := Self.BlockInputCheckbox.IsChecked()
-  else
-    BlockInput := True;
+  BlockInput := True;
   BreakFor := Self.BreakForInput.GetText().ExtractInteger();
   BreakAfter := Self.BreakAfterInput.GetText().ExtractInteger();
   BankTab := Self.BankTabInput.GetText().ExtractInteger();
