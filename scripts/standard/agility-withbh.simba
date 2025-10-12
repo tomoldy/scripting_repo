@@ -3988,12 +3988,12 @@ begin
   with Self.AntibanNote do
   begin
     Create(Tab);
-    SetCaption('Always-on antiban: slower reaction times, ambient waits, and micro-breaks are built in.');
+    SetCaption('Always-on antiban: slower reaction times, ambient waits,' + LineEnding +
+               'and micro-breaks are built in.');
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(270));
     SetWidth(TControl.AdjustToDPI(320));
     SetAutoSize(False);
-    SetWordWrap(True);
   end;
 
   with Self.BirdhouseCheckbox do
