@@ -5085,10 +5085,10 @@ begin
     slotBounds := slotBoxes[slotIndex];
     Mouse.Move(slotBounds);
 
-    if not WaitUntil(Hint.GetText() <> '', 75, 600) then
+    if not WaitUntil(MainScreen.GetUpText() <> '', 75, 600) then
       Continue;
 
-    tooltipText := LowerCase(Hint.GetText());
+    tooltipText := LowerCase(MainScreen.GetUpText());
     if (tooltipText = '') or (Pos(itemNameLower, tooltipText) = 0) then
       Continue;
 
