@@ -1850,8 +1850,12 @@ const
                               'Kwuarm seed', 'Snapdragon seed', 'Cadantine seed', 'Lantadyme seed',
                               'Dwarf weed seed', 'Torstol seed'];
 
+  HERB_SEED_LEVELS: TInt32Array = [9, 14, 19, 26, 32, 38, 44, 50, 56, 62, 67, 73, 79, 85];
+
   FLOWER_SEEDS: TRSItemArray = ['Marigold seed', 'Rosemary seed', 'Nasturtium seed', 'Woad seed',
                                 'Limpwurt seed', 'White lily seed'];
+
+  FLOWER_SEED_LEVELS: TInt32Array = [2, 11, 24, 25, 26, 58];
 
 function GetSeedIndex(const Seeds: TRSItemArray; const Seed: TRSItem): Int32;
 var
@@ -5121,14 +5125,16 @@ end;
 procedure ApplySettings();
 var
   herbPrev, flowerPrev: TRSItem;
-  i: Int32;
+  i, farmingLevel: Int32;
 
-  function TrySelectBestSeed(const Seeds: TRSItemArray; const DefaultSeed: TRSItem; out Selection: TRSItem): Boolean;
+  function TrySelectBestSeedForLevel(const Seeds: TRSItemArray; const Levels: TInt32Array;
+    const DefaultSeed: TRSItem; const CurrentLevel: Int32; out Selection: TRSItem): Boolean;
   var
     idx: Int32;
     bankItem: TRSBankItem;
     bounds: TBox;
   begin
+    Result := False;
     Selection := DefaultSeed;
 
     if not Bank.IsOpen() then
@@ -5136,6 +5142,9 @@ var
 
     for idx := High(Seeds) downto 0 do
     begin
+      if (idx > High(Levels)) or (Levels[idx] > CurrentLevel) then
+        Continue;
+
       bankItem.Item := Seeds[idx];
       if Bank.FindItem(bankItem, bounds) then
       begin
@@ -5143,8 +5152,6 @@ var
         Exit(True);
       end;
     end;
-
-    Result := False;
   end;
 
 begin
@@ -5154,14 +5161,17 @@ begin
   Farm.SelectedHerbSeed := Seed;
   Farm.SelectedFlowerSeed := FlowerSeed;
 
+  farmingLevel := Stats.GetLevel(ERSSkill.FARMING, False);
+
   if UseBestHerbSeed then
   begin
     if not Bank.IsOpen() then
       WriteDebug('Best herb seed option enabled, but the bank is closed. Using ' + ToStr(Seed) + '.')
     else
     begin
-      if not TrySelectBestSeed(HERB_SEEDS, Seed, Farm.SelectedHerbSeed) then
-        WriteDebug('Best herb seed option enabled, but no higher-tier herb seeds were found. Using ' + ToStr(Seed) + '.')
+      if not TrySelectBestSeedForLevel(HERB_SEEDS, HERB_SEED_LEVELS, Seed, farmingLevel, Farm.SelectedHerbSeed) then
+        WriteDebug('Best herb seed option enabled, but no eligible herb seeds were found for Farming level ' +
+          ToStr(farmingLevel) + '. Using ' + ToStr(Seed) + '.')
       else if Farm.SelectedHerbSeed <> herbPrev then
         WriteDebug('Auto-selected herb seed: ' + ToStr(Farm.SelectedHerbSeed));
     end;
@@ -5173,8 +5183,9 @@ begin
       WriteDebug('Best flower seed option enabled, but the bank is closed. Using ' + ToStr(FlowerSeed) + '.')
     else
     begin
-      if not TrySelectBestSeed(FLOWER_SEEDS, FlowerSeed, Farm.SelectedFlowerSeed) then
-        WriteDebug('Best flower seed option enabled, but no higher-tier flower seeds were found. Using ' + ToStr(FlowerSeed) + '.')
+      if not TrySelectBestSeedForLevel(FLOWER_SEEDS, FLOWER_SEED_LEVELS, FlowerSeed, farmingLevel, Farm.SelectedFlowerSeed) then
+        WriteDebug('Best flower seed option enabled, but no eligible flower seeds were found for Farming level ' +
+          ToStr(farmingLevel) + '. Using ' + ToStr(FlowerSeed) + '.')
       else if Farm.SelectedFlowerSeed <> flowerPrev then
         WriteDebug('Auto-selected flower seed: ' + ToStr(Farm.SelectedFlowerSeed));
     end;
