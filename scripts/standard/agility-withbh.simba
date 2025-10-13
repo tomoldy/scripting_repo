@@ -1484,6 +1484,7 @@ function TScriptForm.CreateBirdhouseRunSettings(): TTabSheet;
 const
   H_SPACING : Int32 := 50;
 var
+  bestLogCheckbox: TLabeledCheckBox;
   logTypeCombo : TLabeledCombobox;
   nowRadio, laterRadio: TRadioButton;
   intervalLabel : TLabel;
@@ -1499,6 +1500,17 @@ begin
   w := fullWidth - (space * 2);
   y := Floor(Self.Size.Y/6);
 
+  with bestLogCheckbox do
+  begin
+    Create(Result);
+    SetName('bh_bestlogcb_checkbox');
+    SetCaption('Use best log available');
+    SetLeft(TControl.AdjustToDPI(H_SPACING));
+    SetTop(TControl.AdjustToDPI(15));
+    SetChecked(BirdHouseRunner.AlwaysUseBestLog);
+    CheckBox.SetOnChange(@Self._OnCheckBoxChanged);
+  end;
+
   with logTypeCombo do
   begin
     Create(Result);
@@ -1507,7 +1519,7 @@ begin
     AddItemArray(['Regular', 'Oak', 'Willow', 'Teak',
                   'Maple', 'Mahogany', 'Yew', 'Magic tree', 'Redwood']);
     SetLeft(TControl.AdjustToDPI(H_SPACING));
-    SetTop(TControl.AdjustToDPI(15));
+    SetTop(bestLogCheckbox.GetBottom() + TControl.AdjustToDPI(10));
     BirdHouseRunner.LogType := BHIncludeGUILogType;
     SetItemIndex(Ord(BirdHouseRunner.LogType));
     Combobox.SetOnChange(@Self._LogTypeChanged);
