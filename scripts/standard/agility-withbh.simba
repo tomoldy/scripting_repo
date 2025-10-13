@@ -4026,10 +4026,29 @@ begin
   begin
     Create(Tab);
     SetLeft(TControl.AdjustToDPI(380));
-    SetTop(TControl.AdjustToDPI(295));
+    SetTop(TControl.AdjustToDPI(290));
     SetCaption('Do farm runs');
     SetToolTip('');
     CheckBox.SetOnChange(@Self.OnFarmRunCheckboxChanged);
+  end;
+  // here. next is at 360
+  with Self.SleepCheckbox do
+  begin
+    Create(Tab);
+    SetCaption('Take sleeps');
+    SetLeft(TControl.AdjustToDPI(380));
+    SetTop(TControl.AdjustToDPI(315));
+    SetToolTip('Will go to sleep at approximately 12PM your local time for 6 hours.');
+  end;
+
+  with Self.BlockInputCheckbox do
+  begin
+    Create(Tab);
+    SetCaption('Block Real Input');
+    SetToolTip('If this is checked, you can not manually interact with the client');
+    SetLeft(TControl.AdjustToDPI(380));
+    SetTop(TControl.AdjustToDPI(340));
+    SetChecked(True);
   end;
 
   with Self.FoodInput do
@@ -4072,24 +4091,7 @@ begin
     AddItemArray(["Draynor Village", "Varrock", "Falador", "Seers' Village", "Ardougne"]);
   end;
 
-  with Self.SleepCheckbox do
-  begin
-    Create(Tab);
-    SetCaption('Take sleeps');
-    SetLeft(TControl.AdjustToDPI(30));
-    SetTop(TControl.AdjustToDPI(295));
-    SetToolTip('Will go to sleep at approximately 12PM your local time for 6 hours.');
-  end;
 
-  with Self.BlockInputCheckbox do
-  begin
-    Create(Tab);
-    SetCaption('Block Real Input');
-    SetToolTip('If this is checked, you can not manually interact with the client');
-    SetLeft(TControl.AdjustToDPI(30));
-    SetTop(TControl.AdjustToDPI(320));
-    SetChecked(True);
-  end;
 
   Self.CreateBirdhouseRunSettings();
   Self.CreateFarmRunSettings();
