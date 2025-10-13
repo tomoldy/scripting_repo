@@ -3873,7 +3873,7 @@ begin
     SetCaption('Use Magic Secateurs');
     SetTooltip('');
     SetLeft(TControl.AdjustToDPI(30));
-    SetTop(TControl.AdjustToDPI(160));
+    SetTop(TControl.AdjustToDPI(285));
   end;
 
   with Self.RunePouchCheckbox do
@@ -3882,7 +3882,7 @@ begin
     SetCaption('Use Rune Pouch');
     SetTooltip('');
     SetLeft(TControl.AdjustToDPI(30));
-    SetTop(TControl.AdjustToDPI(185));
+    SetTop(TControl.AdjustToDPI(310));
   end;
 
   with Self.BarbarianDibberCheckbox do
