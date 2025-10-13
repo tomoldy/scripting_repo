@@ -5062,9 +5062,51 @@ begin
   end;
 end;
 
+function WithdrawSeedItem(var item: TRSBankItem): Boolean;
+var
+  itemNameLower, tooltipText: String;
+  slotBounds: TBox;
+  slotBoxes: TBoxArray;
+  slotIndices: TIntegerArray;
+  slotIndex: Int32;
+begin
+  Result := False;
+
+  if not Bank.IsOpen() then
+    Exit;
+
+  itemNameLower := LowerCase(ToStr(item.Item));
+
+  slotBoxes := Bank.FindItemBoundaries();
+  slotIndices := ItemFinder.Find(item.Item, slotBoxes);
+
+  for slotIndex in slotIndices do
+  begin
+    slotBounds := slotBoxes[slotIndex];
+    Mouse.Move(slotBounds);
+
+    if not WaitUntil(Hint.GetText() <> '', 75, 600) then
+      Continue;
+
+    tooltipText := LowerCase(Hint.GetText());
+    if (tooltipText = '') or (Pos(itemNameLower, tooltipText) = 0) then
+      Continue;
+
+    if Bank.WithdrawHelper(slotBounds, item.Quantity, item.Noted, False) then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+
+  if not Result then
+    WriteDebug('Failed to locate a matching tooltip for seed ' + ToStr(item.Item) + ' while withdrawing.');
+end;
+
 function WithdrawFarmRun(): Boolean;
 var
   B: TRSBankItem;
+  itemNameLower: String;
   i: Int32;
 begin
   if not Bank.IsOpen() then
@@ -5073,7 +5115,15 @@ begin
   for i := 0 to High(FarmItems) do
   begin
     B := TRSBankItem.Setup(FarmItems[i], FarmItemAmounts[i], False);
-    Bank.WithdrawItem(B, False);
+    itemNameLower := LowerCase(ToStr(FarmItems[i]));
+
+    if Pos('seed', itemNameLower) > 0 then
+    begin
+      if not WithdrawSeedItem(B) then
+        Exit(False);
+    end else
+      Bank.WithdrawItem(B, False);
+
     WaitEx(500, 450);
   end;
 
