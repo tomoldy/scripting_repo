@@ -714,7 +714,9 @@ begin
     birdHouseATPA := birdHouseATPA.SortFrom(Mainscreen.Center);
     Mouse.Move(birdhouseATPA[0].RandomValue());
 
-    if Self.ConfirmUptext(['mpty']) then
+    if Self.ConfirmUptext(['mpty'])
+    or Self.ConfirmUptext(['eed'])
+    or Self.ConfirmUptext([ToStr(Self.Seed)]) then
     begin
       timeout.Pause();
       Mouse.Click(MOUSE_LEFT);
