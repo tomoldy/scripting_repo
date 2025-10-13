@@ -5067,8 +5067,8 @@ var
   itemNameLower, tooltipText: String;
   slotBounds: TBox;
   slotBoxes: TBoxArray;
-  slotIndices: TIntegerArray;
-  slotIndex: Int32;
+  matches: TRSItemFinderMatchArray;
+  match: TRSItemFinderMatch;
 begin
   Result := False;
 
@@ -5078,11 +5078,11 @@ begin
   itemNameLower := LowerCase(ToStr(item.Item));
 
   slotBoxes := Bank.FindItemBoundaries();
-  slotIndices := ItemFinder.Find(item.Item, slotBoxes);
+  matches := ItemFinder.FindAll([item.Item], slotBoxes);
 
-  for slotIndex in slotIndices do
+  for match in matches do
   begin
-    slotBounds := slotBoxes[slotIndex];
+    slotBounds := match.Box;
     Mouse.Move(slotBounds);
 
     if not WaitUntil(MainScreen.GetUpText() <> '', 75, 600) then
