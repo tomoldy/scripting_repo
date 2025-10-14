@@ -4871,15 +4871,6 @@ begin
   if not RSClient.IsLoggedIn() then
     Exit();
 
-  if DoFarmRuns then
-    if Farm.ReadyTimer.IsFinished() then
-      Farm.DoFarmRun();
-
-  if DoBirdhouseRuns then
-    if BirdHouseRunner.CanDoBirdHouseRun() then
-      if AgilityRSW.GetMyPos.InBox(Obstacles[0].Area) then
-        BirdHouseRunner.DoBirdHouseRun();
-
   Found := FindObstacle(Obstacles[0]);
   RSClient.Image.Clear();
 
@@ -4951,6 +4942,65 @@ begin
   end;
 end;
 
+(*
+  Should be called once per loop iteration to enforce runtime safety,
+  housekeeping, and timing responsibilities before taking any course actions.
+*)
+procedure HandleRuntimeGuards();
+begin
+  if HasGainedXP() then
+    InactivityTimer.Reset();
+
+  NP_CheckAndRecover();
+
+  if (MaxRuntimeLimit > 0) and (GetTimeRunning() >= MaxRuntimeLimit) then
+  begin
+    if MaxRuntimeHours = 1 then
+      TerminateScript('Max runtime of 1 hour reached.')
+    else
+      TerminateScript(ToStr('Max runtime of ', MaxRuntimeHours, ' hours reached.'));
+  end;
+
+  if InactivityTimer.ElapsedTime() > 900000 then
+    TerminateScript('No Gained XP in 15 mins, stopping!');
+
+  if not RSClient.IsLoggedIn() then
+    Login.LoginPlayer();
+
+  if RSInterface.IsOpen() then
+    RSInterface.Close(50);
+
+  if Minimap.GetHPPercent() < 40 then
+    if not Inventory.ClickItem(Food) then
+      TerminateScript('Could not eat food, possible out of it?');
+
+  if DoBirdhouseruns or DoFarmruns then
+    if InfoTimer.ElapsedTime() > 360000 then
+      PrintInfo();
+
+  if ReportTimer.ElapsedTime() > 120000 then
+    PrintProgress();
+end;
+
+(*
+  Should run after guard handling, before selecting the next obstacle, to
+  opportunistically launch farm or birdhouse runs when conditions are met.
+*)
+procedure MaybeRunSideContent();
+begin
+  if not RSClient.IsLoggedIn() then
+    Exit();
+
+  if DoFarmRuns then
+    if Farm.ReadyTimer.IsFinished() then
+      Farm.DoFarmRun();
+
+  if DoBirdhouseRuns then
+    if BirdHouseRunner.CanDoBirdHouseRun() then
+      if AgilityRSW.GetMyPos.InBox(Obstacles[0].Area) then
+        BirdHouseRunner.DoBirdHouseRun();
+end;
+
 procedure NormalStep(Step: Int32);
 var
   Health, Experience: Int32;
@@ -5009,38 +5059,8 @@ end;
 
 procedure Loop();
 begin
-  if HasGainedXP() then
-    InactivityTimer.Reset();
-
-  NP_CheckAndRecover();
-
-  if (MaxRuntimeLimit > 0) and (GetTimeRunning() >= MaxRuntimeLimit) then
-  begin
-    if MaxRuntimeHours = 1 then
-      TerminateScript('Max runtime of 1 hour reached.')
-    else
-      TerminateScript(ToStr('Max runtime of ', MaxRuntimeHours, ' hours reached.'));
-  end;
-
-  if InactivityTimer.ElapsedTime() > 900000 then
-    TerminateScript('No Gained XP in 15 mins, stopping!');
-
-  if not RSClient.IsLoggedIn() then
-    Login.LoginPlayer();
-
-  if RSInterface.IsOpen() then
-    RSInterface.Close(50);
-
-  if Minimap.GetHPPercent() < 40 then
-    if not Inventory.ClickItem(Food) then
-      TerminateScript('Could not eat food, possible out of it?');
-
-  if DoBirdhouseruns or DoFarmruns then
-    if InfoTimer.ElapsedTime() > 360000 then
-      PrintInfo();
-
-  if ReportTimer.ElapsedTime() > 120000 then
-    PrintProgress();
+  HandleRuntimeGuards();
+  MaybeRunSideContent();
 
   Step := GetStep();
 
