@@ -1268,7 +1268,7 @@ begin
   foodItem := Self.Food;
   if Minimap.GetHPPercent() > 85 then
     Exit;
-  if not Inventory.CountItem(Food.Item) < QUANTITY_OF_FOOD then
+  if Inventory.CountItem(foodItem.Item) < QUANTITY_OF_FOOD then
   begin
     Bank.WithdrawItem(foodItem, True);
     WaitUntil(Inventory.ContainsItem(foodItem.Item), 10, 2000);
