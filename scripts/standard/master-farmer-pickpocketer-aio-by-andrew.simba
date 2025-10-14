@@ -26,6 +26,8 @@ type
     CameraNudgeCountdown : TCountdown;
     LastLootedSeedSlot: Int32;
     LastLootHoverPoint: TPoint;
+    SeedHoverLastClickCount: Int32;
+    SeedHoverNextInterval: Int32;
   end;
   TScriptGUI = record(TScriptForm)
    ScriptTitle :                                                    TLabel;
@@ -926,6 +928,8 @@ begin
 
   Self.LastLootedSeedSlot := -1;
   Self.LastLootHoverPoint := Point(-1, -1);
+  Self.SeedHoverLastClickCount := Script.Clicks;
+  Self.SeedHoverNextInterval := RandomRange(30, 51);
 end;
 
 procedure TMasterFarmer.ResetCameraNudgeCountdown();
@@ -2155,6 +2159,7 @@ var
     hoverBox: TBox;
     hoverPoint: TPoint;
     expandDelta: Int32;
+    clicksSinceLastHover: Int32;
   begin
     if (Self.LastLootedSeedSlot < 0) or (Self.LastLootedSeedSlot > 27) then
     begin
@@ -2163,7 +2168,8 @@ var
       Exit;
     end;
 
-    if Random(100) >= 80 then
+    clicksSinceLastHover := Script.Clicks - Self.SeedHoverLastClickCount;
+    if clicksSinceLastHover < Self.SeedHoverNextInterval then
     begin
       if (Self.LastLootHoverPoint.X >= 0) and (Self.LastLootHoverPoint.Y >= 0) then
         DrawLootHoverDebug(Self.LastLootHoverPoint);
@@ -2185,6 +2191,8 @@ var
 
     Self.LastLootHoverPoint := hoverPoint;
     DrawLootHoverDebug(hoverPoint);
+    Self.SeedHoverLastClickCount := Script.Clicks;
+    Self.SeedHoverNextInterval := RandomRange(50, 101);
   end;
 
   procedure HandlePostPickpocket();
