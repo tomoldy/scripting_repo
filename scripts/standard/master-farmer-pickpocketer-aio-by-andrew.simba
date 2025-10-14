@@ -175,15 +175,31 @@ begin
 end;
 
 procedure TScriptGUI.OverrideBreaksCheckboxChanged({$H-}sender: TObject){$H+};
+var
+  Enabled: Boolean;
+  Value: Int32;
 begin
-  Self.CustomBreakIntervalInput.SetEnabled(Self.OverrideBreaksCheckBox.IsChecked());
-  Self.CustomBreakDurationInput.SetEnabled(Self.OverrideBreaksCheckBox.IsChecked());
+  Enabled := Self.OverrideBreaksCheckBox.IsChecked();
 
-  if not Self.CustomBreakIntervalInput.Edit.IsEnabled() or
-     not self.CustomBreakDurationInput.Edit.IsEnabled() then
+  if not Enabled then
   begin
-    Self.CustomBreakIntervalInput.SetText("");
-    Self.CustomBreakDurationInput.SetText("");
+    if TryParsePositiveInt(Self.CustomBreakIntervalInput.GetText(), Value) then
+      Script.SavedCustomBreakInterval := Value;
+
+    if TryParsePositiveInt(Self.CustomBreakDurationInput.GetText(), Value) then
+      Script.SavedCustomBreakDuration := Value;
+  end;
+
+  Self.CustomBreakIntervalInput.SetEnabled(Enabled);
+  Self.CustomBreakDurationInput.SetEnabled(Enabled);
+
+  if Enabled then
+  begin
+    if (Self.CustomBreakIntervalInput.GetText() = '') and (Script.SavedCustomBreakInterval > 0) then
+      Self.CustomBreakIntervalInput.SetText(IntToStr(Script.SavedCustomBreakInterval));
+
+    if (Self.CustomBreakDurationInput.GetText() = '') and (Script.SavedCustomBreakDuration > 0) then
+      Self.CustomBreakDurationInput.SetText(IntToStr(Script.SavedCustomBreakDuration));
   end;
 end;
 procedure TScriptGUI.Run(); override;
@@ -311,6 +327,9 @@ begin
       SetHint('How often to take breaks (e.g., 60 = every hour). Includes 25% randomness.');
       Edit.SetOnKeyPress(@Edit.NumberField);
       SetEnabled(False);
+
+      if Script.SavedCustomBreakInterval > 0 then
+        SetText(IntToStr(Script.SavedCustomBreakInterval));
     end;
 
     with Self.CustomBreakDurationInput do
@@ -323,6 +342,9 @@ begin
       SetHint('How long breaks should last (e.g., 5 = 5 minute break). Includes 33% randomness.');
       Edit.SetOnKeyPress(@Edit.NumberField);
       SetEnabled(False);
+
+      if Script.SavedCustomBreakDuration > 0 then
+        SetText(IntToStr(Script.SavedCustomBreakDuration));
     end;
 
   end;
@@ -393,10 +415,6 @@ begin
       Self.CustomBreakIntervalInput.Edit.SetFocus();
       Exit;
     end;
-  end else
-  begin
-    Script.SavedCustomBreakDuration := 0;
-    Script.SavedCustomBreakInterval := 0;
   end;
 
   Script.IS_NINETYNINE := Self.Is99Checkbox.IsChecked();
