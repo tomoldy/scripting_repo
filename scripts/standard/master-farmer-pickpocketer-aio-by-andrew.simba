@@ -1308,6 +1308,7 @@ var
   NecklaceBool, FoodBool:Boolean;
   B: TBox;
   Attempts : Int32;
+  NecklaceCount, NecklaceStart, DesiredNecklaceCount, FallbackNecklaceCount: Int32;
 begin
   Self.DebugLn("Attempting to bank.");
   NecklaceBool := False;
@@ -1360,17 +1361,39 @@ begin
   NecklaceBool := Inventory.CountItem(Self.Necklace.Item) >= QUANTITY_OF_NECK;
   if Self.GET_DODGY and not NecklaceBool then
   begin
-   // Writeln("We are now attempting to grab the dodgy necklace");
-    NecklaceBool := Self.Withdraw(Self.Necklace, 3);//Self.WithdrawBankItem(Self.Necklace);
-    while not NecklaceBool and (Attempts < 3) do
+    // Writeln("We are now attempting to grab the dodgy necklace");
+    NecklaceCount := Bank.Items.CountStack(Self.Necklace.Item);
+    NecklaceStart := Inventory.CountItem(Self.Necklace.Item);
+    DesiredNecklaceCount := QUANTITY_OF_NECK;
+    FallbackNecklaceCount := Min(DesiredNecklaceCount, NecklaceCount);
+
+    if NecklaceCount <= 0 then
     begin
-      NecklaceBool := Self.WithdrawBankItem(Self.Necklace);
-      if Bank.Items.CountStack(Self.Necklace.Item) < QUANTITY_OF_NECK then
+      Self.DebugLn('Dodgy necklace stock is empty; disabling dodgy necklace support.');
+      Writeln('[Status] Dodgy necklace stock is empty. Disabling GET_DODGY until resupplied.');
+      Self.GET_DODGY := False;
+      NecklaceBool := True;
+    end
+    else
+    begin
+      if FallbackNecklaceCount < DesiredNecklaceCount then
       begin
-        Logout.ClickLogout();
-        Fatal("Could not find the necklaces.");
+        Self.DebugLn('Requested ' + IntToStr(DesiredNecklaceCount) +
+          ' dodgy necklaces but only ' + IntToStr(NecklaceCount) +
+          ' are available. Falling back to the available amount.');
+        Writeln('[Status] Dodgy necklace shortage detected. Withdrawing ' +
+          IntToStr(FallbackNecklaceCount) + ' of ' + IntToStr(DesiredNecklaceCount) + ' requested.');
       end;
-      Inc(Attempts);
+
+      Self.Necklace.Quantity := FallbackNecklaceCount;
+      NecklaceBool := Self.Withdraw(Self.Necklace, 3);//Self.WithdrawBankItem(Self.Necklace);
+      while not NecklaceBool and (Attempts < 3) do
+      begin
+        NecklaceBool := Self.WithdrawBankItem(Self.Necklace);
+        Inc(Attempts);
+      end;
+
+      NecklaceBool := Inventory.CountItem(Self.Necklace.Item) > NecklaceStart;
     end;
   end else NecklaceBool := True;
 
