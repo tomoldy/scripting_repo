@@ -647,6 +647,18 @@ begin
    end;
   end;
 end;
+function InventoryHasJunkSeeds(): Boolean;
+var
+  Slots: TIntegerArray;
+begin
+  Result := Inventory.FindItems(SEEDS_TO_DROP, Slots);
+end;
+
+function NeedsSeedDeposit(): Boolean;
+begin
+  Result := (Script.Location = FarmingGuild) and Script.UseSeedVault and Inventory.IsFull;
+end;
+
 function ShouldBank() : Boolean;
 var
   HasFood, HasNeck : Boolean;
@@ -937,6 +949,8 @@ begin
 
   if Inventory.ContainsItem("Coin pouch") then Inventory.ClickItem("Coin pouch");
 
+  if NeedsSeedDeposit() then Exit;
+
   while Inventory.FindItems(SEEDS_TO_DROP, Slots) do Inventory.ShiftDrop(Slots, Inventory.RandomPattern());
 end;
 
@@ -1097,14 +1111,15 @@ begin
     end;
     FarmingGuild:
     begin
-      if Self.UseSeedVault then
+      if NeedsSeedDeposit() then
       begin
-         Self.SeedVaultDepositAllSeeds();
-         Wait(250);
-         KeyBoard.PressKey(VK_ESCAPE);
-         Wait(250);
-         if Banks.WalkOpen() then Self.BankForFood();
-      end else if Banks.WalkOpen() then Self.BankForFood();
+        Self.SeedVaultDepositAllSeeds();
+        Wait(250);
+        KeyBoard.PressKey(VK_ESCAPE);
+        Wait(250);
+      end;
+
+      if Banks.WalkOpen() then Self.BankForFood();
     end;
     Ardougne, Hosidius, Varrock: if Banks.WalkOpen() then Self.BankForFood();
   end;
@@ -1672,7 +1687,13 @@ begin
 
   if Minimap.GetRunEnergy() >= 50 then Minimap.EnableRun();
 
-  if Inventory.IsFull then Exit(EState.DROPPING);
+  if Inventory.IsFull then
+  begin
+    if InventoryHasJunkSeeds() and not NeedsSeedDeposit() then
+      Exit(EState.DROPPING);
+
+    Exit(EState.BANKING);
+  end;
 
   if Self.GET_DODGY and Self.ShouldEquipNeck() then Exit(EState.EQUIP_NECK);
 
