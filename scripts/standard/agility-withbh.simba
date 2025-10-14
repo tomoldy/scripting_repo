@@ -4434,6 +4434,28 @@ begin
   WriteLn(SRL.TimeStamp(), ':[Script]: ', Message);
 end;
 
+function FarmLogPrefix(): String;
+var
+  PatchLabel: String;
+begin
+  PatchLabel := '';
+
+  if Farm.CurrentPatch.Data.Name <> '' then
+    PatchLabel := ToStr(' [', Farm.CurrentPatch.Data.Name, ']');
+
+  Result := ToStr(SRL.TimeStamp(), ':[Farm]', PatchLabel, ': ');
+end;
+
+procedure FarmWriteDebug(const Message: String);
+begin
+  WriteLn(FarmLogPrefix(), '[DEBUG] ', Message);
+end;
+
+procedure FarmWriteLn(const Message: String);
+begin
+  WriteLn(FarmLogPrefix(), Message);
+end;
+
 procedure PrintProgress();
 var
   Hours: Double;
