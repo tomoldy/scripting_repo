@@ -1911,10 +1911,14 @@ var
   screenBounds : TBox;
 
   function RandomOffset(): Int32;
-  const
-    Offsets: array[0..3] of Int32 = (-2, -1, 1, 2);
   begin
-    Result := Offsets[Random(High(Offsets) + 1)];
+    case Random(4) of
+      0: Result := -2;
+      1: Result := -1;
+      2: Result := 1;
+    else
+      Result := 2;
+    end;
   end;
 begin
   screenBounds := Mainscreen.Bounds;
