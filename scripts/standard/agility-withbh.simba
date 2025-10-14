@@ -2421,6 +2421,42 @@ begin
   end;
 end;
 
+function FarmPatchStateToString(const State: EPatchState): String;
+begin
+  case State of
+    EPatchState.TELEPORT_TO: Result := 'TELEPORT_TO';
+    EPatchState.DEAD: Result := 'DEAD';
+    EPatchState.DISEASED: Result := 'DISEASED';
+    EPatchState.HARVEST: Result := 'HARVEST';
+    EPatchState.PLANT: Result := 'PLANT';
+    EPatchState.COMPOST: Result := 'COMPOST';
+    EPatchState.NOTE_ITEMS: Result := 'NOTE_ITEMS';
+    EPatchState.FAILED: Result := 'FAILED';
+    EPatchState.COMPLETE: Result := 'COMPLETE';
+    EPatchState.SKIP: Result := 'SKIP';
+    EPatchState.HARVEST_WHITEBERRIES: Result := 'HARVEST_WHITEBERRIES';
+    EPatchState.HARVEST_CACTUS: Result := 'HARVEST_CACTUS';
+    EPatchState.HARVEST_SEAWEED: Result := 'HARVEST_SEAWEED';
+  else
+    Result := 'UNKNOWN';
+  end;
+end;
+
+function FarmLogPrefix(const Msg: String): String; inline;
+begin
+  Result := '[Farm] ' + Msg;
+end;
+
+procedure FarmWriteDebug(const Msg: String); inline;
+begin
+  WriteDebug(FarmLogPrefix(Msg));
+end;
+
+procedure FarmWriteLn(const Msg: String); inline;
+begin
+  WriteLn(FarmLogPrefix(Msg));
+end;
+
 procedure TFarmRun.NoteItems();
 var
   Slots, LepItems: TIntegerArray;
@@ -2429,6 +2465,11 @@ var
   PlayerBox: TBox;
   Item: TRSItem;
   LepPt: TPoint;
+  procedure LogNoteAbort(const Reason: String; const Target: TRSItem; const TargetSlot: Int32);
+  begin
+    FarmWriteDebug('NoteItems aborted at ' + Self.CurrentPatch.Data.Name + ' for ' + ToStr(Target) +
+      ' (slot ' + ToStr(TargetSlot) + '): ' + Reason);
+  end;
 begin
   if not RSClient.IsLoggedIn() then
     Exit();
@@ -2436,7 +2477,7 @@ begin
   if Self.CleanHerbs then
     Self.CleanGrimyHerbs();
 
-  WriteLn('Noting items at ', Self.CurrentPatch.Data.Name);
+  FarmWriteLn('Noting items at ' + Self.CurrentPatch.Data.Name);
 
   for i := 0 to High(LeprechaunItems) do
   begin
@@ -2462,7 +2503,10 @@ begin
       LepPT := PlayerBox.Middle;
     end
     else if not Self.CurrentPatch.FindLeprechaun(LepPT) then
+    begin
+      LogNoteAbort('could not locate tool leprechaun.', Items[i], Slots[i]);
       Exit();
+    end;
 
     Count := Inventory.CountItem(Items[i]);
     Inventory.SetSelectedSlot(Slots[i]);
@@ -2476,14 +2520,14 @@ begin
       Mouse.Click(MOUSE_LEFT)
     else if not ChooseOption.Select('Tool') then
     begin
-      WriteLn('Failed to choose option leprechaun.');
+      LogNoteAbort('failed to choose Tool option from leprechaun.', Items[i], Slots[i]);
       Inventory.SetSelectedSlot(-1);
       Exit();
     end;
 
     if not Mainscreen.DidRedClick() then
     begin
-      WriteLn('Failed to find red click.');
+      LogNoteAbort('did not detect red click on leprechaun.', Items[i], Slots[i]);
       Inventory.SetSelectedSlot(-1);
       Exit();
     end;
@@ -3733,7 +3777,12 @@ begin
         EPatchState.DEAD: Self.HandleDeadPatch;
         EPatchState.TELEPORT_TO: Self.TeleportTo(Self.CurrentPatch.TravelMethod, True);
         EPatchState.NOTE_ITEMS: Self.NoteItems;
-        EPatchState.FAILED: Inc(failedCount);
+        EPatchState.FAILED:
+        begin
+          FarmWriteDebug('Patch ' + Self.CurrentPatch.Data.Name + ' remained in state ' +
+            FarmPatchStateToString(State) + ' (failure ' + ToStr(FailedCount + 1) + '/8).');
+          Inc(FailedCount);
+        end;
         EPatchState.COMPLETE:
         begin
           WriteLn('Patch complete.');
@@ -5299,10 +5348,10 @@ begin
   ApplySettings();
 
   if UseBestHerbSeed and (HerbSeedItemIndex >= 0) then
-    WriteDebug('Withdrawing herb seed: ' + ToStr(Farm.SelectedHerbSeed) + ' (auto-selected).');
+    FarmWriteDebug('Withdrawing herb seed: ' + ToStr(Farm.SelectedHerbSeed) + ' (auto-selected).');
 
   if UseBestFlowerSeed and (FlowerSeedItemIndex >= 0) then
-    WriteDebug('Withdrawing flower seed: ' + ToStr(Farm.SelectedFlowerSeed) + ' (auto-selected).');
+    FarmWriteDebug('Withdrawing flower seed: ' + ToStr(Farm.SelectedFlowerSeed) + ' (auto-selected).');
 
   for i := 0 to High(FarmItems) do
   begin
@@ -5314,7 +5363,13 @@ begin
       if not WithdrawSeedItem(B) then
         Exit(False);
     end else
-      Bank.WithdrawItem(B, False);
+    begin
+      if not Bank.WithdrawItem(B, False) then
+      begin
+        FarmWriteDebug('Failed to withdraw ' + ToStr(B.Item) + ' from tab ' + ToStr(Bank.GetCurrentTab()) + '.');
+        Exit(False);
+      end;
+    end;
 
     WaitEx(500, 450);
   end;
@@ -5323,7 +5378,7 @@ begin
 
   if (not Result) and (Bank.GetCurrentTab() <> 0) then
   begin
-    WriteDebug('Failed to withdraw all farm items on tab ' + ToStr(Bank.GetCurrentTab()) + '; retrying with all items tab.');
+    FarmWriteDebug('Failed to withdraw all farm items on tab ' + ToStr(Bank.GetCurrentTab()) + '; retrying with all items tab.');
     Bank.OpenTab(0);
   end;
 end;
