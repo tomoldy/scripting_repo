@@ -52,6 +52,7 @@ type
     ReportTimer : TStopWatch;
     GUI : TScriptGUI;
     IS_NINETYNINE, GET_DODGY, DISABLE_INPUT : BOOLEAN;
+    DisableInputPreferenceSet: Boolean;
     RunFor : Int32;
     MAX_RUN_TIME : Int32;
     StartTime : TDateTime;
@@ -327,9 +328,16 @@ begin
   begin
     Create(Tab);
     SetCaption('Disable Input');
-    SetTooltip('Disable real input.');
+    SetTooltip('Disable real input. Toggle this off later if you need to use your real mouse or keyboard.');
     SetLeft(TControl.AdjustToDPI(380));
     SetTop(TControl.AdjustToDPI(440));
+    if not Script.DisableInputPreferenceSet then
+    begin
+      SetChecked(True);
+      Script.DISABLE_INPUT := True;
+      Script.DisableInputPreferenceSet := True;
+    end else
+      SetChecked(Script.DISABLE_INPUT);
   end;
   with Self.UseSeedVaultCheckBox do
   begin
@@ -485,7 +493,11 @@ begin
 
   Script.IS_NINETYNINE := Self.Is99Checkbox.IsChecked();
   Script.GET_DODGY := DodgyEnabled;
-  Script.DISABLE_INPUT := Self.DisableInputBox.IsChecked();
+  if Self.DisableInputBox.CheckBox <> nil then
+  begin
+    Script.DISABLE_INPUT := Self.DisableInputBox.IsChecked();
+    Script.DisableInputPreferenceSet := True;
+  end;
 
   Script.UseSeedVault := Self.UseSeedVaultCheckBox.IsChecked();
   inherited;
