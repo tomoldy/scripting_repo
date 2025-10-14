@@ -1960,7 +1960,7 @@ var
     item: TRSItem;
     itemName: String;
   begin
-    Result := nil;
+    SetLength(Result, 0);
     Inventory.Open();
     discovered := Inventory.DiscoverAll();
     if discovered.Len < 1 then Exit;
@@ -1975,7 +1975,7 @@ var
     if tracked.Len < 1 then Exit;
 
     if not Inventory.FindItems(tracked, Result) then
-      Result := nil;
+      SetLength(Result, 0);
   end;
 
   function DetermineNewSlot(const before, after: TIntegerArray): Int32;
@@ -2065,11 +2065,37 @@ var
     DrawLootHoverDebug(Self.LastLootHoverPoint);
   end;
 
+  function ExpandBoxByDelta(const box: TBox; delta: Int32): TBox;
+  begin
+    Result := box;
+
+    if delta = 0 then
+      Exit;
+
+    Result.Left.X := Result.Left.X - delta;
+    Result.Right.X := Result.Right.X + delta;
+    Result.Top.Y := Result.Top.Y - delta;
+    Result.Btm.Y := Result.Btm.Y + delta;
+
+    if Result.Left.X > Result.Right.X then
+    begin
+      Result.Left.X := (Result.Left.X + Result.Right.X) div 2;
+      Result.Right.X := Result.Left.X;
+    end;
+
+    if Result.Top.Y > Result.Btm.Y then
+    begin
+      Result.Top.Y := (Result.Top.Y + Result.Btm.Y) div 2;
+      Result.Btm.Y := Result.Top.Y;
+    end;
+  end;
+
   procedure MaybeHoverLootSlot();
   var
     targetSlot: Int32;
     hoverBox: TBox;
     hoverPoint: TPoint;
+    expandDelta: Int32;
   begin
     if (Self.LastLootedSeedSlot < 0) or (Self.LastLootedSeedSlot > 27) then
     begin
@@ -2089,7 +2115,10 @@ var
     if Random(100) < 45 then
       targetSlot := GetNearbySlot(targetSlot);
 
-    hoverBox := Inventory.GetSlotBox(targetSlot).Expand(RandomRange(-2, 3));
+    hoverBox := Inventory.GetSlotBox(targetSlot);
+    expandDelta := RandomRange(-2, 3);
+    hoverBox := ExpandBoxByDelta(hoverBox, expandDelta);
+
     hoverPoint := SRL.RandomPoint(hoverBox);
 
     Mouse.Move(hoverPoint);
