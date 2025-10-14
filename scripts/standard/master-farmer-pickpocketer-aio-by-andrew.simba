@@ -24,6 +24,8 @@ type
     RoamingBox : TBox; // The master farmers roam around in a specific area (box)
     LastFarmerPt, FarmerPt : TPoint;            //The resultant point.
     CameraNudgeCountdown : TCountdown;
+    LastLootedSeedSlot: Int32;
+    LastLootHoverPoint: TPoint;
   end;
   TScriptGUI = record(TScriptForm)
    ScriptTitle :                                                    TLabel;
@@ -898,7 +900,7 @@ begin
     Self.WalkTile := [3052, 36062];
     Self.Uptext := "Master Farmer";
 
-   end;
+  end;
   Varrock:
    begin
       with Self.Finder do
@@ -911,6 +913,9 @@ begin
     Self.WalkTile := [8860, 37046];
    end;
   end;
+
+  Self.LastLootedSeedSlot := -1;
+  Self.LastLootHoverPoint := Point(-1, -1);
 end;
 
 procedure TMasterFarmer.ResetCameraNudgeCountdown();
@@ -1355,10 +1360,12 @@ begin
 end;
 procedure TSCript.SeedVaultDepositAllSeeds();
 var
-  DepositallBox : TBox;
+  DepositallBox, hoverBox: TBox;
   AllItems : TRSItemArray;
   Item : TRSItem;
   Found : Boolean;
+  hoverPoint: TPoint;
+  useContext: Boolean;
 begin
   Allitems := Inventory.DiscoverAll();
   if AllItems.Len < 1 then Exit;
@@ -1378,8 +1385,24 @@ begin
   DepositallBox := [460,292, 490, 322];
   if BankPin.IsOpen(600) then BankPin.Enter(Login.GetPlayerPin());
   if not RSInterface.IsOpen() then Exit;
-  Mouse.Move(DepositallBox.Center);
-  if Mainscreen.IsUpText(["Deposit All", "from Inventory"]) then
+  hoverBox := DepositallBox.Expand(RandomRange(-2, 5));
+  hoverPoint := SRL.RandomPoint(hoverBox);
+  Mouse.Move(hoverPoint);
+  Wait(RandomRange(90, 160));
+
+  useContext := Random(100) < 30;
+  if useContext then
+  begin
+    Mouse.Click(MOUSE_RIGHT);
+    Wait(RandomRange(120, 220));
+    if not ChooseOption.Select(['Deposit-All', 'Deposit all'], MOUSE_LEFT, False, True) then
+    begin
+      ChooseOption.Close();
+      if Mainscreen.IsUpText(['Deposit All', 'from Inventory']) then
+        Mouse.Click(MOUSE_LEFT);
+    end;
+  end
+  else if Mainscreen.IsUpText(['Deposit All', 'from Inventory']) then
     Mouse.Click(MOUSE_LEFT);
 end;
 procedure TScript.HandleBanking();
@@ -1872,6 +1895,8 @@ end;
 procedure TMasterFarmer.Thief;
 var
   Me: TPoint;
+  seedSlotsBeforeClick: TIntegerArray;
+  gainedXP: Boolean;
 
   procedure InitializeSlowSeedTracker();
   var
@@ -1929,6 +1954,180 @@ var
     end;
   end;
 
+  function GetTrackedSeedSlots(): TIntegerArray;
+  var
+    discovered, tracked: TRSItemArray;
+    item: TRSItem;
+    itemName: String;
+  begin
+    SetLength(Result, 0);
+    Inventory.Open();
+    discovered := Inventory.DiscoverAll();
+    if discovered.Len < 1 then Exit;
+
+    for item in discovered do
+    begin
+      itemName := LowerCase(ToStr(item));
+      if (Pos('seed', itemName) > 0) or (Pos('spore', itemName) > 0) then
+        tracked += [item];
+    end;
+
+    if tracked.Len < 1 then Exit;
+
+    if not Inventory.FindItems(tracked, Result) then
+      SetLength(Result, 0);
+  end;
+
+  function DetermineNewSlot(const before, after: TIntegerArray): Int32;
+  var
+    i, j: Int32;
+    found: Boolean;
+  begin
+    Result := -1;
+    for i := 0 to High(after) do
+    begin
+      found := False;
+      for j := 0 to High(before) do
+        if after[i] = before[j] then
+        begin
+          found := True;
+          Break;
+        end;
+      if not found then
+        Exit(after[i]);
+    end;
+  end;
+
+  function GetNearbySlot(baseSlot: Int32): Int32;
+  var
+    row, col, newRow, newCol: Int32;
+  begin
+    Result := baseSlot;
+    if (baseSlot < 0) or (baseSlot > 27) then Exit;
+
+    row := baseSlot div 4;
+    col := baseSlot mod 4;
+
+    newRow := row + RandomRange(-1, 2);
+    newCol := col + RandomRange(-1, 2);
+
+    if newRow < 0 then newRow := 0;
+    if newRow > 6 then newRow := 6;
+    if newCol < 0 then newCol := 0;
+    if newCol > 3 then newCol := 3;
+
+    Result := newRow * 4 + newCol;
+  end;
+
+  procedure DrawLootHoverDebug(const point: TPoint);
+  var
+    hoverSlot: Int32;
+    slotBox: TBox;
+    textPoint: TPoint;
+  begin
+    if (point.X < 0) or (point.Y < 0) then Exit;
+
+    hoverSlot := Inventory.PointToSlot(point);
+    if (hoverSlot < 0) or (hoverSlot > 27) then Exit;
+
+    slotBox := Inventory.GetSlotBox(hoverSlot);
+    RSClient.Image.Clear();
+    RSClient.Image.DrawRect(slotBox, clLime);
+    RSClient.Image.DrawCross(point, 5, clYellow);
+    textPoint := Point(slotBox.X1, slotBox.Y1 - 12);
+    if textPoint.Y < 0 then
+      textPoint.Y := slotBox.Y1 + 4;
+    RSClient.Image.DrawText('Seed hover: ' + IntToStr(hoverSlot + 1), textPoint, clYellow);
+  end;
+
+  procedure UpdateLastLootedSlot(const beforeSlots: TIntegerArray);
+  var
+    afterSlots: TIntegerArray;
+    newSlot: Int32;
+    slotBox: TBox;
+  begin
+    afterSlots := GetTrackedSeedSlots();
+
+    if Length(afterSlots) = 0 then
+    begin
+      Self.LastLootedSeedSlot := -1;
+      Self.LastLootHoverPoint := Point(-1, -1);
+      Exit;
+    end;
+
+    newSlot := DetermineNewSlot(beforeSlots, afterSlots);
+    if newSlot < 0 then
+      newSlot := afterSlots[0];
+
+    Self.LastLootedSeedSlot := newSlot;
+    slotBox := Inventory.GetSlotBox(newSlot);
+    Self.LastLootHoverPoint := slotBox.Center;
+    DrawLootHoverDebug(Self.LastLootHoverPoint);
+  end;
+
+  function ExpandBoxByDelta(const box: TBox; delta: Int32): TBox;
+  begin
+    Result := box;
+
+    if delta = 0 then
+      Exit;
+
+    Result.Left.X := Result.Left.X - delta;
+    Result.Right.X := Result.Right.X + delta;
+    Result.Top.Y := Result.Top.Y - delta;
+    Result.Btm.Y := Result.Btm.Y + delta;
+
+    if Result.Left.X > Result.Right.X then
+    begin
+      Result.Left.X := (Result.Left.X + Result.Right.X) div 2;
+      Result.Right.X := Result.Left.X;
+    end;
+
+    if Result.Top.Y > Result.Btm.Y then
+    begin
+      Result.Top.Y := (Result.Top.Y + Result.Btm.Y) div 2;
+      Result.Btm.Y := Result.Top.Y;
+    end;
+  end;
+
+  procedure MaybeHoverLootSlot();
+  var
+    targetSlot: Int32;
+    hoverBox: TBox;
+    hoverPoint: TPoint;
+    expandDelta: Int32;
+  begin
+    if (Self.LastLootedSeedSlot < 0) or (Self.LastLootedSeedSlot > 27) then
+    begin
+      if (Self.LastLootHoverPoint.X >= 0) and (Self.LastLootHoverPoint.Y >= 0) then
+        DrawLootHoverDebug(Self.LastLootHoverPoint);
+      Exit;
+    end;
+
+    if Random(100) >= 40 then
+    begin
+      if (Self.LastLootHoverPoint.X >= 0) and (Self.LastLootHoverPoint.Y >= 0) then
+        DrawLootHoverDebug(Self.LastLootHoverPoint);
+      Exit;
+    end;
+
+    targetSlot := Self.LastLootedSeedSlot;
+    if Random(100) < 45 then
+      targetSlot := GetNearbySlot(targetSlot);
+
+    hoverBox := Inventory.GetSlotBox(targetSlot);
+    expandDelta := RandomRange(-2, 3);
+    hoverBox := ExpandBoxByDelta(hoverBox, expandDelta);
+
+    hoverPoint := SRL.RandomPoint(hoverBox);
+
+    Mouse.Move(hoverPoint);
+    Wait(RandomRange(160, 300));
+
+    Self.LastLootHoverPoint := hoverPoint;
+    DrawLootHoverDebug(hoverPoint);
+  end;
+
   procedure HandlePostPickpocket();
   var
     waitBase: Int32;
@@ -1973,6 +2172,7 @@ begin
     Self.ResetCameraNudgeCountdown();
     Exit;
   end;
+  seedSlotsBeforeClick := GetTrackedSeedSlots();
   Self.SnapAndClick(FarmerPt);
   HandlePostPickpocket();
   // First action: go for instant click if possible
@@ -2020,8 +2220,13 @@ begin
 
     if XPBar.EarnedXP(False) then
     begin
+      UpdateLastLootedSlot(seedSlotsBeforeClick);
+
       repeat
         if Inventory.IsFull() then Exit;
+
+        seedSlotsBeforeClick := GetTrackedSeedSlots();
+        MaybeHoverLootSlot();
 
         FarmerPt := Self.GetMasterFarmerPoint;
         if FarmerPt.X < 5 then
@@ -2032,11 +2237,17 @@ begin
 
         Self.SnapAndClick(FarmerPt);
         HandlePostPickpocket();
-      until not XPBar.EarnedXP(False);
+
+        gainedXP := XPBar.EarnedXP(False);
+        if gainedXP then
+          UpdateLastLootedSlot(seedSlotsBeforeClick);
+      until not gainedXP;
 
     end
     else
     begin
+      seedSlotsBeforeClick := GetTrackedSeedSlots();
+      MaybeHoverLootSlot();
 
       FarmerPt := Self.GetMasterFarmerPoint;
       if FarmerPt.X < 5 then
@@ -2047,6 +2258,10 @@ begin
 
       Self.SnapAndClick(FarmerPt);
       HandlePostPickpocket();
+
+      gainedXP := XPBar.EarnedXP(False);
+      if gainedXP then
+        UpdateLastLootedSlot(seedSlotsBeforeClick);
     end;
 
     if Minimap.IsPlayerMoving() then Minimap.WaitPlayerMoving();
