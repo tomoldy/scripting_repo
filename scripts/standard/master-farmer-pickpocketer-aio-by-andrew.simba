@@ -1,0 +1,1709 @@
+{$DEFINE SCRIPT_ID := 'd1c53086-68c1-4a68-9909-07d7f22709f5'}
+{$DEFINE SCRIPT_REVISION := '29'}
+{$I SRL-T/osr.simba}
+{$I WaspLib/osr.simba}
+const
+  CANT_REACH_TILE :TPoint = [3055, 36073];
+  DOOR_TILE : TPoint = [3052, 36070];
+  ARD_POTATO_FIELD : TBox := Box([63196, 37038],[6444,36942]);
+const
+  YOURE_STUNNED = "You're stunned!";
+  YOUVE_BEEN_STUNNED = "You've been stunned!";
+  FAILED = "You fail to pick the Master Farmer's pocket.";
+  CANT_REACH = "I can't reach that!";
+type
+  EState = (NONE, THIEVING, BANKING, DROPPING, STUNNED, EQUIP_NECK);
+  TMasterFarmer = record
+    Loc : Int32; //The location for which this master farmer in particular, will be found.
+    Uptext : String; //The master farmer uptext.
+    MMDot : TPoint;
+    WalkTile : TPoint;
+    Finder : TRSObjectFinder; //The finder to be used for finding the farmer
+    RoamingBox : TBox; // The master farmers roam around in a specific area (box)
+    LastFarmerPt, FarmerPt : TPoint;            //The resultant point.
+  end;
+  TScriptGUI = record(TScriptForm)
+   ScriptTitle :                                                    TLabel;
+   OverrideBreaksCheckBox, SleepCheckBox, BreakCheckBox,
+   AntibanCheckBox,Is99Checkbox, GetDodgyCheckBox, DisableInputBox,
+   UseSeedVaultCheckBox:                                            TLabeledCheckBox;
+   SeedRemovalInput, FoodNumInput, NeckNumInput,
+   SleepForInput, BreakForInput, BreakAfterInput,
+   RunForInput, CustomBreakIntervalInput, CustomBreakDurationInput: TLabeledEdit;
+   FoodInput,LocationInput :                                        TLabeledComboBox;
+
+  end;
+  TScript = record
+     (TBaseBankScript) State: EState;
+    Food, Necklace: TRSBankItem;
+    RunningWatch : TStopWatch;
+    Farmer : TMasterFarmer;
+    MasterFarmerFinder: TRSObjectFinder;
+    DodgyNeckTimer : TCountdown;
+    HosidiusHouse,HosidiusHouse2 : TBox;
+    InitXP,GainedXp, TotalXp : Integer;
+    EnabledAntiban : Boolean;
+    Location : Int32;
+    ReportTimer : TStopWatch;
+    GUI : TScriptGUI;
+    IS_NINETYNINE, GET_DODGY, DISABLE_INPUT : BOOLEAN;
+    RunFor : Int32;
+    MAX_RUN_TIME : Int32;
+    StartTime : TDateTime;
+    DoorTimer, MasterFarmerTimer, Runtimer : TCountdown;
+    DoorOpen,UseSeedVault, OverrideBreaks : Boolean;
+    SeedVault : TRSObjectV2;
+    Clicks, gDeltaClicks: Int32;
+    SavedCustomBreakDuration, SavedCustomBreakInterval : Integer;
+  end;
+const
+
+  NAME_OF_NECK = "Dodgy necklace";
+var
+  SEEDS_TO_DROP: TRSItemArray = ['Potato seed', 'Onion seed', 'Cadavaberry seed', 'Jute seed', 'Cabbage seed', 'Tomato seed', 'Sweetcorn seed', 'Strawberry seed', 'Watermelon seed', 'Hammerstone seed', 'Asgarnian seed', 'Jute seed', 'Yanillian seed', 'Krandorian seed',  'Marigold seed', 'Nasturtium seed', 'Rosemary seed', 'Woad seed',  'Redberry seed', 'Cadavaberry seed', 'Dwellberry seed', 'Jangerberry seed', 'Whiteberry seed', 'Poison ivy seed', 'Mushroom spore', 'Belladonna seed', 'Cactus seed', 'Potato cactus seed'];
+  //If you are interested in changing the number of food
+  //the script grabs from the bank change the below consts.
+  QUANTITY_OF_FOOD : Int32 := 10;
+  //And same here for Dodgy necklaces.
+  QUANTITY_OF_NECK : Int32 := 4;
+const
+  Draynor = 0;
+  FarmingGuild = 1;
+  Ardougne = 2;
+  Hosidius = 3;
+  Varrock = 4;
+var
+  Script: TScript;
+
+procedure TScript.HandleBanking(); forward;
+//procedure OnMouseMoveEvent(Sender: PMouse; var X, Y: Double; var Done: Boolean); forward;
+function TRSXPBar.EarnedXP(reject: Boolean): Boolean; overload;
+begin
+  Result := Self.Read() > Self.Tracker.Previous;
+  if reject and ((Self.Read() - Self.Tracker.Previous) > 500) then Exit(False);
+
+  if Result and Self.Tracker.IsSetup then
+  begin
+    if Self.Tracker.Previous > 0 then APIClient.UpdatePayload(Self.Tracker.Current-Self.Tracker.Previous, 0, 0);
+    WL.Activity.Restart();
+    Self.Tracker.Previous := Self.Tracker.Current;
+  end;
+end;
+procedure TAntiban.BioClick(button: Int32; {$H-}max: Int32 = 3); override; {$H+}
+begin
+  Mouse.Click(button);
+end;
+procedure TSCriptGUI.UseSeedVault({$H-} sender: TObject); {$H+}
+begin
+  if Self.LocationInput.GetText.Contains("FarmingGuild") then
+  begin
+    Writeln("Detected the player is wanting to thieve at the farming guild.");
+    Self.UseSeedVaultCheckBox.SetEnabled(True);
+  end else
+    Self.UseSeedVaultCheckBox.SetEnabled(False);
+end;
+procedure TSCriptGUI.IsNinetyNine({$H-} sender: TObject); {$H+}
+var
+  Level99 : Boolean;
+begin
+  Level99 := Self.Is99Checkbox.IsChecked();
+  if Level99 then
+  begin
+    Self.FoodInput.SetEnabled(False);
+    Self.FoodNumInput.SetEnabled(False);
+    Self.GetDodgyCheckBox.SetEnabled(False);
+  end else
+  begin
+    Self.FoodInput.SetEnabled(True);
+    Self.FoodNumInput.SetEnabled(True);
+    Self.GetDodgyCheckBox.SetEnabled(True);
+  end;
+end;
+
+procedure TScriptGUI.EnableDodgy({$H-} sender: TObject); {$H+}
+var
+  dodgyEnabled: Boolean;
+begin
+  dodgyEnabled := Self.GetDodgyCheckBox.IsChecked();
+  Self.NeckNumInput.SetEnabled(dodgyEnabled);
+end;
+procedure TScriptGUI.OverrideBreaksCheckboxChanged({$H-}sender: TObject){$H+};
+begin
+  Self.CustomBreakIntervalInput.SetEnabled(Self.OverrideBreaksCheckBox.IsChecked());
+  Self.CustomBreakDurationInput.SetEnabled(Self.OverrideBreaksCheckBox.IsChecked());
+
+  if not Self.CustomBreakIntervalInput.Edit.IsEnabled() or
+     not self.CustomBreakDurationInput.Edit.IsEnabled() then
+  begin
+    Self.CustomBreakIntervalInput.SetText("");
+    Self.CustomBreakDurationInput.SetText("");
+  end;
+end;
+procedure TScriptGUI.Run(); override;
+var
+  Tab : TTabSheet;
+begin
+  Self.Setup("Master Farmer", Point(800, 600), False);
+  Self.Start.setOnClick(@Self.StartScript);
+  Self.AddTab('Settings');
+  Tab := Self.GetTab("Settings");
+  Tab.SetTooltip("");
+
+  with Self.RunForInput do
+  begin
+    Create(Tab);
+    SetLeft(TControl.AdjustToDPI(30));
+    SetTop(TControl.AdjustToDPI(185));
+    SetCaption('Run for(in minutes):');
+    SetText('300');
+  end;
+  with Self.FoodInput do
+  begin
+    Create(Tab);
+    SetCaption('Food:');
+    SetLeft(TControl.AdjustToDPI(380));
+    SetTop(TControl.AdjustToDPI(210));
+    SetStyle(csDropDownList);
+    AddItemArray(["Jug of wine", "Potato with cheese", "Cooked karambwan","Salmon", "Shark", "Stew", "Trout", "Lobster"]);
+  end;
+  with Self.LocationInput do
+  begin
+    Create(Tab);
+    SetCaption('Location:');
+    SetLeft(TControl.AdjustToDPI(380));
+    SetTop(TControl.AdjustToDPI(260));
+    SetStyle(csDropDownList);
+    AddItemArray(["Draynor", "FarmingGuild","Ardougne", "Hosidius", "Varrock"]);
+  end;
+  with Self.NeckNumInput do
+  begin
+    Create(Tab);
+    SetCaption('Quantity of Necklaces:');
+    SetTooltip('Quantity of Dodgy necklaces to take out of the bank ');
+    SetLeft(TControl.AdjustToDPI(380));
+    SetTop(TControl.AdjustToDPI(300));
+    SetText("4");
+    SetEnabled(False);
+  end;
+  with Self.FoodNumInput do
+  begin
+    Create(Tab);
+    SetCaption('Quantity of Food:');
+    SetTooltip('Quantity of food to take out of the bank');
+    SetText("10");
+    SetLeft(TControl.AdjustToDPI(380));
+    SetTop(TControl.AdjustToDPI(340));
+    SetEnabled(True);
+  end;
+
+  with Self.Is99Checkbox do
+  begin
+    Create(Tab);
+    SetCaption('Is player level 99');
+    SetTooltip('The player is level 99');
+    SetLeft(TControl.AdjustToDPI(380));
+    SetTop(TControl.AdjustToDPI(400));
+  end;
+
+  with Self.GetDodgyCheckBox do
+  begin
+    Create(Tab);
+    SetCaption('Get Dodgy necklaces');
+    SetTooltip('Do not get dodgy necklaces from the bank');
+    SetLeft(TControl.AdjustToDPI(380));
+    SetTop(TControl.AdjustToDPI(420));
+  end;
+  with Self.DisableInputBox do
+  begin
+    Create(Tab);
+    SetCaption('Disable Input');
+    SetTooltip('Disable real input.');
+    SetLeft(TControl.AdjustToDPI(380));
+    SetTop(TControl.AdjustToDPI(440));
+  end;
+  with Self.UseSeedVaultCheckBox do
+  begin
+    Create(Tab);
+    SetCaption('Use Seed vault');
+    SetTooltip('At farming guild should we use the seed vault to bank seeds?');
+    SetLeft(TControl.AdjustToDPI(380));
+    SetTop(TControl.AdjustToDPI(460));
+    SetEnabled(False);
+  end;
+{  Self.AntibanCheckBox.CheckBox.setOnChange(@Self.EnableAntiban);
+  Self.BreakCheckBox.CheckBox.setOnChange(@Self.EnableBreaks);
+  Self.SleepCheckBox.CheckBox.setOnChange(@Self.EnableSleep);
+  }
+  Self.GetDodgyCheckBox.CheckBox.setOnChange(@Self.EnableDodgy);
+  Self.LocationInput.ComboBox.setOnChange(@Self.UseSeedVault);
+  Self.Is99Checkbox.CheckBox.setOnChange(@Self.IsNinetyNine);
+  Self.CreateAccountManager();
+  Self.CreateAntibanManager();
+
+  tab := Self.GetTab("Antiban Manager");
+  if tab.getCaption() = "Antiban Manager" then
+  begin
+    with Self.OverrideBreaksCheckBox do
+    begin
+      Create(tab);
+      SetCaption('Override Default Breaks');
+      SetLeft(TControl.AdjustToDPI(90));
+      SetTop(TControl.AdjustToDPI(260));
+      SetHint('Override the default WaspLib break intervals with custom settings.');
+      Self.OverrideBreaksCheckBox.CheckBox.SetOnChange(@OverrideBreaksCheckboxChanged);
+    end;
+
+    with Self.CustomBreakIntervalInput do
+    begin
+      Create(tab);
+      SetCaption('Break Interval (minutes)');
+      SetLeft(TControl.AdjustToDPI(90));
+      SetTop(TControl.AdjustToDPI(280));
+      SetWidth(TControl.AdjustToDPI(160));
+
+      SetHint('How often to take breaks (e.g., 60 = every hour). Includes 25% randomness.');
+      Edit.SetOnKeyPress(@Edit.NumberField);
+      SetEnabled(False);
+    end;
+
+    with Self.CustomBreakDurationInput do
+    begin
+      Create(tab);
+      SetCaption('Break Duration (minutes)');
+      SetLeft(TControl.AdjustToDPI(270));
+      SetTop(TControl.AdjustToDPI(280));
+      SetWidth(TControl.AdjustToDPI(160));
+      SetHint('How long breaks should last (e.g., 5 = 5 minute break). Includes 33% randomness.');
+      Edit.SetOnKeyPress(@Edit.NumberField);
+      SetEnabled(False);
+    end;
+
+  end;
+  inherited;
+end;
+
+procedure TScriptGUI.StartScript(Sender: TObject); override;
+begin
+  Script.Location := Self.LocationInput.GetItemIndex();
+
+  if Self.FoodNumInput.Edit.IsEnabled() then
+    QUANTITY_OF_FOOD := StrToInt(Self.FoodNumInput.GetText)
+  else
+    QUANTITY_OF_FOOD := 10;
+
+  Script.Food := [Self.FoodInput.GetText(), QUANTITY_OF_FOOD, False];
+
+  Self.NeckNumInput.SetEnabled(False);
+  if Self.NeckNumInput.Edit.IsEnabled() then
+    QUANTITY_OF_NECK := StrToInt(Self.NeckNumInput.GetText)
+  else
+    QUANTITY_OF_NECK := 4;
+
+  Script.Necklace := [NAME_OF_NECK, QUANTITY_OF_NECK, False];
+
+  Script.RunFor := StrToInt(Self.RunForInput.GetText());
+ { if Self.GetTab("Antiban Manager").IsChecked() then
+  begin
+    Script.SavedCustomBreakDuration := StrToInt(Self.CustomBreakDurationInput.GetText());
+    Script.SavedCustomBreakInterval := StrToInt(Self.CustomBreakIntervalInput.GetText());
+  end;
+  }
+  Writeln("Self.OverrideBreaksCheckBox.IsChecked(): ", Self.OverrideBreaksCheckBox.IsChecked());
+  Script.OverrideBreaks := Self.OverrideBreaksCheckBox.IsChecked();
+  if Script.OverrideBreaks then
+  begin
+    Script.SavedCustomBreakDuration := StrToInt(Self.CustomBreakDurationInput.GetText());
+    Script.SavedCustomBreakInterval := StrToInt(Self.CustomBreakIntervalInput.GetText());
+  end;
+
+  Script.IS_NINETYNINE := Self.Is99Checkbox.IsChecked();
+  Script.GET_DODGY := Self.GetDodgyCheckBox.IsChecked();
+  Script.DISABLE_INPUT := Self.DisableInputBox.IsChecked();
+
+  Script.UseSeedVault := Self.UseSeedVaultCheckBox.IsChecked();
+  inherited;
+end;
+
+function TRSMinimap.YellowDotUnder() : Boolean;
+var
+  p: TPoint;
+  tpa: TPointArray;
+begin
+  p := Self.Center;
+  if SRL.FindColors(tpa, CTS0(1310462, 0), Box(p, 2, 2)) > 0 then
+    Result := tpa.Find([p.X, p.Y + 2]) > -1;
+end;
+function TRSMinimap.GetNPCDots(): TPointArray;
+  function GetMinimapGrid(angle: Single): Vector3Array;
+  var x, y: Integer;
+  begin
+    for x := Minimap.Center.X - 20 * 4 to Minimap.Center.X + 20 * 4 with 4 do
+      for y := Minimap.Center.Y - 20 * 4 to Minimap.Center.Y + 20 * 4 with 4 do
+        Result += Vec3(x, y).RotateXY(angle, Minimap.Center.X, Minimap.Center.Y);
+  end;
+
+  function DotsToTile(dots: TPointArray; angle: Single): TPointArray;
+  var
+    dotVecs, mmGrid: Vector3Array;
+    i: Integer;
+  begin
+    dotVecs.FromTPA(dots);
+    dotVecs := dotVecs.Offset([2,1]); //This can be either 2,1 or 2,2
+
+    mmGrid := GetMinimapGrid(angle);
+    for i := 0 to High(dotVecs) do
+      dotVecs[i] := mmGrid.NearestVec(dotVecs[i]);
+
+    Result := dotVecs.ToTPA();
+  end;
+var
+  mmGrid: Vector3Array;
+  dots: TPointArray;
+  dot: TPoint;
+  angle: Single;
+begin
+  angle := Minimap.GetCompassAngle(False);
+  mmGrid := GetMinimapGrid(angle);
+  dots := Minimap.GetDots(ERSMinimapDot.NPC);
+  if dots = [] then Exit();
+  dots := dotsToTile(dots, angle);
+  for dot in dots do
+  begin
+    dot := Map.MM2Map(dot, angle);
+    dot := RSTranslator.NormalizeNearestTile(dot);
+    Result += dot;
+  end;
+end;
+procedure TRSMinimap.RotateWithinAngles(min, max: Int32);
+var
+  minMaxAvg: Int32 := Floor((min + max) div 2);
+  preferredAngle: Int32 := SRL.SkewedRand(minMaxAvg, min, max);
+begin
+  if preferredAngle < 0 then
+    preferredAngle := preferredAngle + 360;
+
+  if InRange(self.getCompassAngle(True), min, max) then
+    Exit;
+
+  Minimap.SetCompassAngle(preferredAngle);
+end;
+procedure PauseTimer(Task: PBreakTask);
+var
+  T: PBreakTask;
+begin
+  Script.RunningWatch.Pause();
+  APIClient.Pause();
+  WL.Activity.Pause();
+  T := Task;
+end;
+procedure PauseTimer(Task: PSleepTask); overload;
+var
+  T: PSleepTask;
+begin
+  Script.RunningWatch.Pause();
+  APIClient.Pause();
+  WL.Activity.Pause();
+  T := Task;
+end;
+procedure ResumeTimer(Task: PBreakTask);
+var
+  T: PBreakTask;
+begin
+  if not RSClient.IsLoggedIn() then
+    Login.LoginPlayer();
+  Script.RunningWatch.Resume();
+  APIClient.Resume();
+  WL.Activity.Resume();
+  T := Task;
+end;
+
+procedure ResumeTimer(Task: PSleepTask); overload;
+var
+  T: PSleepTask;
+begin
+  if not RSClient.IsLoggedIn() then
+    Login.LoginPlayer();
+  Script.RunningWatch.Resume();
+  APIClient.Resume();
+  WL.Activity.Resume();
+  T := Task;
+end;
+
+procedure TAntiban.SetupSleep(); override;
+begin
+  if Self.Sleeps <> [] then Exit;
+
+ // Self.AddSleep('23:59:00', Script.SleepFor * ONE_HOUR, 0, 1);
+  Self.AddSleep(Self.GetSleepHour(), Self.GetSleepLength() * ONE_HOUR, 0.1, 0.8 + BioHash);
+  Self.OnSleeping := @OnSleepingTask;
+  Self.OnStartSleep := @PauseTimer;
+  Self.OnFinishSleep := @ResumeTimer;
+end;
+procedure TAntiban.SetupBreaks(); override;
+begin
+  if Self.Breaks <> [] then Exit;
+
+  Writeln("Override checked: ", Script.OverrideBreaks);
+
+  if Script.OverrideBreaks then
+  begin
+    Writeln("[Bot]: Setting up overriden breaks");
+    Self.AddBreak(Script.SavedCustomBreakInterval* ONE_MINUTE, Script.SavedCustomBreakDuration * ONE_MINUTE, 0.33, 0.2 + BioHash);
+  end else
+  begin
+    Writeln("[Bot]: Setting up default WaspLib breaks");
+    Self.AddBreak(30  * ONE_MINUTE, 2  * ONE_MINUTE, 0.33, 0.01);
+    Self.AddBreak(45  * ONE_MINUTE, 5  * ONE_MINUTE, 0.33, 0.15);
+    Self.AddBreak(60  * ONE_MINUTE, 10 * ONE_MINUTE, 0.33, 0.2 + BioHash);
+    Self.AddBreak(120 * ONE_MINUTE, 30 * ONE_MINUTE, 0.33, 0.5 + BioHash);
+  end;
+
+  Self.OnBreaking := @OnBreakingTask;
+  Self.OnStartBreak := @PauseTimer;
+  Self.OnFinishBreak := @ResumeTimer;
+end;
+procedure TAntiban.SetupTasks(); override;
+begin
+  if Self.Tasks <> [] then Exit;
+
+  if WLSettings.GetObject('antiban').getJSONObject('tasks').getBoolean('mouse') then
+    Self.AddTask(1  * ONE_MINUTE, @Self.RandomMouseTask, 0.33);
+
+  if WLSettings.GetObject('antiban').getJSONObject('tasks').getBoolean('mouse') then
+    Self.AddTask(2 * ONE_MINUTE, @Self.LoseFocus, 0.33);
+
+  if WLSettings.GetObject('antiban').getJSONObject('tasks').getBoolean('gametabs') then
+    Self.AddTask(3 * ONE_MINUTE, @Self.HoverSkills, 0.33);
+
+  Self.OnStartTask := @OnStartAntibanTask;
+end;
+procedure TAntiban.Setup(); override;
+begin
+  Writeln("[Bot]: Setting up antiban");
+
+  if WLSettings.GetObject('antiban').getBoolean('breaks') then
+    Self.SetupBreaks();
+
+  if WLSettings.GetObject('antiban').getJSONObject('sleep').getBoolean('enabled') then
+    Self.SetupSleep();
+
+  if WLSettings.GetObject("antiban").getJSONObject("tasks").getBoolean("enabled") then
+  begin
+    Self.Skills += [ERSSkill.THIEVING, ERSSkill.TOTAL];
+    Antiban.SetupTasks();
+  end;
+  Writeln("[Bot]: Antiban tasks: ", Antiban.GetActiveTasks()^);
+end;
+
+
+procedure TScript.DisplayMSTile(TPA: TPointArray; SizeMod: Int32=0);
+var
+  Tile : TRectangle;
+begin
+  Tile := TPA.MinAreaRect;
+  if SizeMod > 0 then Tile := Tile.Expand(SizeMod);
+
+  if MainScreen.Bounds.Contains(Tile) then
+  begin
+    RSClient.Image.Clear(Mainscreen.Bounds);
+    RSClient.Image.DrawRect(Tile, clAqua);
+  end;
+end;
+procedure TScript.DebugDots(TPA:TPointArray);
+var
+  I : Int32;
+  Pt : TPoint;
+begin
+   for I := 0 to High(TPA) do
+   begin
+    Pt := Map.Map2MM(TPA[I]);
+    RSClient.Image.DrawCross(Pt, 5, clRed);
+   end;
+end;
+function TScript.PointInBox(out Candidates: TPointArray; TPA : TPointArray; B : TBox): Boolean;
+var
+  I, Len: Int32;
+begin
+  Len := 0;
+  SetLength(Candidates, Length(TPA));
+
+  for I := 0 to High(TPA) do
+  begin
+    if B.Contains(TPA[I]) then
+    begin
+      Candidates[Len] := TPA[I];
+      Inc(Len);
+    end;
+  end;
+
+  SetLength(Candidates, Len);
+  Result := Len > 0;
+end;
+
+procedure PrintProgress();
+var
+  Hours: Double;
+  AntibanEnabled, BreaksEnabled, SleepsEnabled : Boolean;
+  TotalClicks, ClicksHourly, Total, Hourly: String;
+begin
+  AntibanEnabled := WLSettings.GetObject('antiban').getJSONObject('tasks').getBoolean('enabled');
+  BreaksEnabled := WLSettings.GetObject('antiban').getBoolean('breaks');
+  SleepsEnabled := WLSettings.GetObject('antiban').getJSONObject('sleep').getBoolean('enabled');
+
+  ClearDebug();
+  Hours := GetTimeRunning()/3600000;
+  Total := ToStr(Round((XPBar.TotalEarnedXP()/1000), 0), ' k ');
+  Hourly := ToStr('(', Round((XPBar.TotalEarnedXP()/1000)/Hours, 1), ' k / hr)');
+  ClicksHourly := ToStr('(', Trunc(Script.Clicks/Hours), ' / hr)');
+
+  TotalClicks := ToStr(Script.Clicks);
+  WriteLn(SRL.TimeStamp(), ':[Experience]: ', Total, Hourly);
+  Writeln(SRL.TimeStamp(), ':[Clicks]: ', TotalClicks, ClicksHourly);
+  Writeln(SRL.TimeStamp(), ":[Time Running]: ", SRL.TimeRunning(TTimeFormat.Time_Short));
+  if AntibanEnabled then
+  begin
+    if BreaksEnabled then Writeln(SRL.TimeStamp(), ':[Next Break]: ', Antiban.TimeUntilBreak(Antiban.Breaks[0]));
+    if SleepsEnabled then Writeln(SRL.TimeStamp(), ':[Next Sleep in 24 hour clock format]: ', SRL.MsToTime(Max(0, Round(Antiban.Sleeps[0].NextAtTime - GetTimeRunning)), TIME_BARE));
+  end;
+  if APIClient.Timer.IsFinished() then
+  begin
+    Writeln("Apiclient timer finished!");
+    Script.gDeltaClicks := Script.Clicks - Script.gDeltaClicks;
+    Writeln("Number of clicks at this juncture: ", Script.gDeltaClicks);
+    APIClient.UpdatePayload(43 * Script.gDeltaClicks, 0, Script.RunningWatch.ElapsedTime);
+    Writeln APIClient.SubmitStats(APIClient.GetUUID());
+    Script.RunningWatch.Reset();
+    APIClient.Timer.Restart();
+  end;
+  //Writeln("RunningWatch ElapsedTime: ", Script.RunningWatch.ElapsedTime);
+  Script.ReportTimer.Reset();
+end;
+procedure TMasterFarmer.InitLocation;
+begin
+  case Script.Location of
+   Draynor:
+   begin
+    with Self.Finder do
+    begin
+      ColorClusters += [CTS2(3760494, 4, 0.09, 0.22), CTS2(5271659, 13, 0.07, 0.08), 5]; //CTS2(4675427, 1, 0.01, 0.01), 15];//CTS2(5271659, 13, 0.07, 0.08);
+      //Colors += CTS2(5271659, 13, 0.07, 0.08);
+      Grow := 1;
+     // Erode := 1;
+     // Grow := 2;
+      ClusterDistance := 2;
+    end;
+    Self.Loc := Draynor;
+    Self.Uptext := "Master Farmer";
+    Self.WalkTile := [8224, 37430];
+  //  Debug(Mainscreen.FindObject(Self.Finder));
+   end;
+   Ardougne:
+   begin
+    with Self.Finder do
+    begin
+      ColorClusters += [CTS2(3826544, 3, 0.13, 0.44),CTS2(5534830, 10, 0.07, 0.07), 20];
+     // Erode := 1;
+      ClusterDistance := 4;
+    end;
+    Self.Loc := Ardougne;
+    Self.RoamingBox := Box([6440, 36946],[6464, 37020]);   //Not using this.
+    Self.WalkTile := [6452, 36978];
+    Self.Uptext := "Master Farmer";
+   end;
+   FarmingGuild:
+   begin
+      with Self.Finder do
+      begin
+        Colors+= CTS2(6314810, 9, 0.06, 0.27);
+        ClusterDistance := 4;
+        Grow := 4;
+      end;
+    Self.Loc := FarmingGuild;
+    Self.WalkTile := [952, 35514];
+   end;
+   Hosidius:
+   begin
+      with Self.Finder do
+      begin
+        ColorClusters += [CTS2(1776416, 1, 0.01, 0.01), CTS2(4221026, 3, 0.06, 0.39), 15];
+        ClusterDistance := 4;
+        Grow := 4;
+      end;
+    Self.Loc := Hosidius;
+    Self.WalkTile := [3052, 36062];
+    Self.Uptext := "Master Farmer";
+
+   end;
+  Varrock:
+   begin
+      with Self.Finder do
+      begin
+        Colors += CTS2(6446652, 10, 0.07, 0.18);
+        ClusterDistance := 1;
+      end;
+    Self.Loc := Varrock;
+    Self.Uptext := "Master Farmer";
+    Self.WalkTile := [8860, 37046];
+   end;
+  end;
+end;
+function ShouldBank() : Boolean;
+var
+  HasFood, HasNeck : Boolean;
+begin
+  Inventory.Open();
+
+  if Script.IS_NINETYNINE then Exit(False);
+
+  HasFood := Inventory.CountItem(Script.Food.Item) > 2;
+
+  if Script.GET_DODGY then
+     HasNeck := Inventory.CountItem(Script.Necklace.Item)>1
+  else
+     HasNeck := True;
+
+  Result := not HasNeck or not HasFood;
+  if Result then
+    Writeln("[Bot]: Did not find Neck or Food in inventory, banking...");
+end;
+procedure TScript.Init(MaxActions: UInt32; maxTime: UInt64); override;
+begin
+
+  Mouse.CanIdle:=False;
+  Mouse.IdleInterval := 0;
+  Mouse.IdleGoal := 0;
+  Mouse.IdleProgress := 0;
+
+  Mouse.Speed := 60;
+  Mouse.Gravity:=9;
+  Mouse.MissChance := 0;
+  Mouse.Wind := 6;
+
+  if not RSClient.IsLoggedIn() then Login.LoginPlayer();
+  if  RSInterface.IsOpen() then Keyboard.PressKey(VK_ESCAPE);
+  if (not APIClient.SubmitStats(APIClient.GetUUID)) then APIClient.TimeStamp := GetTickCount;
+
+  if Self.EnabledAntiban then
+  begin
+    Writeln("Antiban is enabled!");
+    Antiban.Setup();
+  end;
+
+  Self.Runtimer.Init(Self.RunFor * ONE_MINUTE);
+  Self.RunningWatch.Start();
+
+  Options.SetNPCAttackOption(ERSAttackOption.HIDDEN);
+  ChatButtons.ChangeState(ERSChatButton.PUBLIC_CHAT, ERSChatButtonState.DISABLED);
+  if Self.Location = ARDOUGNE then Options.SetZoomLevel(0);
+
+  StartTime := Now;
+  if Self.DISABLE_INPUT then
+  begin
+    Writeln("Disabled input!");
+    RSClient.RemoteInput.DisableRealInput();
+  end else RSClient.RemoteInput.EnableRealInput();
+
+  XPBar.Setup();
+  XPBar.SetupAlignment;
+  InitXP := XPBar.Read();
+
+  Self.Farmer.InitLocation();
+
+  case Self.Farmer.Loc of
+    Draynor:
+    begin
+      GENERATED_GRAPH.Spacing := 14;         //low = better/slower, high = worse/faster
+      GENERATED_GRAPH.MinimumTiles := 2;     //spaces with less tiles than this will be ignored.
+      GENERATED_GRAPH.NodeRadius := 50;      //closed space less than NodeRadius pixels will have a single node.
+      GENERATED_GRAPH.MaxConnections := 8;   //Max connections per node.
+      GENERATED_GRAPH.WallCrossings := True; //Whether to allow wall crossings when there's a close path around it.
+      Map.SetupChunkEx([47,51,48,50]);
+    end;
+    FarmingGuild:
+    begin
+      GENERATED_GRAPH.Spacing := 14;         //low = better/slower, high = worse/faster
+      GENERATED_GRAPH.MinimumTiles := 2;     //spaces with less tiles than this will be ignored.
+      GENERATED_GRAPH.NodeRadius := 50;      //closed space less than NodeRadius pixels will have a single node.
+      GENERATED_GRAPH.MaxConnections := 8;   //Max connections per node.
+      GENERATED_GRAPH.WallCrossings := True; //Whether to allow wall crossings when there's a close path around it.
+      Map.SetupChunkEx([18, 59, 20, 57]);
+    end;
+    Ardougne: Map.SetupChunkEx([40,52,41,51]);
+    Hosidius: Map.SetupChunkEx([26,57,28,55]);
+    Varrock: Map.SetupChunkEx([49,54,51,51]);
+  end;
+  NPCs.Setup(Map.NPCs(), @Map.Walker);
+  Objects.Setup(Map.Objects(), @Map.Walker);
+
+  if Self.Location = FarmingGuild then
+    SeedVault := Objects.Get("Seed vault");
+
+//  Mouse.OnMoving := @OnMouseMoveEvent;
+
+  Map.Walker._DoorHandler.Enabled := True;
+  case Self.Farmer.Loc of
+    Hosidius: Banks._FilterLocation([2904, 36038, 125], True);
+  end;
+
+  if Farmer.Loc = Ardougne then
+    Options.SetZoomLevel(20)
+  else if Farmer.Loc = Hosidius then
+    Options.SetZoomLevel(15)
+  else
+    Options.SetZoomLevel(25);
+
+  WLSettings.Antiban.Camera := False;
+  WLSettings.Antiban.Chat := False;
+
+  Self.DisableDebugging := True;
+
+  if not ChatButtons.IsActive(ERSChatButton.GAME_CHAT) then ChatButtons.Open(ERSChatButton.GAME_CHAT);
+
+  if not Equipment.ContainsItem(Necklace.Item) then Inventory.ClickItem(Necklace.Item);
+
+  if Inventory.ContainsItem("Seed box") then Inventory.ClickItem("Seed box", "Open");
+
+  DodgyNeckTimer.Init(15 * ONE_SECOND);
+  Doortimer.Init(300 * ONE_SECOND);
+  MasterFarmerTimer.Init(5*ONE_MINUTE);
+
+  Self.HosidiusHouse := Box( [3030, 36051], [3056, 36070]);
+
+  if ShouldBank() then
+    Self.HandleBanking()
+  else
+    Map.Walker.WebWalk(Self.Farmer.WalkTile);
+  inherited;
+end;
+
+function TScript.ShouldEquipNeck(): Boolean;
+begin
+  if IS_NINETYNINE then Exit(False);
+  if not Script.GET_DODGY then Exit(False);
+  Self.DebugLn("Attempting to see if we should equip neck.");//, Self.DodgyNeckTimer.TimeRemaining);
+  Result := Chat.FindMessage('crumbles', [CHAT_COLOR_LIGHT_RED]) or Self.DodgyNeckTimer.IsFinished;
+end;
+procedure TScript.EquipNeck();
+begin
+  Self.DebugLn("Attempting to equip neck.");
+  if Equipment.ContainsItem(Self.Necklace.Item) then
+  begin
+    Self.DebugLn("Equipment has necklace");
+    Self.DodgyNeckTimer.Restart(45 * ONE_SECOND);
+    Exit;
+  end;
+  Inventory.ClickItem(Self.Necklace.Item);
+end;
+function GotStunned(): Boolean;
+begin
+  if Script.IS_NINETYNINE then Exit(False);
+
+  Result := SRL.CountColor(CTS2(2677992, 3, 0.03, 3.53), Mainscreen.GetPlayerBox) > 0;
+//  if Result then Writeln("GotStunned: ", SRL.CountColor(CTS2(2677992, 3, 0.03, 3.53), Mainscreen.GetPlayerBox));
+end;
+procedure HandleStunned();
+begin
+  while GotStunned() do
+    Wait(25, 50, EWaitDir.wdMean);
+end;
+
+var
+  OnMoveDone: Boolean;
+function TScript.WithdrawBankItem(out item: TRSBankItem): Boolean;
+var
+  count,attempt: Int32;
+  b: TBox;
+begin
+  for attempt := 1 to 3 do
+  begin
+    if Inventory.ContainsItem(item.Item) then
+    count := Inventory.CountItem(item.Item);
+
+    if Bank.FindItem(item, b) then
+    begin
+      if Max(1, Bank.CountItemStack(item.Item)) < Min(item.Quantity, 28) then Exit;
+      Result := Bank.WithdrawHelper(b, item.Quantity, item.Noted, item.Quantity <> 1);
+    end;
+
+    Result := Result and WaitUntil((Inventory.CountItem(item.Item) > count), 300, 3000);
+    if Result then Exit;
+
+    Bank.UnHoverIncinerator();
+    if Bank.IsSearchOpen() then  Bank.CloseSearch();
+
+    if attempt > 1 then
+      Mouse.Move(Bank.SlotsArea, True);
+  end;
+end;
+procedure TMouse.Click(Button: Int32); override;
+{$IFDEF SRL_DEBUG_MOUSE}
+var w,h: Int32; p: TPoint;
+{$ENDIF}
+begin
+  Self.Hold(Button);
+  Wait(SRL.TruncatedGauss(30, 300));
+  Self.Release(Button);
+
+  if RSClient.IsLoggedIn() then
+  begin
+    if GotStunned() then
+    begin
+      Writeln("[Bot]: Stun detected while clicking. Waiting..");
+      while GotStunned() do Wait(125, 50);
+    end;
+  end;
+  {$IFDEF SRL_DEBUG_MOUSE}
+  GetClientDimensions(W,H);
+  if Length(Self.DebugClicks) = 0 then
+    Self.DebugClicks.SetSize(W,H);
+
+  p := Self.Position();
+  if InRange(p.x,0,W-1) and InRange(p.y,0,H-1) then // just make sure the mouse is actually within the client bounds
+    Self.DebugClicks[p.y,p.x] += 1;
+  {$ENDIF}
+end;
+procedure TMouse.WindMouse(xs, ys, xe, ye, gravity, wind, minWait, maxWait, maxStep, targetArea: Double); override;
+const
+  SQRT_3: Double := sqrt (3);
+  SQRT_5: Double := sqrt (5);
+
+var
+  x, y: Double;
+  veloX, veloY, windX, windY, veloMag, randomDist, step, idle: Double;
+  traveledDistance, remainingDistance: Double;
+  countdown: TCountDown;
+  finished: Boolean;
+begin
+  countdown.Init(15000);
+  OnMoveDone := False;
+  x := xs;
+  y := ys;
+  while True do
+  begin
+    if countdown.IsFinished() then
+      Self.Fatal('Something went wrong. Mouse movement did not complete in 15 seconds.');
+    if (@ Self.OnMoving <> nil) and not OnMoveDone then
+    begin
+      Self.OnMoving(@ Self, xe, ye, finished);
+    end;
+    if finished then
+      Exit;
+    traveledDistance := Hypot(x - xs, y - ys);
+    remainingDistance := Hypot(x - xe, y - ye);
+    if (remainingDistance <= 1) then
+      Break;
+    wind := Min(wind, remainingDistance);
+    windX := windX / SQRT_3 + (Random(Round(wind) * 2 + 1) - wind) / SQRT_5;
+    windY := windY / SQRT_3 + (Random(Round(wind) * 2 + 1) - wind) / SQRT_5;
+    if (remainingDistance < targetArea) then
+      step := (remainingDistance / 2) + (Random() * 6 - 3)
+    else if (traveledDistance < targetArea) then
+    begin
+      if (traveledDistance < 3) then
+        traveledDistance := 10 * Random();
+      step := traveledDistance * (1 + Random() * 3);
+    end
+    else
+      step := maxStep;
+    step := Min(step, maxStep);
+    if (step < 3) then
+      step := 3 + (Random() * 3);
+    veloX := veloX + windX;
+    veloY := veloY + windY;
+    veloX := veloX + gravity * (xe - x) / remainingDistance;
+    veloY := veloY + gravity * (ye - y) / remainingDistance;
+    if (Hypot(veloX, veloY) > step) then
+    begin
+      randomDist := step / 3.0 + (step / 2 * Random());
+      veloMag := sqrt(veloX * veloX + veloY * veloY);
+      veloX := (veloX / veloMag) * randomDist;
+      veloY := (veloY / veloMag) * randomDist;
+    end;
+    idle := (maxWait - minWait) * (Hypot(veloX, veloY) / maxStep) + minWait;
+    x := x + veloX;
+    y := y + veloY;
+    Self.Teleport(Round(x), Round(y));
+    Wait(Round(idle));
+  end;
+  Self.Teleport(Round(xe), Round(ye));
+end;
+
+
+procedure Drop();
+var
+  Slots: TIntegerArray;
+begin
+  if not RSClient.IsLoggedIn() then Exit;
+
+  if Inventory.ContainsItem("Coin pouch") then Inventory.ClickItem("Coin pouch");
+
+  while Inventory.FindItems(SEEDS_TO_DROP, Slots) do Inventory.ShiftDrop(Slots, Inventory.RandomPattern());
+end;
+
+procedure Eat();
+begin
+  if Script.IS_NINETYNINE then Exit;
+  if Script.ShouldEquipNeck() then Script.EquipNeck();
+  if Minimap.GetHPPercent() < 45 then Inventory.Consume(ERSConsumable.FOOD);
+end;
+procedure TScript.EatAtBank;
+var
+  foodItem : TRSBankItem;
+begin
+  foodItem := Self.Food;
+  if Minimap.GetHPPercent() > 85 then
+    Exit;
+  if not Inventory.CountItem(Food.Item) < QUANTITY_OF_FOOD then
+  begin
+    Bank.WithdrawItem(foodItem, True);
+    WaitUntil(Inventory.ContainsItem(foodItem.Item), 10, 2000);
+  end;
+
+  while Minimap.GetHPPercent() < 85 do
+  begin
+    if foodItem.Item = "Jug of wine" then
+      Inventory.ClickItem(foodItem.Item, 'Drink')
+    else
+       Inventory.ClickItem(foodItem.Item, 'Eat');
+    if not Inventory.ContainsItem(foodItem.Item) then
+      Break;
+  end;
+  if Minimap.GetHPPercent >= 85 then
+  begin
+    Bank.DepositRandomItems(["seed box", "Open seed box"]);
+   exit;
+  end;
+end;
+// Based off of TBaseBankScript.Withdraw
+//FROM FLIGHT
+procedure TScript.BankForFood();
+var
+  NecklaceBool, FoodBool:Boolean;
+  B: TBox;
+  Attempts : Int32;
+begin
+  if Self.IS_NINETYNINE then Exit;
+  Self.DebugLn("Attempting to bank.");
+  NecklaceBool := False;
+  FoodBool := False;
+  Attempts := 0; //Just in case.
+
+  Self.DebugLn("Bank is open!");
+
+  Bank.DepositRandomItems(["seed box", "Open seed box"]);
+  FoodBool :=  Inventory.CountItem(Self.Food.Item) >= QUANTITY_OF_FOOD;
+  if not Self.GET_DODGY and FoodBool then Exit;
+
+  Self.EatAtBank();
+ // FoodBool :=  Inventory.CountItem(Self.Food.Item) >= QUANTITY_OF_FOOD;//, 600, 1500);
+  while not FoodBool and (Attempts < 3) do
+  begin
+    FoodBool := Self.WithdrawBankItem(Self.Food);//, 600, 1500);
+    Writeln(Bank.Items.CountStack(Self.Food.Item));
+    if Bank.Items.CountStack(Self.Food.Item) < QUANTITY_OF_FOOD  then
+    begin
+      Writeln("Find item: ", Bank.FindItem(Self.Food.Item, B));
+      Writeln("Count of food item: ", Bank.Items.CountStack(Self.Food.Item));
+      Logout.ClickLogout();
+      Fatal(ToStr("Could not find the food.", Self.Food));
+    end;
+    Inc(Attempts);
+  end;
+
+  Attempts := 0;
+
+  NecklaceBool := Inventory.CountItem(Self.Necklace.Item) >= QUANTITY_OF_NECK;
+  if Self.GET_DODGY and not NecklaceBool then
+  begin
+   // Writeln("We are now attempting to grab the dodgy necklace");
+    NecklaceBool := Self.Withdraw(Self.Necklace, 3);//Self.WithdrawBankItem(Self.Necklace);
+    while not NecklaceBool and (Attempts < 3) do
+    begin
+      NecklaceBool := Self.WithdrawBankItem(Self.Necklace);
+      if Bank.Items.CountStack(Self.Necklace.Item) < QUANTITY_OF_NECK then
+      begin
+        Logout.ClickLogout();
+        Fatal("Could not find the necklaces.");
+      end;
+      Inc(Attempts);
+    end;
+  end else NecklaceBool := True;
+
+  Writeln("Necklaces: ", NecklaceBool);
+  Writeln("Foods: ", Foodbool);
+
+  if attempts >= 3 then
+  begin
+    Logout.ClickLogout();
+    Fatal("# of attempts to find things in your bank and withdraw them has exceeded 3.");
+  end;
+
+  if NecklaceBool and FoodBool then Bank.Close(True);
+
+  if not Bank.IsOpen() then
+  begin
+    if Self.Farmer.Loc = Hosidius then
+    begin
+      if not SRL.PointInRect(Map.Position(), Self.HosidiusHouse.ToRectangle) then
+      begin
+        if not Map.Walker.WebWalk(Self.Farmer.WalkTile) then
+          Fatal("Could not walk back to the tile.");
+      end;
+    end else
+    Map.walker.WebWalk(Self.Farmer.WalkTile);
+  end;
+end;
+procedure TSCript.SeedVaultDepositAllSeeds();
+var
+  DepositallBox : TBox;
+  AllItems : TRSItemArray;
+  Item : TRSItem;
+  Found : Boolean;
+begin
+  Allitems := Inventory.DiscoverAll();
+  if AllItems.Len < 1 then Exit;
+  for Item in AllItems do
+  begin
+    if ToStr(Item).EndsWith("box") then Continue;
+    if (Pos("seed", ToStr(Item)) > 0) then
+    begin
+      Writeln("Found a seed!");
+      Found := True;
+      Break;
+    end;
+  end;
+  if not Found then Exit;
+  Self.SeedVault.WalkClick();
+  WaitUntil(RSInterface.IsOpen(), 50, 50000);
+  DepositallBox := [460,292, 490, 322];
+  if BankPin.IsOpen(600) then BankPin.Enter(Login.GetPlayerPin());
+  if not RSInterface.IsOpen() then Exit;
+  Mouse.Move(DepositallBox.Center);
+  if Mainscreen.IsUpText(["Deposit All", "from Inventory"]) then
+    Mouse.Click(MOUSE_LEFT);
+end;
+procedure TScript.HandleBanking();
+begin
+  if (Minimap.GetCompassAngle() > 0) and (Self.Location <> ARDOUGNE) then Mouse.Click(Minimap.Orbs[ERSMinimapOrb.COMPASS].Bounds, MOUSE_LEFT);
+  if Self.IS_NINETYNINE then Exit;
+  RSClient.Image.Clear();
+
+  Drop();
+  case Self.Farmer.Loc of
+    Draynor:
+    begin
+      Map.Walker.WalkBlind([8272, 37438]);
+      if Banks.WalkOpen() then Self.BankForFood();
+    end;
+    FarmingGuild:
+    begin
+      if Self.UseSeedVault then
+      begin
+         Self.SeedVaultDepositAllSeeds();
+         Wait(250);
+         KeyBoard.PressKey(VK_ESCAPE);
+         Wait(250);
+         if Banks.WalkOpen() then Self.BankForFood();
+      end else if Banks.WalkOpen() then Self.BankForFood();
+    end;
+    Ardougne, Hosidius, Varrock: if Banks.WalkOpen() then Self.BankForFood();
+  end;
+end;
+
+
+function TScript.PointInHouse(point: TPoint): Boolean;
+begin
+  if Self.HosidiusHouse.Contains(point) then
+    exit(True);
+  Exit(False);
+end;
+//Taken from Bootje's Vyre thiever.
+function TScript.HoverDoor() : Boolean;
+var
+  MSRect : TRectangle;
+  TPA : TPointArray;
+  ATPA : T2DPointArray;
+  B:TBox;
+begin
+  MSRect := Map.GetTileMS(Map.Position, DOOR_TILE, 7).Expand(15);
+  B:= MSrect.Bounds;
+  B.LimitTo(Mainscreen.Bounds);
+  SRL.FindColors(TPA, CTS2(5855840, 1, 0.01, 0.01), B);
+  ATPA := TPA.Cluster(1);
+  ATPA.SortBySize(0, False);
+  for 1 to SRL.NormalRange(4, 6) do
+  begin
+    if Length(ATPA) < 1 then
+      Continue;
+    for TPA in ATPA do
+    begin
+      if SRL.Dice(50) then
+        Mouse.Move(TPA.mean)
+      else
+        Mouse.Move(TPA.randomValue());
+      if MainScreen.IsUpText('Door', 75) or Mainscreen.IsUpText("Gate", 75) then
+      begin
+        if Mainscreen.IsUpText('Close') then
+          self.DoorOpen := True;
+        if Mainscreen.IsUpText('Open') then
+          self.DoorOpen := False;
+        Exit(True);
+      end;
+    end;
+  end;
+  Wait(100, 150);
+  Antiban.RandomRotate();
+  Result := False;
+end;
+//Taken from Bootje's Vyre thiever.
+function TScript.OpenDoor(): Boolean;
+begin
+  Wait(300, 500);
+  Self.HoverDoor();
+  Wait(300, 500);
+  if Mainscreen.isUptext('Close') then
+  begin
+    DoorOpen := True;
+    Self.doorTimer.Restart();
+    Exit(True);
+  end;
+  if Mainscreen.isUptext('Open') then
+  begin
+    Mouse.Click(MOUSE_LEFT);
+    Result := True
+  end;
+  if not result then
+    Exit(False);
+  DoorOpen := True;
+  Self.doorTimer.Restart();
+  Wait(1500);
+  //Change with waituntil doorIsClosed later
+end;
+//Taken from Bootje's Vyre thiever.
+function TScript.CloseDoor(): Boolean;
+begin
+  Wait(300, 500);
+  Self.HoverDoor();
+  Wait(300, 500);
+  if Mainscreen.isUptext('Open') then
+  begin
+    DoorOpen := False;
+    Self.doorTimer.Restart();
+    Exit(True);
+  end;
+  if Mainscreen.isUptext('Close') then
+  begin
+    Mouse.Click(MOUSE_LEFT);
+    Result := True
+  end;
+  if not result then
+    Exit(False);
+  DoorOpen := False;
+  Self.doorTimer.Restart();
+  Wait(1500);
+  //Change with waituntil doorIsClosed later
+end;
+//Taken from vyre
+procedure TScript.HandleCannotReach(Pt : TPoint);
+var
+  Me : TPoint;
+begin
+  if WaitUntil(GotStunned(), 25, 1000) then Exit;
+  if Minimap.IsPlayerMoving(250) then Minimap.WaitPlayerMoving(250);
+  Me := Map.Position();
+  Writeln("Me in house: ", Self.PointInHouse(Me), ", Me is: ", Me);
+  Writeln("Pt in house: ", Self.PointInHouse(Pt), ", Pt is: ", Pt);
+
+  if Self.Farmer.Loc = HOSIDIUS then
+  begin
+    if InRange(Pt.DistanceTo(CANT_REACH_TILE), 0, 3) and (Self.PointInHouse(Me)) then
+    begin
+      Writeln("Found the master farmer in the house");
+      Map.Walker.WalkBlind(DOOR_TILE);
+      Self.CloseDoor();
+      Exit;
+    end;
+
+    if (Self.PointInHouse(Me) and not Self.PointInHouse(Pt)) or (not Self.PointInHouse(Me) and Self.PointInHouse(Pt)) then
+      Self.OpenDoor;
+  end else if Self.Farmer.Loc = ARDOUGNE then
+  begin
+    if Pt.InBox(ARD_POTATO_FIELD) and not Me.InBox(ARD_POTATO_FIELD) then
+    begin
+      Writeln("[Bot]: Attempting to walk to master farmer in ARD_POTATO_FIELD");
+      Map.Walker.WebWalk(ARD_POTATO_FIELD.Center());
+    end;
+  end;
+end;
+//YOINKED DIRECTLY FROM FLIGHT's MASTER FARMING SCRIPT FOUND ON VILLAVU
+//THANKS FLIGHT :)
+function TMasterFarmer.HandleGettingDraynorMasterFarmerTPA:TPointArray;
+var
+  pt: TPoint;
+  h,i: Int32;
+  found: Boolean;
+  ATPA,ETPA: T2DPointArray;
+  Exclude: TRSObjectFinder;
+begin
+  ATPA := MainScreen.FindObject(Self.Finder);
+  if ATPA.Len < 1 then Exit;
+
+  ATPA.SortByMiddle(Mainscreen.Center);
+  Result := ATPA[0];
+
+  Exclude.Colors += CTS2(1924630, 10, 0.21, 4.12);
+  Exclude.ClusterDistance := 5;
+
+  ETPA := MainScreen.FindObject(Exclude);
+
+  if (ATPA.Len < 1) and (ETPA.Len > 1) then
+  begin
+    WRiteln("[Bot]: No ATPA found for draynor master farmer, and dot detected under player.");
+    Mouse.move(Minimap.PointToMS(Minimap.Center));
+    if Mainscreen.IsUpText(["Master farmer"]) then
+      Exit([Minimap.PointToMS(Minimap.Center)])
+    else
+    begin
+      Map.Walker.WebWalk(Script.Farmer.WalkTile);
+      Exit;
+    end;
+  end;
+
+  //RSClient.Image.DrawATPA(ETPA);
+  if ETPA.Len > 0 then
+  begin
+    ETPA.SortByMiddle(Mainscreen.Center);
+    for h:=0 to high(ATPA) do
+    begin
+      pt := ATPA[h].Mean;
+      Found := True;
+      for i:=0 to high(ETPA) do
+      begin
+        if ETPA[i].Mean.DistanceTo(pt) < 20 then
+        begin
+        //  Writeln("<20");
+          Found := False;
+          // Break;
+        end;
+      end;
+
+      if Found then Exit(ATPA[h]);
+    end;
+  end;
+end;
+function TMasterFarmer.GetHosidiusMasterFarmerTile:TPoint;
+var
+  dots, candidates,farmerTPA: TPointArray;
+  dot,mspt: TPoint;
+begin
+  //Self.Debugln("Attempting to GetHosidiusMasterFarmerTile.");
+  RSClient.Image.Clear();
+    if not RSClient.IsLoggedIn() then Exit;
+  farmerTPA := Self.GetMasterFarmerTPA();
+  if farmerTPA.Len() > 20 then
+  begin
+    Writeln("Master farmer tpa found, length is: ", farmerTPA.Len);
+    mspt := Map.MS2Map(Map.Position(), farmerTPA.Mean());
+    Exit(msPt);
+  end;
+
+  dots := Minimap.GetNPCDots();
+  if Length(dots) < 1 then
+    Exit;
+
+   for dot in dots do
+     if Script.HosidiusHouse.Contains(dot) or Script.PointInHouse(dot) then
+     begin
+      candidates += dot;
+     end;
+
+   Candidates.Sort([Script.HosidiusHouse.X2, Script.HosidiusHouse.Y2]);
+
+ // WriteLn("Candidates length in the main hosidius house is: "+ tostr(candidates.Len()));
+
+   //Self.DebugDots(candidates);
+
+   if candidates.Len < 2 then
+   begin
+    Writeln("Candidates length is less than 2, finding ms dot from map");
+    candidates := [];
+
+    if Minimap.YellowDotUnder() then
+    begin
+      Writeln("Found yellow dot under me, using that.");
+      Exit(Map.MM2Map(Minimap.Center));
+    end;
+
+    dots := Minimap.GetNPCDots();
+    for dot in dots do
+      if not Script.HosidiusHouse.Contains(dot) then
+        candidates += dot;
+
+     //Self.DebugDots(candidates);
+
+     if candidates.Len() >= 1 then
+      Exit(RSTranslator.NormalizeNearestTile(candidates.NearestPoint(Map.Position)));
+   end else
+    Exit(RSTranslator.NormalizeNearestTile(candidates.NearestPoint(Map.Position())));
+ //   Result := RSTranslator.NormalizeNearestTile(candidates.NearestPoint(Map.Position()));
+end;
+function TMasterFarmer.GetMasterFarmerTPA():TPointArray;
+var
+  ATPA : T2DPointArray;
+  TPA : TPointArray;
+  Attempts : Int32;
+begin
+  if not RSClient.IsLoggedIn() then Exit;
+  if Loc = Draynor then
+  begin
+   TPA := HandleGettingDraynorMasterFarmerTPA();
+   if TPA.Len > 0 then Exit(TPA);
+  end;
+
+  if Minimap.YellowDotUnder() then
+  begin
+    Writeln("[Bot]: Yellow dot underneath player.");
+    Mouse.Move(Minimap.PointToMSRect(Minimap.Center));
+    if Mainscreen.IsUpText(['ocket Master','Pickpocket Mast','et M','r Far']) then
+    begin
+      Mouse.Click(MOUSE_LEFT);
+      Exit;
+    end;
+  end;
+
+  ATPA := Mainscreen.FindObject(Self.Finder, Mainscreen.Bounds);
+  while (ATPA.Len < 1) and (Attempts < 3) do
+  begin
+    if Attempts > 1 then Antiban.RandomRotate();
+    ATPA := Mainscreen.FindObject(Self.Finder, Mainscreen.Bounds);
+    if ATPA.Len > 1 then Break;
+    Inc(Attempts);
+  end;
+
+  ATPA.FilterSize(1, __GT__);
+  ATPA.SortByMiddle(Mainscreen.Center);
+
+  Result := ATPA.Biggest;
+end;
+function TMasterFarmer.GetMasterFarmerPoint() : TPoint;
+var
+  TPA : TPointArray;
+  TestPT : TPoint;
+  MSRect : TRectangle;
+begin
+  if not RSClient.IsLoggedIn() then Exit;
+  case Loc of
+    Draynor:
+    begin
+      TPA := Self.GetMasterFarmerTPA();
+      if TPA.Len() < 1 then
+      begin
+        Writeln("In draynor and no TPA found");
+
+        if InRange(Minimap.GetCompassAngle(), 180, 190) then
+          Minimap.RotateWithinAngles(0, 90)
+        else
+          Minimap.RotateWithinAngles(180, 190);
+
+        TPA := Self.GetMasterFarmerTPA();
+        if TPA.Len < 1 then //Bad don't do this.
+        begin
+          Map.Walker.WebWalk(Self.WalkTile);
+          TPA := Self.GetMasterFarmerTPA();
+          Result := TPA.Median();
+        end else
+          Result := TPA.Median();
+      end else
+      begin
+       // Self.DisplayMSTile(TPA, 4);         '
+        if TPA.Median().X < 1 then
+        begin
+          Writeln("The farmer point appears to be off the screen.");
+          Exit;
+        end;
+        Result := TPA.Median();
+      end;
+    end;
+
+    Hosidius:
+    begin
+      TestPt := Self.GetHosidiusMasterFarmerTile();
+      Script.HandleCannotReach(TestPt);
+      if (TestPt.X < 5) and not GotStunned  then
+      begin
+        Writeln("Could not find master farmer, rotating the camera");
+        Antiban.RandomRotate();
+        Exit;
+      end;
+      if Script.PointInHouse(TestPt) then
+      begin
+        Writeln("Master farmer back in house, resetting timer.");
+        Script.MasterFarmerTimer.Restart();
+      end;
+      if Minimap.IsPlayerMoving(250) then
+        Minimap.WaitPlayerMoving(250);
+
+      MSRect := Map.Walker.GetRectMS(Map.Position(), TestPt);
+      MsRect := MSRect.Expand(Mainscreen.NormalizeDistance(6));
+
+      RSClient.Image.DrawRect(MSRect, clAqua);
+
+      Result := MSRect.Mean();
+    end;
+
+    Ardougne:
+    begin
+      TPA := Self.GetMasterFarmerTPA();
+      if TPA.Len() < 1 then
+      begin
+        if Minimap.YellowDotUnder() then
+          FarmerPt := Minimap.PointToMS(Minimap.Center)
+        else
+        begin
+          if InRange(Minimap.GetCompassAngle(), 180, 190) then
+            Minimap.RotateWithinAngles(0, 90)
+          else
+            Minimap.RotateWithinAngles(180, 190);
+          TPA := Self.GetMasterFarmerTPA();
+          Result := TPA.Median;
+        end;
+        //Exit;
+      end else
+        Result := TPA.Median;
+    end;
+
+    FarmingGuild:
+    begin
+      TPA := Self.GetMasterFarmerTPA();
+      if TPA.Len() < 1 then
+      begin
+        Minimap.RotateWithinAngles(180, 210);
+        Exit;
+      end;
+      Result := TPA.Median().Random(-5, 5, True);
+    end;
+
+    Varrock:
+    begin
+      TPA := Self.GetMasterFarmerTPA();
+      MSRect := TPA.MinAreaRect().Expand(Mainscreen.NormalizeDistance(9));
+      if TPA.Len() < 1 then
+      begin
+        Minimap.RotateWithinAngles(0, 25);
+        Exit;
+      end;
+      Result := MSRect.Mean();
+    end;
+  end;
+end;
+
+
+
+function HumanWait(BaseMs: Integer): Int32;
+var
+  elapsed, timeLeft, fatigueFactor, randomness: Double;
+  dynamicWait: Double;
+  minWait, maxWait: Int32;
+begin
+  elapsed := GetTimeRunning();
+
+  if Length(Antiban.Breaks) < 1 then
+  begin
+    Wait(basems);
+    Exit;
+  end;
+
+  timeLeft := Round(Antiban.Breaks[0].NextAtTime) - elapsed;
+  if timeLeft < 1 then timeLeft := 1;
+
+  fatigueFactor := Sqr(elapsed / (elapsed + timeLeft));
+
+  randomness := Random(-0.2, 0.2);
+
+  dynamicWait := BaseMs * (1 + fatigueFactor) * (1 + randomness);
+
+  minWait := Round(BaseMs * 0.5);
+  maxWait := Round(BaseMs * 3);
+  if dynamicWait < minWait then dynamicWait := minWait;
+  if dynamicWait > maxWait then dynamicWait := maxWait;
+
+  Result := Round(dynamicWait);
+  Wait(Result);
+end;
+procedure TMasterFarmer.SnapAndClick(Pt : Tpoint);
+var
+  UpTextOK : Boolean := Mainscreen.IsUpText(['ocket Master','Pickpocket Mast','et M','r Far']);
+  Success : Boolean;
+begin
+  if (Self.LastFarmerPt.X >= 0) and (Self.LastFarmerPt.DistanceTo(Pt) < 5) and UpTextOK then
+  begin
+    Mouse.Click(MOUSE_LEFT);
+    Success := Mainscreen.DidRedClick() and XPBar.EarnedXP();
+    if Success then Inc(Script.Clicks);
+    HumanWait(300);
+    Exit;
+  end else
+  begin
+    Mouse.Move(Pt);
+    UpTextOk :=  Mainscreen.IsUpText(['ocket Master','Pickpocket Mast','et M','r Far']);
+    if UpTextOk then
+    begin
+      Mouse.Click(MOUSE_LEFT);
+      Success := Mainscreen.DidRedClick() and XPBar.EarnedXP();
+      if Success then Inc(Script.Clicks);
+      HumanWait(300);
+    end;
+  end;
+end;
+
+procedure TMasterFarmer.Thief;
+var
+  Me: TPoint;
+begin
+  Me := Map.Position();
+  if Inventory.IsFull() then Exit;
+
+  // Tether if too far
+  if Map.Position.DistanceTo(Self.WalkTile) >= 25 then
+  begin
+    Writeln('[Bot]: Too far from walk tile, tethering back...');
+    Map.Walker.WebWalk(Self.WalkTile);
+  end;
+
+  if Loc = Hosidius then Minimap.RotateWithinAngles(90, 180);
+
+  // Find target
+  FarmerPt := Self.GetMasterFarmerPoint();
+  if FarmerPt.X < 5 then Exit;
+  Self.SnapAndClick(FarmerPt);
+  // First action: go for instant click if possible
+  if (Loc = Draynor) and not Mainscreen.IsUpText(['ocket Master','Pickpocket Mast','et M','r Far'])  then Exit;
+
+  // Post-click movement only if it actually happened
+  if Minimap.IsPlayerMoving() then
+  begin
+    Writeln('[Bot]: Waiting for player to move after click...');
+    Minimap.WaitPlayerMoving();
+  end;
+
+  // Main loop
+  while not Inventory.IsFull()  do
+  begin
+    Eat;
+    if ShouldBank() then Break;
+    // Draynor: handle combat/blocked messages (fix operator precedence)
+    if (Loc = Draynor) and
+     ((Map.Position.DistanceTo([8276, 37454]) >= 15) and
+      (Chat.GetMessage(CHAT_INPUT_LINE-1).Contains('can''t pickpocket') or
+       Chat.GetMessage(CHAT_INPUT_LINE-1).Contains('can''t steal from the market stall'))) then
+    begin
+      Writeln('Cannot steal here, relocating...');
+      Map.Walker.WalkBlind([8276, 37454]);
+      Wait(15 * ONE_SECOND);
+      Logout.ClickLogout();
+    end;
+
+    if (Loc = Hosidius) and (not Script.PointInHouse(Me) and Script.PointInHouse(FarmerPt)) then
+    begin
+      Writeln('Farmer moved into house; leaving thieving loop.');
+      Break;
+    end;
+
+    if (Chat.GetMessage(CHAT_INPUT_LINE-1) = CANT_REACH) and (Loc = Hosidius) then
+    begin
+      Writeln('Cannot reach farmer; trying door.');
+      if Map.Walker.WalkBlind(DOOR_TILE) then
+        Script.CloseDoor();
+      Exit;
+    end;
+
+    if XPBar.EarnedXP(False) then
+    begin
+      repeat
+        if Inventory.IsFull() then Exit;
+
+        FarmerPt := Self.GetMasterFarmerPoint;
+        if FarmerPt.X < 5 then Exit;
+
+        Self.SnapAndClick(FarmerPt);
+      until not XPBar.EarnedXP(False);
+
+    end
+    else
+    begin
+
+      FarmerPt := Self.GetMasterFarmerPoint;
+      if FarmerPt.X < 5 then Exit;
+
+      Self.SnapAndClick(FarmerPt);
+    end;
+
+    if Minimap.IsPlayerMoving() then Minimap.WaitPlayerMoving();
+
+    Self.LastFarmerPt := FarmerPt;
+  end;
+
+  Self.LastFarmerPt := FarmerPt;
+  RSClient.Image.Clear();
+end;
+
+function TScript.GetState(): EState;
+begin
+  if not RSClient.IsLoggedIn() then Login.LoginPlayer();
+  if GotStunned() then Exit(EState.STUNNED);
+  HandleCannotReach(Map.Position());
+  if Self.DoorTimer.IsFinished then Self.DoorOpen := False;
+
+  if Chat.GetScrollPosition() <= 100 then Chat.SetScrollPosition(100);
+
+  if (Minimap.PercentBlack >= 15) and (Self.Location = Hosidius) then
+  begin
+    Logout.ClickLogout;
+    Fatal("Went up the ladder by accident or percent black is >= 15");
+  end;
+
+  if (Chat.GetMessage(CHAT_INPUT_LINE-1) = CANT_REACH) and
+      Map.Position().InBox(Box([6440, 36938], [6396, 37034])) and //Ardougne potato farm
+      (Self.Location = ARDOUGNE) then
+  begin
+    Writeln("In the potato farm area of Ardougne, attempting to handle the gate");
+    Map.Walker.WebWalk(Self.Farmer.WalkTile);
+  end;
+
+  if Minimap.GetRunEnergy() >= 50 then Minimap.EnableRun();
+
+  if Inventory.IsFull then Exit(EState.DROPPING);
+
+  if Self.GET_DODGY and Self.ShouldEquipNeck() then Exit(EState.EQUIP_NECK);
+
+  if ShouldBank() then Exit(EState.BANKING);
+
+  if (ReportTimer.ElapsedTime() > 60000) or (APIClient.TImer.IsFinished) then PrintProgress();
+
+  if not Antiban.DoAntiban then Exit(EState.THIEVING);
+end;
+
+procedure TScript.Run();
+begin
+
+  repeat
+    Self.State := Self.GetState();
+    Writeln("[State]: ", State);
+    case State of
+      EState.BANKING: Self.HandleBanking();
+      EState.THIEVING: Farmer.Thief();
+      EState.DROPPING: Drop();
+      EState.STUNNED: HandleStunned();
+      EState.EQUIP_NECK: Self.EquipNeck();
+      EState.NONE: WaitEx(300, 50);
+    end;
+    RSClient.Image.Clear();
+    Wait(50, 25);
+  until Self.Runtimer.IsFinished;
+end;
+
+begin
+Script.GUI.Run();
+Script.Init(WLSettings.MaxActions, WLSettings.MaxTime);
+Script.Run();
+end.
