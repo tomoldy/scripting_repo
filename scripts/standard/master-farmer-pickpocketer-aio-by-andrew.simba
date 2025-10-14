@@ -11,8 +11,11 @@ const
   YOUVE_BEEN_STUNNED = "You've been stunned!";
   FAILED = "You fail to pick the Master Farmer's pocket.";
   CANT_REACH = "I can't reach that!";
+  NORMAL_HUMAN_WAIT_BASE = 300;
+  SLOW_HUMAN_WAIT_BASE = 900;
 type
   EState = (NONE, THIEVING, BANKING, DROPPING, STUNNED, EQUIP_NECK);
+  TStringArray = array of String;
   TMasterFarmer = record
     Loc : Int32; //The location for which this master farmer in particular, will be found.
     Uptext : String; //The master farmer uptext.
@@ -58,6 +61,11 @@ type
     SeedVault : TRSObjectV2;
     Clicks, gDeltaClicks: Int32;
     SavedCustomBreakDuration, SavedCustomBreakInterval : Integer;
+    SlowHandlingSeeds: TStringArray;
+    SlowHandlingSeedCounts: TIntegerArray;
+    SlowHandlingTrackerReady: Boolean;
+    SlowLootWaitActive: Boolean;
+    SlowLootLastSeed: String;
   end;
 const
 
@@ -181,6 +189,50 @@ begin
   end;
 end;
 
+function TrimEdges(const S: String): String;
+var
+  startIdx, endIdx: Int32;
+begin
+  startIdx := 1;
+  endIdx := Length(S);
+
+  while (startIdx <= endIdx) and (S[startIdx] <= ' ') do
+    Inc(startIdx);
+
+  while (endIdx >= startIdx) and (S[endIdx] <= ' ') do
+    Dec(endIdx);
+
+  Result := Copy(S, startIdx, endIdx - startIdx + 1);
+end;
+
+function ParseSeedList(const Text: String): TStringArray;
+var
+  i: Int32;
+  current: String;
+
+  procedure PushCurrent();
+  var
+    trimmed: String;
+  begin
+    trimmed := TrimEdges(current);
+    if trimmed <> '' then
+      Result += [trimmed];
+    current := '';
+  end;
+
+begin
+  current := '';
+  for i := 1 to Length(Text) do
+  begin
+    if Text[i] = ',' then
+      PushCurrent()
+    else
+      current += Text[i];
+  end;
+
+  PushCurrent();
+end;
+
 procedure TScriptGUI.OverrideBreaksCheckboxChanged({$H-}sender: TObject){$H+};
 begin
   Self.CustomBreakIntervalInput.SetEnabled(Self.OverrideBreaksCheckBox.IsChecked());
@@ -203,6 +255,16 @@ begin
     SetTop(TControl.AdjustToDPI(185));
     SetCaption('Run for(in minutes):');
     SetText('300');
+  end;
+  with Self.SeedRemovalInput do
+  begin
+    Create(Tab);
+    SetCaption('Slow handling seeds:');
+    SetTooltip('Comma-separated list of seeds that should trigger slower post-loot handling.');
+    SetLeft(TControl.AdjustToDPI(30));
+    SetTop(TControl.AdjustToDPI(230));
+    SetWidth(TControl.AdjustToDPI(320));
+    SetText('');
   end;
   with Self.FoodInput do
   begin
@@ -370,6 +432,14 @@ begin
   Self.NeckNumInput.SetEnabled(False);
 
   Script.Necklace := [NAME_OF_NECK, QUANTITY_OF_NECK, False];
+
+  Script.SlowHandlingSeeds := ParseSeedList(Self.SeedRemovalInput.GetText());
+  SetLength(Script.SlowHandlingSeedCounts, Length(Script.SlowHandlingSeeds));
+  Script.SlowHandlingTrackerReady := False;
+  Script.SlowLootWaitActive := False;
+  Script.SlowLootLastSeed := '';
+  if Length(Script.SlowHandlingSeeds) > 0 then
+    Writeln('[GUI]: Slow handling seeds configured: ', Self.SeedRemovalInput.GetText());
 
   if not TryParsePositiveInt(Self.RunForInput.GetText(), Script.RunFor) then
   begin
@@ -1740,24 +1810,31 @@ end;
 
 function HumanWait(BaseMs: Integer): Int32;
 var
-  elapsed, timeLeft, fatigueFactor, randomness: Double;
+  elapsed, timeLeft, fatigueFactor, randomnessRange, randomness: Double;
   dynamicWait: Double;
   minWait, maxWait: Int32;
 begin
+  if BaseMs < 1 then
+    BaseMs := NORMAL_HUMAN_WAIT_BASE;
+
   elapsed := GetTimeRunning();
 
   if Length(Antiban.Breaks) < 1 then
+    timeLeft := BaseMs
+  else
   begin
-    Wait(basems);
-    Exit;
+    timeLeft := Round(Antiban.Breaks[0].NextAtTime) - elapsed;
+    if timeLeft < 1 then
+      timeLeft := 1;
   end;
-
-  timeLeft := Round(Antiban.Breaks[0].NextAtTime) - elapsed;
-  if timeLeft < 1 then timeLeft := 1;
 
   fatigueFactor := Sqr(elapsed / (elapsed + timeLeft));
 
-  randomness := Random(-0.2, 0.2);
+  randomnessRange := 0.2;
+  if BaseMs > NORMAL_HUMAN_WAIT_BASE then
+    randomnessRange := 0.45;
+
+  randomness := Random(-randomnessRange, randomnessRange);
 
   dynamicWait := BaseMs * (1 + fatigueFactor) * (1 + randomness);
 
@@ -1779,7 +1856,6 @@ begin
     Mouse.Click(MOUSE_LEFT);
     Success := Mainscreen.DidRedClick() and XPBar.EarnedXP();
     if Success then Inc(Script.Clicks);
-    HumanWait(300);
     Exit;
   end else
   begin
@@ -1790,7 +1866,6 @@ begin
       Mouse.Click(MOUSE_LEFT);
       Success := Mainscreen.DidRedClick() and XPBar.EarnedXP();
       if Success then Inc(Script.Clicks);
-      HumanWait(300);
     end;
   end;
 end;
@@ -1798,9 +1873,89 @@ end;
 procedure TMasterFarmer.Thief;
 var
   Me: TPoint;
+
+  procedure InitializeSlowSeedTracker();
+  var
+    idx: Int32;
+  begin
+    if Length(Script.SlowHandlingSeeds) = 0 then Exit;
+    if Script.SlowHandlingTrackerReady then Exit;
+
+    Inventory.Open();
+    for idx := 0 to High(Script.SlowHandlingSeeds) do
+      Script.SlowHandlingSeedCounts[idx] := Inventory.CountItem(Script.SlowHandlingSeeds[idx]);
+
+    Script.SlowHandlingTrackerReady := True;
+    Script.SlowLootWaitActive := False;
+    Script.SlowLootLastSeed := '';
+  end;
+
+  procedure UpdateSlowSeedTracker();
+  var
+    idx, count: Int32;
+    gained: Boolean;
+    newSeeds: String;
+  begin
+    if Length(Script.SlowHandlingSeeds) = 0 then Exit;
+
+    if not Script.SlowHandlingTrackerReady then
+      InitializeSlowSeedTracker();
+
+    if not Script.SlowHandlingTrackerReady then Exit;
+
+    gained := False;
+    newSeeds := '';
+
+    Inventory.Open();
+
+    for idx := 0 to High(Script.SlowHandlingSeeds) do
+    begin
+      count := Inventory.CountItem(Script.SlowHandlingSeeds[idx]);
+      if count > Script.SlowHandlingSeedCounts[idx] then
+      begin
+        if newSeeds = '' then
+          newSeeds := Script.SlowHandlingSeeds[idx]
+        else
+          newSeeds := newSeeds + ', ' + Script.SlowHandlingSeeds[idx];
+        gained := True;
+      end;
+      Script.SlowHandlingSeedCounts[idx] := count;
+    end;
+
+    if gained then
+    begin
+      Script.SlowLootWaitActive := True;
+      Script.SlowLootLastSeed := newSeeds;
+      Writeln('[Bot]: Detected new slow-handling seed(s): ', newSeeds);
+    end;
+  end;
+
+  procedure HandlePostPickpocket();
+  var
+    waitBase: Int32;
+    slowSeedInfo: String;
+  begin
+    UpdateSlowSeedTracker();
+
+    waitBase := NORMAL_HUMAN_WAIT_BASE;
+    if Script.SlowLootWaitActive then
+    begin
+      waitBase := SLOW_HUMAN_WAIT_BASE;
+      slowSeedInfo := Script.SlowLootLastSeed;
+      if slowSeedInfo <> '' then
+        Writeln('[Bot]: Applying slow handling wait after looting ', slowSeedInfo, '.');
+      Script.SlowLootWaitActive := False;
+      Script.SlowLootLastSeed := '';
+    end;
+
+    HumanWait(waitBase);
+  end;
+
 begin
   Me := Map.Position();
   if Inventory.IsFull() then Exit;
+
+  InitializeSlowSeedTracker();
 
   // Tether if too far
   if Map.Position.DistanceTo(Self.WalkTile) >= 25 then
@@ -1820,6 +1975,7 @@ begin
     Exit;
   end;
   Self.SnapAndClick(FarmerPt);
+  HandlePostPickpocket();
   // First action: go for instant click if possible
   if (Loc = Draynor) and not Mainscreen.IsUpText(['ocket Master','Pickpocket Mast','et M','r Far'])  then Exit;
 
@@ -1876,6 +2032,7 @@ begin
         end;
 
         Self.SnapAndClick(FarmerPt);
+        HandlePostPickpocket();
       until not XPBar.EarnedXP(False);
 
     end
@@ -1890,6 +2047,7 @@ begin
       end;
 
       Self.SnapAndClick(FarmerPt);
+      HandlePostPickpocket();
     end;
 
     if Minimap.IsPlayerMoving() then Minimap.WaitPlayerMoving();
