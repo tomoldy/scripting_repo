@@ -154,6 +154,26 @@ begin
   dodgyEnabled := Self.GetDodgyCheckBox.IsChecked();
   Self.NeckNumInput.SetEnabled(dodgyEnabled);
 end;
+
+function TryParsePositiveInt(const S: string; out Value: Int32): Boolean;
+var
+  i: Int32;
+begin
+  Result := Length(S) > 0;
+  if not Result then Exit;
+
+  for i := 1 to Length(S) do
+    if not (S[i] in ['0'..'9']) then
+      Exit(False);
+
+  try
+    Value := StrToInt(S);
+    Result := True;
+  except
+    Result := False;
+  end;
+end;
+
 procedure TScriptGUI.OverrideBreaksCheckboxChanged({$H-}sender: TObject){$H+};
 begin
   Self.CustomBreakIntervalInput.SetEnabled(Self.OverrideBreaksCheckBox.IsChecked());
@@ -314,33 +334,69 @@ begin
   Script.Location := Self.LocationInput.GetItemIndex();
 
   if Self.FoodNumInput.Edit.IsEnabled() then
-    QUANTITY_OF_FOOD := StrToInt(Self.FoodNumInput.GetText)
-  else
+  begin
+    if not TryParsePositiveInt(Self.FoodNumInput.GetText(), QUANTITY_OF_FOOD) then
+    begin
+      Self.FoodNumInput.Edit.SetFocus();
+      Exit;
+    end;
+  end else
     QUANTITY_OF_FOOD := 10;
 
   Script.Food := [Self.FoodInput.GetText(), QUANTITY_OF_FOOD, False];
 
   Self.NeckNumInput.SetEnabled(False);
   if Self.NeckNumInput.Edit.IsEnabled() then
-    QUANTITY_OF_NECK := StrToInt(Self.NeckNumInput.GetText)
-  else
+  begin
+    if not TryParsePositiveInt(Self.NeckNumInput.GetText(), QUANTITY_OF_NECK) then
+    begin
+      Self.NeckNumInput.Edit.SetFocus();
+      Exit;
+    end;
+  end else
     QUANTITY_OF_NECK := 4;
 
   Script.Necklace := [NAME_OF_NECK, QUANTITY_OF_NECK, False];
 
-  Script.RunFor := StrToInt(Self.RunForInput.GetText());
+  if not TryParsePositiveInt(Self.RunForInput.GetText(), Script.RunFor) then
+  begin
+    Self.RunForInput.Edit.SetFocus();
+    Exit;
+  end;
  { if Self.GetTab("Antiban Manager").IsChecked() then
   begin
-    Script.SavedCustomBreakDuration := StrToInt(Self.CustomBreakDurationInput.GetText());
-    Script.SavedCustomBreakInterval := StrToInt(Self.CustomBreakIntervalInput.GetText());
+    if not TryParsePositiveInt(Self.CustomBreakDurationInput.GetText(), Script.SavedCustomBreakDuration) then
+    begin
+      Self.CustomBreakDurationInput.Edit.SetFocus();
+      Exit;
+    end;
+
+    if not TryParsePositiveInt(Self.CustomBreakIntervalInput.GetText(), Script.SavedCustomBreakInterval) then
+    begin
+      Self.CustomBreakIntervalInput.Edit.SetFocus();
+      Exit;
+    end;
   end;
   }
   Writeln("Self.OverrideBreaksCheckBox.IsChecked(): ", Self.OverrideBreaksCheckBox.IsChecked());
   Script.OverrideBreaks := Self.OverrideBreaksCheckBox.IsChecked();
   if Script.OverrideBreaks then
   begin
-    Script.SavedCustomBreakDuration := StrToInt(Self.CustomBreakDurationInput.GetText());
-    Script.SavedCustomBreakInterval := StrToInt(Self.CustomBreakIntervalInput.GetText());
+    if not TryParsePositiveInt(Self.CustomBreakDurationInput.GetText(), Script.SavedCustomBreakDuration) then
+    begin
+      Self.CustomBreakDurationInput.Edit.SetFocus();
+      Exit;
+    end;
+
+    if not TryParsePositiveInt(Self.CustomBreakIntervalInput.GetText(), Script.SavedCustomBreakInterval) then
+    begin
+      Self.CustomBreakIntervalInput.Edit.SetFocus();
+      Exit;
+    end;
+  end else
+  begin
+    Script.SavedCustomBreakDuration := 0;
+    Script.SavedCustomBreakInterval := 0;
   end;
 
   Script.IS_NINETYNINE := Self.Is99Checkbox.IsChecked();
