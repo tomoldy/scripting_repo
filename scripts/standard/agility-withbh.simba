@@ -4619,11 +4619,9 @@ begin
   ReturnSpell := ERSSpell.CAMELOT_TELEPORT;
 end;
 
-procedure Initiate();
-var
-  Ultracomposts: Int32;
-  ActiveHerbSeed, ActiveFlowerSeed: TRSItem;
+procedure ValidateStartupState();
 begin
+  // Side effects: ensures the client is logged in, updates StartXP, configures options, and may initialize BirdHouseRunner.
   if not RSClient.IsLoggedIn() then
     Login.LoginPlayer();
 
@@ -4653,7 +4651,14 @@ begin
 
   if DoBirdhouseRuns then
     BirdHouseRunner.Init();
+end;
 
+procedure ConfigureFarmRun();
+var
+  Ultracomposts: Int32;
+  ActiveHerbSeed, ActiveFlowerSeed: TRSItem;
+begin
+  // Side effects: resets farm inventory indices, populates FarmItems, and initializes farm timers and debug logging.
   HerbSeedItemIndex := -1;
   FlowerSeedItemIndex := -1;
 
@@ -4667,7 +4672,7 @@ begin
     if HosidiusHerb then
     begin
       Farm.AddPatch(EFarmPatch.HOSIDIOUS_HERB, ETravelMethod.HOUSE_TELEPORT, ActiveHerbSeed);
-      Inc(UltraComposts);
+      Inc(Ultracomposts);
     end;
 
     if HosidiusFlower then
@@ -4692,7 +4697,7 @@ begin
       ECompostMethod.ULTRA:
       begin
         FarmItems += 'Ultracompost';
-        FarmItemAmounts += UltraComposts;
+        FarmItemAmounts += Ultracomposts;
       end;
     end;
 
@@ -4751,7 +4756,11 @@ begin
 
   if BirdhouseRuns or FarmRuns then
     InfoTimer.Start();
+end;
 
+procedure ConfigureAntibanAndInput();
+begin
+  // Side effects: configures course navigation, antiban timing, mouse speed, and real input blocking flags.
   AgilityRSW.SetupRegions([[0, 4000, 1500, 5700], [2142, 1984, 2705, 2650], [5228, 2000, 8600, 4000], [8710, 558, 10236, 1758]]);
   BankBooth.SetupUpText(['nk boo','Bank booth']);
 
@@ -4784,7 +4793,11 @@ begin
     RSClient.RemoteInput.EnableRealInput();
     RealInputBlocked := False;
   end;
+end;
 
+procedure ConfigureReturnItems();
+begin
+  // Side effects: adjusts the return inventory profile and starts inactivity/report timers.
   if UseRunePouch then
   begin
     ReturnItems := ['Rune pouch'];
@@ -4799,6 +4812,14 @@ begin
 
   InactivityTimer.Start();
   ReportTimer.Start();
+end;
+
+procedure Initiate();
+begin
+  ValidateStartupState();
+  ConfigureFarmRun();
+  ConfigureAntibanAndInput();
+  ConfigureReturnItems();
 end;
 
 function GetStep(): Int32;
