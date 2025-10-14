@@ -2044,7 +2044,7 @@ var
 
     slotBox := Inventory.GetSlotBox(hoverSlot);
     RSClient.Image.Clear();
-    RSClient.Image.DrawRect(slotBox, clLime);
+    RSClient.Image.DrawBox(slotBox, clLime);
     RSClient.Image.DrawCross(point, 5, clYellow);
     textPoint := Point(slotBox.X1, slotBox.Y1 - 12);
     if textPoint.Y < 0 then
