@@ -408,8 +408,6 @@ end;
 
 procedure TScriptGUI.StartScript(Sender: TObject); override;
 var
-  IntervalText, DurationText: String;
-  ParsedInterval, ParsedDuration: Int32;
   DodgyEnabled: Boolean;
 begin
   Script.Location := Self.LocationInput.GetItemIndex();
