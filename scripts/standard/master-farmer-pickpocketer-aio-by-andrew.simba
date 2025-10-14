@@ -178,13 +178,6 @@ procedure TScriptGUI.OverrideBreaksCheckboxChanged({$H-}sender: TObject){$H+};
 begin
   Self.CustomBreakIntervalInput.SetEnabled(Self.OverrideBreaksCheckBox.IsChecked());
   Self.CustomBreakDurationInput.SetEnabled(Self.OverrideBreaksCheckBox.IsChecked());
-
-  if not Self.CustomBreakIntervalInput.Edit.IsEnabled() or
-     not self.CustomBreakDurationInput.Edit.IsEnabled() then
-  begin
-    Self.CustomBreakIntervalInput.SetText("");
-    Self.CustomBreakDurationInput.SetText("");
-  end;
 end;
 procedure TScriptGUI.Run(); override;
 var
@@ -311,6 +304,9 @@ begin
       SetHint('How often to take breaks (e.g., 60 = every hour). Includes 25% randomness.');
       Edit.SetOnKeyPress(@Edit.NumberField);
       SetEnabled(False);
+      if Script.SavedCustomBreakInterval <= 0 then
+        Script.SavedCustomBreakInterval := 60;
+      SetText(IntToStr(Script.SavedCustomBreakInterval));
     end;
 
     with Self.CustomBreakDurationInput do
@@ -323,6 +319,9 @@ begin
       SetHint('How long breaks should last (e.g., 5 = 5 minute break). Includes 33% randomness.');
       Edit.SetOnKeyPress(@Edit.NumberField);
       SetEnabled(False);
+      if Script.SavedCustomBreakDuration <= 0 then
+        Script.SavedCustomBreakDuration := 5;
+      SetText(IntToStr(Script.SavedCustomBreakDuration));
     end;
 
   end;
@@ -330,6 +329,9 @@ begin
 end;
 
 procedure TScriptGUI.StartScript(Sender: TObject); override;
+var
+  IntervalText, DurationText: String;
+  ParsedInterval, ParsedDuration: Int32;
 begin
   Script.Location := Self.LocationInput.GetItemIndex();
 
