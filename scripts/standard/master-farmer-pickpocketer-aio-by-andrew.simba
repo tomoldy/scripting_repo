@@ -117,6 +117,23 @@ const
 var
   Script: TScript;
 
+function CanDrawOverlay(): Boolean; inline;
+begin
+  Result := RSClient.IsLoggedIn() and (RSClient.Image <> nil);
+end;
+
+procedure SafeClearOverlay(); overload;
+begin
+  if not CanDrawOverlay() then Exit;
+  RSClient.Image.Clear();
+end;
+
+procedure SafeClearOverlay(const area: TRectangle); overload;
+begin
+  if not CanDrawOverlay() then Exit;
+  RSClient.Image.Clear(area);
+end;
+
 procedure TScript.HandleBanking(); forward;
 procedure TScript.ScheduleCameraNudge(MinDelay, MaxDelay: Int32); forward;
 procedure TScript.TryCameraNudge(Force: Boolean = False); forward;
@@ -784,8 +801,11 @@ begin
 
   if MainScreen.Bounds.Contains(Tile) then
   begin
-    RSClient.Image.Clear(Mainscreen.Bounds);
-    RSClient.Image.DrawRect(Tile, clAqua);
+    if CanDrawOverlay() then
+    begin
+      SafeClearOverlay(Mainscreen.Bounds);
+      RSClient.Image.DrawRect(Tile, clAqua);
+    end;
   end;
 end;
 procedure TScript.DebugDots(TPA:TPointArray);
@@ -793,11 +813,13 @@ var
   I : Int32;
   Pt : TPoint;
 begin
-   for I := 0 to High(TPA) do
-   begin
+  if not CanDrawOverlay() then Exit;
+
+  for I := 0 to High(TPA) do
+  begin
     Pt := Map.Map2MM(TPA[I]);
     RSClient.Image.DrawCross(Pt, 5, clRed);
-   end;
+  end;
 end;
 function TScript.PointInBox(out Candidates: TPointArray; TPA : TPointArray; B : TBox): Boolean;
 var
@@ -1471,7 +1493,7 @@ end;
 procedure TScript.HandleBanking();
 begin
   if (Minimap.GetCompassAngle() > 0) and (Self.Location <> ARDOUGNE) then Mouse.Click(Minimap.Orbs[ERSMinimapOrb.COMPASS].Bounds, MOUSE_LEFT);
-  RSClient.Image.Clear();
+  SafeClearOverlay();
 
   case Self.Farmer.Loc of
     Draynor:
@@ -1690,8 +1712,8 @@ var
   dot,mspt: TPoint;
 begin
   //Self.Debugln("Attempting to GetHosidiusMasterFarmerTile.");
-  RSClient.Image.Clear();
-    if not RSClient.IsLoggedIn() then Exit;
+  if not RSClient.IsLoggedIn() then Exit;
+  SafeClearOverlay();
   farmerTPA := Self.GetMasterFarmerTPA();
   if farmerTPA.Len() > 20 then
   begin
@@ -1839,7 +1861,8 @@ begin
       MSRect := Map.Walker.GetRectMS(Map.Position(), TestPt);
       MsRect := MSRect.Expand(Mainscreen.NormalizeDistance(6));
 
-      RSClient.Image.DrawRect(MSRect, clAqua);
+      if CanDrawOverlay() then
+        RSClient.Image.DrawRect(MSRect, clAqua);
 
       Result := MSRect.Mean();
     end;
@@ -2117,7 +2140,9 @@ var
     if (hoverSlot < 0) or (hoverSlot > 27) then Exit;
 
     slotBox := Inventory.GetSlotBox(hoverSlot);
-    RSClient.Image.Clear();
+    if not CanDrawOverlay() then Exit;
+
+    SafeClearOverlay();
     RSClient.Image.DrawBox(slotBox, clLime);
     RSClient.Image.DrawCross(hoverPoint, 5, clYellow);
     textPoint := Point(slotBox.X1, slotBox.Y1 - 12);
@@ -2368,7 +2393,7 @@ begin
   if (Self.LastFarmerPt.X < 0) or (Self.LastFarmerPt.DistanceTo(FarmerPt) > 5) then
     Self.LastFarmerPt := FarmerPt;
   Script.TryCameraNudge();
-  RSClient.Image.Clear();
+  SafeClearOverlay();
 end;
 
 function TScript.GetState(): EState;
@@ -2428,7 +2453,7 @@ begin
       EState.EQUIP_NECK: Self.EquipNeck();
       EState.NONE: WaitEx(300, 50);
     end;
-    RSClient.Image.Clear();
+    SafeClearOverlay();
     Wait(50, 25);
   until Self.Runtimer.IsFinished;
 end;
