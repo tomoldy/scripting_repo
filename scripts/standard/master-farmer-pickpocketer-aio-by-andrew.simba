@@ -21,6 +21,7 @@ type
     Finder : TRSObjectFinder; //The finder to be used for finding the farmer
     RoamingBox : TBox; // The master farmers roam around in a specific area (box)
     LastFarmerPt, FarmerPt : TPoint;            //The resultant point.
+    CameraNudgeCountdown : TCountdown;
   end;
   TScriptGUI = record(TScriptForm)
    ScriptTitle :                                                    TLabel;
@@ -51,6 +52,8 @@ type
     MAX_RUN_TIME : Int32;
     StartTime : TDateTime;
     DoorTimer, MasterFarmerTimer, Runtimer : TCountdown;
+    CameraNudgeTimer : TCountdown;
+    LastCameraNudge : UInt32;
     DoorOpen,UseSeedVault, OverrideBreaks : Boolean;
     SeedVault : TRSObjectV2;
     Clicks, gDeltaClicks: Int32;
@@ -103,6 +106,10 @@ var
   Script: TScript;
 
 procedure TScript.HandleBanking(); forward;
+procedure TScript.ScheduleCameraNudge(MinDelay, MaxDelay: Int32); forward;
+procedure TScript.TryCameraNudge(Force: Boolean = False); forward;
+procedure TMasterFarmer.ResetCameraNudgeCountdown(); forward;
+procedure TMasterFarmer.RequestExtraCameraNudge(); forward;
 //procedure OnMouseMoveEvent(Sender: PMouse; var X, Y: Double; var Done: Boolean); forward;
 function TRSXPBar.EarnedXP(reject: Boolean): Boolean; overload;
 begin
@@ -463,6 +470,76 @@ begin
     Result += dot;
   end;
 end;
+
+procedure TScript.ScheduleCameraNudge(MinDelay, MaxDelay: Int32);
+var
+  Delay: Int32;
+  MinValue, MaxValue: Int32;
+  TimeSince, RequiredDelay: Int64;
+begin
+  MinValue := MinDelay;
+  MaxValue := MaxDelay;
+
+  if MaxValue < MinValue then
+  begin
+    MinValue := MaxDelay;
+    MaxValue := MinDelay;
+  end;
+
+  if MinValue < ONE_SECOND then
+    MinValue := ONE_SECOND;
+
+  if (MaxValue > 0) and (MaxValue < ONE_SECOND) then
+    MaxValue := ONE_SECOND;
+
+  if (MaxValue <= 0) or (MaxValue = MinValue) then
+    Delay := MinValue
+  else
+    Delay := RandomRange(MinValue, MaxValue + 1);
+
+  if Self.LastCameraNudge > 0 then
+  begin
+    TimeSince := Int64(GetTickCount()) - Int64(Self.LastCameraNudge);
+    if TimeSince < 0 then
+      TimeSince := Int64(High(UInt32)) + TimeSince + 1;
+    if TimeSince < 5 * Int64(ONE_SECOND) then
+    begin
+      RequiredDelay := (5 * Int64(ONE_SECOND)) - TimeSince;
+      if RequiredDelay > Delay then
+        Delay := Int32(RequiredDelay);
+    end;
+  end;
+
+  if Delay < ONE_SECOND then
+    Delay := ONE_SECOND;
+
+  Self.CameraNudgeTimer.Init(Delay);
+end;
+
+procedure TScript.TryCameraNudge(Force: Boolean = False);
+var
+  Delay: Int32;
+  RangeChoice: Int32;
+begin
+  if not WLSettings.Antiban.Camera then Exit;
+  if not Force and not Self.CameraNudgeTimer.IsFinished then Exit;
+
+  if Random(100) < 60 then
+    Antiban.RandomRotate()
+  else
+  begin
+    RangeChoice := Random(2);
+    case RangeChoice of
+      0: Minimap.RotateWithinAngles(0, 90);
+    else
+      Minimap.RotateWithinAngles(180, 210);
+    end;
+  end;
+
+  Self.LastCameraNudge := GetTickCount();
+  Delay := RandomRange(120, 181) * ONE_SECOND;
+  Self.CameraNudgeTimer.Init(Delay);
+end;
 procedure TRSMinimap.RotateWithinAngles(min, max: Int32);
 var
   minMaxAvg: Int32 := Floor((min + max) div 2);
@@ -551,6 +628,13 @@ begin
   Self.OnStartBreak := @PauseTimer;
   Self.OnFinishBreak := @ResumeTimer;
 end;
+
+procedure TAntiban.CameraRecoveryTask();
+begin
+  if not WLSettings.Antiban.Camera then Exit;
+  Script.TryCameraNudge();
+end;
+
 procedure TAntiban.SetupTasks(); override;
 begin
   if Self.Tasks <> [] then Exit;
@@ -563,6 +647,9 @@ begin
 
   if WLSettings.GetObject('antiban').getJSONObject('tasks').getBoolean('gametabs') then
     Self.AddTask(3 * ONE_MINUTE, @Self.HoverSkills, 0.33);
+
+  if WLSettings.Antiban.Camera then
+    Self.AddTask(RandomRange(2 * ONE_MINUTE, 3 * ONE_MINUTE), @Self.CameraRecoveryTask, 0.33);
 
   Self.OnStartTask := @OnStartAntibanTask;
 end;
@@ -756,6 +843,17 @@ begin
    end;
   end;
 end;
+
+procedure TMasterFarmer.ResetCameraNudgeCountdown();
+begin
+  Self.CameraNudgeCountdown.Init(RandomRange(120, 181) * ONE_SECOND);
+end;
+
+procedure TMasterFarmer.RequestExtraCameraNudge();
+begin
+  Script.ScheduleCameraNudge(5 * ONE_SECOND, 12 * ONE_SECOND);
+  Self.ResetCameraNudgeCountdown();
+end;
 function InventoryHasJunkSeeds(): Boolean;
 var
   Slots: TIntegerArray;
@@ -837,6 +935,9 @@ begin
   InitXP := XPBar.Read();
 
   Self.Farmer.InitLocation();
+  Self.Farmer.ResetCameraNudgeCountdown();
+  Self.ScheduleCameraNudge(120 * ONE_SECOND, 180 * ONE_SECOND);
+  Self.LastCameraNudge := GetTickCount();
 
   case Self.Farmer.Loc of
     Draynor:
@@ -881,7 +982,6 @@ begin
   else
     Options.SetZoomLevel(25);
 
-  WLSettings.Antiban.Camera := False;
   WLSettings.Antiban.Chat := False;
 
   Self.DisableDebugging := True;
@@ -1707,13 +1807,18 @@ begin
   begin
     Writeln('[Bot]: Too far from walk tile, tethering back...');
     Map.Walker.WebWalk(Self.WalkTile);
+    Self.ResetCameraNudgeCountdown();
   end;
 
   if Loc = Hosidius then Minimap.RotateWithinAngles(90, 180);
 
   // Find target
   FarmerPt := Self.GetMasterFarmerPoint();
-  if FarmerPt.X < 5 then Exit;
+  if FarmerPt.X < 5 then
+  begin
+    Self.ResetCameraNudgeCountdown();
+    Exit;
+  end;
   Self.SnapAndClick(FarmerPt);
   // First action: go for instant click if possible
   if (Loc = Draynor) and not Mainscreen.IsUpText(['ocket Master','Pickpocket Mast','et M','r Far'])  then Exit;
@@ -1738,6 +1843,7 @@ begin
     begin
       Writeln('Cannot steal here, relocating...');
       Map.Walker.WalkBlind([8276, 37454]);
+      Self.ResetCameraNudgeCountdown();
       Wait(15 * ONE_SECOND);
       Logout.ClickLogout();
     end;
@@ -1753,6 +1859,7 @@ begin
       Writeln('Cannot reach farmer; trying door.');
       if Map.Walker.WalkBlind(DOOR_TILE) then
         Script.CloseDoor();
+      Self.ResetCameraNudgeCountdown();
       Exit;
     end;
 
@@ -1762,7 +1869,11 @@ begin
         if Inventory.IsFull() then Exit;
 
         FarmerPt := Self.GetMasterFarmerPoint;
-        if FarmerPt.X < 5 then Exit;
+        if FarmerPt.X < 5 then
+        begin
+          Self.ResetCameraNudgeCountdown();
+          Exit;
+        end;
 
         Self.SnapAndClick(FarmerPt);
       until not XPBar.EarnedXP(False);
@@ -1772,22 +1883,33 @@ begin
     begin
 
       FarmerPt := Self.GetMasterFarmerPoint;
-      if FarmerPt.X < 5 then Exit;
+      if FarmerPt.X < 5 then
+      begin
+        Self.ResetCameraNudgeCountdown();
+        Exit;
+      end;
 
       Self.SnapAndClick(FarmerPt);
     end;
 
     if Minimap.IsPlayerMoving() then Minimap.WaitPlayerMoving();
 
+    if Self.CameraNudgeCountdown.IsFinished then
+      Self.RequestExtraCameraNudge();
+
+    Script.TryCameraNudge();
+
     Self.LastFarmerPt := FarmerPt;
   end;
 
   Self.LastFarmerPt := FarmerPt;
+  Script.TryCameraNudge();
   RSClient.Image.Clear();
 end;
 
 function TScript.GetState(): EState;
 begin
+  Self.TryCameraNudge();
   if not RSClient.IsLoggedIn() then Login.LoginPlayer();
   if GotStunned() then Exit(EState.STUNNED);
   HandleCannotReach(Map.Position());
