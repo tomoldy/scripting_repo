@@ -570,7 +570,7 @@ procedure TAntiban.Setup(); override;
 begin
   Writeln("[Bot]: Setting up antiban");
 
-  if WLSettings.GetObject('antiban').getBoolean('breaks') then
+  if WLSettings.GetObject('antiban').getBoolean('breaks') or Script.OverrideBreaks then
     Self.SetupBreaks();
 
   if WLSettings.GetObject('antiban').getJSONObject('sleep').getBoolean('enabled') then
@@ -582,6 +582,26 @@ begin
     Antiban.SetupTasks();
   end;
   Writeln("[Bot]: Antiban tasks: ", Antiban.GetActiveTasks()^);
+end;
+
+
+function TBaseScript.DoAntiban(checkBreaks: Boolean = True; checkSleeps: Boolean = True): Boolean; override;
+begin
+  Antiban.DismissRandom();
+  Self.TimeRunning.Pause();
+  Self.OnAntiban := True;
+
+  checkBreaks := checkBreaks and (WLSettings.GetObject('antiban').getBoolean('breaks') or Script.OverrideBreaks);
+  checkSleeps := checkSleeps and WLSettings.GetObject('antiban').getJSONObject('sleep').getBoolean('enabled');
+
+  if WLSettings.GetObject('antiban').getJSONObject('tasks').getBoolean('enabled') or checkBreaks or checkSleeps then
+    Result := Antiban.DoAntiban(checkBreaks, checkSleeps);
+
+  Self.TimeRunning.Resume();
+  Self.OnAntiban := False;
+
+  if not RSClient.IsLoggedIn() then
+    Login.LoginPlayer();
 end;
 
 
