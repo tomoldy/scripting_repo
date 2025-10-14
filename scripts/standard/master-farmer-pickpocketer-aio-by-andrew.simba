@@ -2031,21 +2031,21 @@ var
     Result := newRow * 4 + newCol;
   end;
 
-  procedure DrawLootHoverDebug(const point: TPoint);
+  procedure DrawLootHoverDebug(const hoverPoint: TPoint);
   var
     hoverSlot: Int32;
     slotBox: TBox;
     textPoint: TPoint;
   begin
-    if (point.X < 0) or (point.Y < 0) then Exit;
+    if (hoverPoint.X < 0) or (hoverPoint.Y < 0) then Exit;
 
-    hoverSlot := Inventory.PointToSlot(point);
+    hoverSlot := Inventory.PointToSlot(hoverPoint);
     if (hoverSlot < 0) or (hoverSlot > 27) then Exit;
 
     slotBox := Inventory.GetSlotBox(hoverSlot);
     RSClient.Image.Clear();
     RSClient.Image.DrawBox(slotBox, clLime);
-    RSClient.Image.DrawCross(point, 5, clYellow);
+    RSClient.Image.DrawCross(hoverPoint, 5, clYellow);
     textPoint := Point(slotBox.X1, slotBox.Y1 - 12);
     if textPoint.Y < 0 then
       textPoint.Y := slotBox.Y1 + 4;
