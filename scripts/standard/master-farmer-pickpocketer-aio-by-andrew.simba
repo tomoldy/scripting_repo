@@ -1137,10 +1137,10 @@ begin
   if Self.IS_NINETYNINE then Exit;
   RSClient.Image.Clear();
 
-  Drop();
   case Self.Farmer.Loc of
     Draynor:
     begin
+      Drop();
       Map.Walker.WalkBlind([8272, 37438]);
       if Banks.WalkOpen() then Self.BankForFood();
     end;
@@ -1154,9 +1154,16 @@ begin
         Wait(250);
       end;
 
+      if not Self.UseSeedVault then
+        Drop();
+
       if Banks.WalkOpen() then Self.BankForFood();
     end;
-    Ardougne, Hosidius, Varrock: if Banks.WalkOpen() then Self.BankForFood();
+    Ardougne, Hosidius, Varrock:
+    begin
+      Drop();
+      if Banks.WalkOpen() then Self.BankForFood();
+    end;
   end;
 end;
 
