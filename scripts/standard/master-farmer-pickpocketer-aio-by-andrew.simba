@@ -1421,7 +1421,7 @@ begin
   DepositallBox := [460,292, 490, 322];
   if BankPin.IsOpen(600) then BankPin.Enter(Login.GetPlayerPin());
   if not RSInterface.IsOpen() then Exit;
-  hoverBox := DepositallBox.Expand(RandomRange(-2, 5));
+  hoverBox := DepositallBox.Expand(RandomRange(-1, 1));
   hoverPoint := SRL.RandomPoint(hoverBox);
   Mouse.Move(hoverPoint);
   Wait(RandomRange(90, 160));
@@ -2139,7 +2139,7 @@ var
       Exit;
     end;
 
-    if Random(100) >= 40 then
+    if Random(100) >= 80 then
     begin
       if (Self.LastLootHoverPoint.X >= 0) and (Self.LastLootHoverPoint.Y >= 0) then
         DrawLootHoverDebug(Self.LastLootHoverPoint);
@@ -2147,11 +2147,11 @@ var
     end;
 
     targetSlot := Self.LastLootedSeedSlot;
-    if Random(100) < 45 then
+    if Random(100) < 15 then
       targetSlot := GetNearbySlot(targetSlot);
 
     hoverBox := Inventory.GetSlotBox(targetSlot);
-    expandDelta := RandomRange(-2, 3);
+    expandDelta := RandomRange(-1, 1);
     hoverBox := ExpandBoxByDelta(hoverBox, expandDelta);
 
     hoverPoint := SRL.RandomPoint(hoverBox);
