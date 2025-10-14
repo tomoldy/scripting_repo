@@ -60,7 +60,29 @@ const
 
   NAME_OF_NECK = "Dodgy necklace";
 var
-  SEEDS_TO_DROP: TRSItemArray = ['Potato seed', 'Onion seed', 'Cadavaberry seed', 'Jute seed', 'Cabbage seed', 'Tomato seed', 'Sweetcorn seed', 'Strawberry seed', 'Watermelon seed', 'Hammerstone seed', 'Asgarnian seed', 'Jute seed', 'Yanillian seed', 'Krandorian seed',  'Marigold seed', 'Nasturtium seed', 'Rosemary seed', 'Woad seed',  'Redberry seed', 'Cadavaberry seed', 'Dwellberry seed', 'Jangerberry seed', 'Whiteberry seed', 'Poison ivy seed', 'Mushroom spore', 'Belladonna seed', 'Cactus seed', 'Potato cactus seed'];
+  // Seeds worth keeping are intentionally called out beside the junk list to mirror
+  // the curated Drop/Loot pattern used by Torwent's thieving scripts.
+  SEEDS_TO_KEEP: TRSItemArray = [
+    'Strawberry seed', 'Watermelon seed', 'Snape grass seed',
+    'Limpwurt seed', 'Jangerberry seed', 'Whiteberry seed', 'Poison ivy seed',
+    'Mushroom spore', 'Belladonna seed', 'Cactus seed', 'Seaweed spore',
+    'Potato cactus seed', 'Hespori seed',
+    'Ranarr seed', 'Toadflax seed', 'Irit seed', 'Avantoe seed', 'Kwuarm seed',
+    'Snapdragon seed', 'Cadantine seed', 'Lantadyme seed', 'Dwarf weed seed',
+    'Torstol seed',
+    'Acorn', 'Willow seed', 'Maple seed', 'Yew seed', 'Magic seed',
+    'Apple tree seed', 'Banana tree seed', 'Orange tree seed',
+    'Curry tree seed', 'Pineapple seed', 'Papaya tree seed', 'Palm tree seed',
+    'Dragonfruit tree seed', 'Celastrus seed',
+    'Teak seed', 'Mahogany seed', 'Spirit seed'
+  ];
+  SEEDS_TO_DROP: TRSItemArray = [
+    'Potato seed', 'Onion seed', 'Cabbage seed', 'Tomato seed', 'Sweetcorn seed',
+    'Barley seed', 'Hammerstone seed', 'Asgarnian seed', 'Jute seed',
+    'Yanillian seed', 'Krandorian seed', 'Wildblood seed',
+    'Marigold seed', 'Nasturtium seed', 'Rosemary seed', 'Woad seed',
+    'Redberry seed', 'Cadavaberry seed', 'Dwellberry seed'
+  ];
   //If you are interested in changing the number of food
   //the script grabs from the bank change the below consts.
   QUANTITY_OF_FOOD : Int32 := 10;
@@ -654,9 +676,17 @@ begin
   Result := Inventory.FindItems(SEEDS_TO_DROP, Slots);
 end;
 
+function InventoryHasKeepSeeds(): Boolean;
+var
+  Slots: TIntegerArray;
+begin
+  Result := Inventory.FindItems(SEEDS_TO_KEEP, Slots);
+end;
+
 function NeedsSeedDeposit(): Boolean;
 begin
-  Result := (Script.Location = FarmingGuild) and Script.UseSeedVault and Inventory.IsFull;
+  Result := (Script.Location = FarmingGuild) and Script.UseSeedVault and
+            Inventory.IsFull and InventoryHasKeepSeeds();
 end;
 
 function ShouldBank() : Boolean;
