@@ -2084,21 +2084,21 @@ var
     if delta = 0 then
       Exit;
 
-    Result.Left.X := Result.Left.X - delta;
-    Result.Right.X := Result.Right.X + delta;
-    Result.Top.Y := Result.Top.Y - delta;
-    Result.Btm.Y := Result.Btm.Y + delta;
+    Result.X1 := Result.X1 - delta;
+    Result.X2 := Result.X2 + delta;
+    Result.Y1 := Result.Y1 - delta;
+    Result.Y2 := Result.Y2 + delta;
 
-    if Result.Left.X > Result.Right.X then
+    if Result.X1 > Result.X2 then
     begin
-      Result.Left.X := (Result.Left.X + Result.Right.X) div 2;
-      Result.Right.X := Result.Left.X;
+      Result.X1 := (Result.X1 + Result.X2) div 2;
+      Result.X2 := Result.X1;
     end;
 
-    if Result.Top.Y > Result.Btm.Y then
+    if Result.Y1 > Result.Y2 then
     begin
-      Result.Top.Y := (Result.Top.Y + Result.Btm.Y) div 2;
-      Result.Btm.Y := Result.Top.Y;
+      Result.Y1 := (Result.Y1 + Result.Y2) div 2;
+      Result.Y2 := Result.Y1;
     end;
   end;
 
