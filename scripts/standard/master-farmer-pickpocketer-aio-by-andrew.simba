@@ -1297,7 +1297,6 @@ var
   B: TBox;
   Attempts : Int32;
 begin
-  if Self.IS_NINETYNINE then Exit;
   Self.DebugLn("Attempting to bank.");
   NecklaceBool := False;
   FoodBool := False;
@@ -1306,6 +1305,25 @@ begin
   Self.DebugLn("Bank is open!");
 
   Bank.DepositRandomItems(["seed box", "Open seed box"]);
+  if Self.IS_NINETYNINE then
+  begin
+    Bank.Close(True);
+    if not Bank.IsOpen() then
+    begin
+      if Self.Farmer.Loc = Hosidius then
+      begin
+        if not SRL.PointInRect(Map.Position(), Self.HosidiusHouse.ToRectangle) then
+        begin
+          if not Map.Walker.WebWalk(Self.Farmer.WalkTile) then
+            Fatal("Could not walk back to the tile.");
+        end;
+      end
+      else
+        Map.walker.WebWalk(Self.Farmer.WalkTile);
+    end;
+    Exit;
+  end;
+
   FoodBool :=  Inventory.CountItem(Self.Food.Item) >= QUANTITY_OF_FOOD;
   if not Self.GET_DODGY and FoodBool then Exit;
 
@@ -1418,7 +1436,6 @@ end;
 procedure TScript.HandleBanking();
 begin
   if (Minimap.GetCompassAngle() > 0) and (Self.Location <> ARDOUGNE) then Mouse.Click(Minimap.Orbs[ERSMinimapOrb.COMPASS].Bounds, MOUSE_LEFT);
-  if Self.IS_NINETYNINE then Exit;
   RSClient.Image.Clear();
 
   case Self.Farmer.Loc of
