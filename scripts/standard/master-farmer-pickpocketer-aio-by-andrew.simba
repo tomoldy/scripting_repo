@@ -1907,20 +1907,40 @@ procedure TMasterFarmer.SnapAndClick(Pt : Tpoint);
 var
   UpTextOK : Boolean := Mainscreen.IsUpText(['ocket Master','Pickpocket Mast','et M','r Far']);
   Success : Boolean;
+  jitterPt : TPoint;
+  screenBounds : TBox;
+
+  function RandomOffset(): Int32;
+  const
+    Offsets: array[0..3] of Int32 = (-2, -1, 1, 2);
+  begin
+    Result := Offsets[Random(High(Offsets) + 1)];
+  end;
 begin
+  screenBounds := Mainscreen.Bounds;
+  jitterPt := Point(Pt.X + RandomOffset(), Pt.Y + RandomOffset());
+
+  if jitterPt.X < screenBounds.X1 then jitterPt.X := screenBounds.X1;
+  if jitterPt.X > screenBounds.X2 then jitterPt.X := screenBounds.X2;
+  if jitterPt.Y < screenBounds.Y1 then jitterPt.Y := screenBounds.Y1;
+  if jitterPt.Y > screenBounds.Y2 then jitterPt.Y := screenBounds.Y2;
+
   if (Self.LastFarmerPt.X >= 0) and (Self.LastFarmerPt.DistanceTo(Pt) < 5) and UpTextOK then
   begin
+    Mouse.Move(jitterPt);
     Mouse.Click(MOUSE_LEFT);
+    Self.LastFarmerPt := jitterPt;
     Success := Mainscreen.DidRedClick() and XPBar.EarnedXP();
     if Success then Inc(Script.Clicks);
     Exit;
   end else
   begin
-    Mouse.Move(Pt);
+    Mouse.Move(jitterPt);
     UpTextOk :=  Mainscreen.IsUpText(['ocket Master','Pickpocket Mast','et M','r Far']);
     if UpTextOk then
     begin
       Mouse.Click(MOUSE_LEFT);
+      Self.LastFarmerPt := jitterPt;
       Success := Mainscreen.DidRedClick() and XPBar.EarnedXP();
       if Success then Inc(Script.Clicks);
     end;
@@ -2306,10 +2326,12 @@ begin
 
     Script.TryCameraNudge();
 
-    Self.LastFarmerPt := FarmerPt;
+    if (Self.LastFarmerPt.X < 0) or (Self.LastFarmerPt.DistanceTo(FarmerPt) > 5) then
+      Self.LastFarmerPt := FarmerPt;
   end;
 
-  Self.LastFarmerPt := FarmerPt;
+  if (Self.LastFarmerPt.X < 0) or (Self.LastFarmerPt.DistanceTo(FarmerPt) > 5) then
+    Self.LastFarmerPt := FarmerPt;
   Script.TryCameraNudge();
   RSClient.Image.Clear();
 end;
