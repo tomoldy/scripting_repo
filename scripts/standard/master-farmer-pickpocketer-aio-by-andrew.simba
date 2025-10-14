@@ -678,24 +678,98 @@ procedure TAntiban.SetupBreaks(); override;
 begin
   if Self.Breaks <> [] then Exit;
 
-  Writeln("Override checked: ", Script.OverrideBreaks);
+  Writeln('Override checked: ', Script.OverrideBreaks);
 
   if Script.OverrideBreaks then
   begin
-    Writeln("[Bot]: Setting up overriden breaks");
-    Self.AddBreak(Script.SavedCustomBreakInterval* ONE_MINUTE, Script.SavedCustomBreakDuration * ONE_MINUTE, 0.33, 0.2 + BioHash);
+    Writeln('[Bot]: Setting up overriden breaks');
+    Self.AddBreak(Script.SavedCustomBreakInterval * ONE_MINUTE, Script.SavedCustomBreakDuration * ONE_MINUTE, 0.33, 0.2 + BioHash);
   end else
   begin
-    Writeln("[Bot]: Setting up default WaspLib breaks");
+    Writeln('[Bot]: Setting up default WaspLib breaks');
     Self.AddBreak(30  * ONE_MINUTE, 2  * ONE_MINUTE, 0.33, 0.01);
     Self.AddBreak(45  * ONE_MINUTE, 5  * ONE_MINUTE, 0.33, 0.15);
     Self.AddBreak(60  * ONE_MINUTE, 10 * ONE_MINUTE, 0.33, 0.2 + BioHash);
     Self.AddBreak(120 * ONE_MINUTE, 30 * ONE_MINUTE, 0.33, 0.5 + BioHash);
+
+    if WLSettings.GetObject('antiban').getBoolean('micro_breaks') then
+    begin
+      Writeln('[Bot]: Adding micro breaks between longer Wasp intervals');
+      Self.AddBreak(12 * ONE_MINUTE, 8 * ONE_SECOND, 0.45, 0.0);
+      Self.AddBreak(18 * ONE_MINUTE, 12 * ONE_SECOND, 0.45, 0.0);
+    end else
+      Writeln('[Bot]: Micro breaks disabled via Antiban tab toggle');
   end;
 
   Self.OnBreaking := @OnBreakingTask;
   Self.OnStartBreak := @PauseTimer;
   Self.OnFinishBreak := @ResumeTimer;
+end;
+
+procedure TAntiban.TakeBreak(var Task: TBreakTask); override;
+const
+  MICRO_BREAK_MAX_LENGTH = 20 * ONE_SECOND;
+var
+  countdown: TCountDown;
+  activeTasks: PAntibanTaskArray;
+  i, waitMs: Int32;
+  offset: Int32;
+  microBreak: Boolean;
+begin
+  microBreak := (not Script.OverrideBreaks)
+    and WLSettings.GetObject('antiban').getBoolean('micro_breaks')
+    and (Task.Length <= MICRO_BREAK_MAX_LENGTH);
+
+  if microBreak then
+  begin
+    activeTasks := Self.GetActiveTasks();
+    for i := 0 to High(activeTasks) do
+      activeTasks[i]^.countdown.Pause();
+
+    countdown.Init(Max(ONE_SECOND, Abs(Round(SRL.GaussRand(Task.Length, Task.Length * Task.StdVar)))));
+    Writeln('[Antiban] Taking micro break for ' + SRL.MsToTime(countdown.Length, TIME_FORMAL));
+
+    if (@Self.OnStartBreak <> nil) then
+      Self.OnStartBreak(@Task);
+
+    Self.LoseFocus(RandomRange(3 * ONE_SECOND, 6 * ONE_SECOND));
+
+    if countdown.TimeRemaining() > ONE_SECOND then
+    begin
+      Wait(250, 750);
+      Self.RandomMouseTask();
+    end;
+
+    repeat
+      if (@Self.OnBreaking <> nil) then
+        Self.OnBreaking(@Task, countdown);
+
+      if countdown.IsFinished() then
+        Break;
+
+      waitMs := Min(countdown.TimeRemaining(), RandomRange(400, 800));
+      Wait(Max(200, waitMs));
+    until countdown.IsFinished();
+
+    Writeln('[Antiban] Micro break finished');
+
+    if (@Self.OnFinishBreak <> nil) then
+      Self.OnFinishBreak(@Task);
+
+    offset := GetTickCount() - (countdown.Timeout - countdown.Length);
+
+    for i := 0 to High(Self.Breaks) do
+      Self.Breaks[i].NextAtTime += offset;
+
+    for i := 0 to High(activeTasks) do
+      activeTasks[i]^.countdown.Resume();
+
+    Task.NextAtTime := GetTimeRunning() + Abs(SRL.GaussRand(Task.Interval, Task.Interval * Task.StdVar));
+    Writeln('[Antiban] Next break window in ' + Self.TimeUntilBreak(Task));
+    Exit;
+  end;
+
+  inherited;
 end;
 
 procedure TAntiban.CameraRecoveryTask();

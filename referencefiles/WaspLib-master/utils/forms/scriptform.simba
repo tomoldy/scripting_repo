@@ -1100,7 +1100,19 @@ function TScriptForm.CreateAntibanManager(): TTabSheet;
     breaks := sender;
     checked := breaks.IsChecked();
 
+    microBreaks.SetEnabled(checked);
+    microBreaks.CheckBox.SetEnabled(checked);
+
     WLSettings.GetObject('antiban').Put('breaks', checked);
+    WLSettings.SaveConfig();
+  end;
+
+  procedure TScriptForm._MicroBreaksOnChange(sender: TObject);
+  var
+    checkbox: TCheckBox;
+  begin
+    checkbox := sender;
+    WLSettings.GetObject('antiban').Put('micro_breaks', checkbox.IsChecked());
     WLSettings.SaveConfig();
   end;
 
@@ -1221,7 +1233,7 @@ var
   bioEdit, sleepHour, sleepLength: TLabeledEdit;
   bar: TTrackBar;
   antibanGroup: TCheckCheckGroup;
-  breaks, sleeps, useBio: TLabeledCheckBox;
+  breaks, microBreaks, sleeps, useBio: TLabeledCheckBox;
   arr: TStringArray;
   str: String;
   combobox: TComboBox;
@@ -1316,8 +1328,23 @@ begin
     SetChecked(WLSettings.GetObject('antiban').getBoolean('breaks'));
 
     CheckBox.setOnChange(@Self._BreaksOnChange);
-    Self._BreaksOnChange(CheckBox);
   end;
+
+  with microBreaks do
+  begin
+    Create(Result);
+    SetCaption('Micro breaks');
+    SetLeft(breaks.GetLeft() + TControl.AdjustToDPI(5));
+    SetTop(breaks.GetBottom() + TControl.AdjustToDPI(5));
+    SetToolTip('Adds very short (5-15s) focus shifts between longer Wasp breaks.');
+
+    SetChecked(WLSettings.GetObject('antiban').getBoolean('micro_breaks'));
+    CheckBox.setOnChange(@Self._MicroBreaksOnChange);
+  end;
+
+  microBreaks.SetEnabled(breaks.IsChecked());
+  microBreaks.CheckBox.SetEnabled(breaks.IsChecked());
+  Self._BreaksOnChange(breaks.CheckBox);
 
   with sleeps do
   begin

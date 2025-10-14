@@ -116,6 +116,12 @@ begin
     modified := True;
   end;
 
+  if not Self.GetObject('antiban').Has('micro_breaks') then
+  begin
+    Self.GetObject('antiban').Put('micro_breaks', True);
+    modified := True;
+  end;
+
   //ANTIBAN.TASKS
   if not Self.GetObject('antiban').has('tasks') then
   begin
