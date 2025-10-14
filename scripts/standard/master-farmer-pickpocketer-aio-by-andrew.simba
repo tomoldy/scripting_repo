@@ -1066,6 +1066,8 @@ begin
   else
     Options.SetZoomLevel(25);
 
+  MM2MS.GetZoomLevel();
+
   WLSettings.Antiban.Chat := False;
 
   Self.DisableDebugging := True;
@@ -1108,8 +1110,14 @@ begin
   Inventory.ClickItem(Self.Necklace.Item);
 end;
 function GotStunned(): Boolean;
+var
+  zoomLevel: Int32;
 begin
   if Script.IS_NINETYNINE then Exit(False);
+
+  zoomLevel := MM2MS.GetZoomLevel();
+  if zoomLevel = -1 then
+    Exit(False);
 
   Result := SRL.CountColor(CTS2(2677992, 3, 0.03, 3.53), Mainscreen.GetPlayerBox) > 0;
 //  if Result then Writeln("GotStunned: ", SRL.CountColor(CTS2(2677992, 3, 0.03, 3.53), Mainscreen.GetPlayerBox));
