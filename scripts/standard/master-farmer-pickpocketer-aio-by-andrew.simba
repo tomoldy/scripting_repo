@@ -2177,7 +2177,6 @@ var
   end;
 
 begin
-  Me := Map.Position();
   if Inventory.IsFull() then Exit;
 
   InitializeSlowSeedTracker();
@@ -2215,6 +2214,7 @@ begin
   // Main loop
   while not Inventory.IsFull()  do
   begin
+    Me := Map.Position();
     Eat;
     if ShouldBank() then Break;
     // Draynor: handle combat/blocked messages (fix operator precedence)
