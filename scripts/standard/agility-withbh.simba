@@ -27,7 +27,7 @@ type
     MagicSecateursCheckbox, CatherbyHerbCheckbox, HosidiusHerbCheckbox,
     CatherbyFlowerCheckbox, HosidiusFlowerCheckbox, CompostFlowersCheckbox,
     BarbarianDibberCheckbox,
-    RunePouchCheckbox, UseBestHerbSeedCheckbox, UseBestFlowerSeedCheckbox: TLabeledCheckBox;
+    RunePouchCheckbox, BirdhouseRunePouchCheckbox, UseBestHerbSeedCheckbox, UseBestFlowerSeedCheckbox: TLabeledCheckBox;
     ScriptInfo, ScriptTitle, AntibanNote: TLabel;
     CompostInput: TLabeledCombobox;
   end;
@@ -1583,6 +1583,19 @@ begin
     SetOnClick(@Self._BHIncludeOnRadioChanged);
     SetFontSize(9);
   end;
+
+  with Self.BirdhouseRunePouchCheckbox do
+  begin
+    Create(Result);
+    SetCaption('Use Rune Pouch');
+    SetTooltip('Reuses your rune pouch for farm runs and birdhouse runs when available.');
+    SetLeft(nowRadio.getLeft());
+    SetTop(laterRadio.getTop() + TControl.AdjustToDPI(30));
+    SetChecked(Self.GetRunePouchSelection());
+    CheckBox.SetOnChange(@Self.OnBirdhouseRunePouchCheckboxChanged);
+  end;
+
+  Self.OnRunePouchCheckboxChanged(Self.BirdhouseRunePouchCheckbox.CheckBox);
 
   BirdHouseRunner.TaskInterval := BHIncludeGUIRunIntervalMinutes;
 
@@ -3849,10 +3862,54 @@ begin
   Self.GetTab('Farm Run Settings').SetTabVisible(CheckBox.IsChecked());
 end;
 
-procedure TAgilityGUI.OnRunePouchCheckboxChanged(Sender: TObject);
+procedure TAgilityGUI.UpdateRunePouchUsage(const IsChecked: Boolean);
 begin
-  UseRunePouch := Self.RunePouchCheckbox.IsChecked();
-  BirdHouseRunner.UseRunePouch := UseRunePouch;
+  UseRunePouch := IsChecked;
+  BirdHouseRunner.UseRunePouch := IsChecked;
+end;
+
+function TAgilityGUI.GetRunePouchSelection(): Boolean;
+begin
+  if (Self.RunePouchCheckbox.CheckBox <> nil) then
+    Exit(Self.RunePouchCheckbox.IsChecked());
+
+  if (Self.BirdhouseRunePouchCheckbox.CheckBox <> nil) then
+    Exit(Self.BirdhouseRunePouchCheckbox.IsChecked());
+
+  Result := UseRunePouch;
+end;
+
+procedure TAgilityGUI.SyncRunePouchCheckboxes(Sender: TCheckBox; const IsChecked: Boolean);
+begin
+  if (Self.RunePouchCheckbox.CheckBox <> nil)
+     and (Self.RunePouchCheckbox.CheckBox <> Sender)
+     and (Self.RunePouchCheckbox.IsChecked() <> IsChecked) then
+    Self.RunePouchCheckbox.SetChecked(IsChecked);
+
+  if (Self.BirdhouseRunePouchCheckbox.CheckBox <> nil)
+     and (Self.BirdhouseRunePouchCheckbox.CheckBox <> Sender)
+     and (Self.BirdhouseRunePouchCheckbox.IsChecked() <> IsChecked) then
+    Self.BirdhouseRunePouchCheckbox.SetChecked(IsChecked);
+end;
+
+procedure TAgilityGUI.OnRunePouchCheckboxChanged(Sender: TObject);
+var
+  CheckBox: TCheckBox;
+  IsChecked: Boolean;
+begin
+  if not (Sender is TCheckBox) then
+    Exit;
+
+  CheckBox := Sender;
+  IsChecked := CheckBox.IsChecked();
+
+  Self.SyncRunePouchCheckboxes(CheckBox, IsChecked);
+  Self.UpdateRunePouchUsage(IsChecked);
+end;
+
+procedure TAgilityGUI.OnBirdhouseRunePouchCheckboxChanged(Sender: TObject);
+begin
+  Self.OnRunePouchCheckboxChanged(Sender);
 end;
 
 function TRSWalker.GetTileMSEx(Me, Loc: TPoint; Height:Double=0; Offx,Offy:Double=0): TRectangle; override;
@@ -4298,8 +4355,7 @@ begin
   Food := Self.FoodInput.GetText();
   Course := ECourse(Self.CourseInput.GetItemIndex());
 
-  UseRunePouch := Self.RunePouchCheckbox.IsChecked();
-  BirdHouseRunner.UseRunePouch := UseRunePouch;
+  Self.UpdateRunePouchUsage(Self.GetRunePouchSelection());
 
   if DoFarmRuns then
   begin
@@ -5270,6 +5326,8 @@ var
   end;
 
 begin
+  GUI.UpdateRunePouchUsage(GUI.GetRunePouchSelection());
+
   herbPrev := Farm.SelectedHerbSeed;
   flowerPrev := Farm.SelectedFlowerSeed;
 
