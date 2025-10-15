@@ -5334,8 +5334,21 @@ begin
 
     if Bank.WithdrawHelper(slotBounds, item.Quantity, item.Noted, False) then
     begin
-      Result := True;
-      Exit;
+      Result := WaitUntil(Inventory.ContainsItem(item.Item), 100, 2000);
+
+      if Result then
+        Exit;
+    end;
+  end;
+
+  if (not Result) and Bank.FindItem(item, slotBounds) then
+  begin
+    if Bank.WithdrawHelper(slotBounds, item.Quantity, item.Noted, False) then
+    begin
+      Result := WaitUntil(Inventory.ContainsItem(item.Item), 100, 2000);
+
+      if Result then
+        Exit;
     end;
   end;
 
