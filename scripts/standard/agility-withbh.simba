@@ -4698,7 +4698,11 @@ begin
     end;
 
     if HosidiusFlower then
+    begin
       Farm.AddPatch(EFarmPatch.HOSIDIOUS_FLOWER, ETravelMethod.HOUSE_TELEPORT, ActiveFlowerSeed);
+      if CompostFlowers then
+        Inc(Ultracomposts);
+    end;
 
     if CatherbyHerb then
     begin
@@ -4707,7 +4711,11 @@ begin
     end;
 
     if CatherbyFlower then
+    begin
       Farm.AddPatch(EFarmPatch.CATHERBY_FLOWER, ETravelMethod.CAMELOT_TELEPORT, ActiveFlowerSeed);
+      if CompostFlowers then
+        Inc(Ultracomposts);
+    end;
 
     case CompostMethod of
       ECompostMethod.BOTTOMLESS:
@@ -4718,8 +4726,11 @@ begin
 
       ECompostMethod.ULTRA:
       begin
-        FarmItems += 'Ultracompost';
-        FarmItemAmounts += Ultracomposts;
+        if Ultracomposts > 0 then
+        begin
+          FarmItems += 'Ultracompost';
+          FarmItemAmounts += Ultracomposts;
+        end;
       end;
     end;
 
