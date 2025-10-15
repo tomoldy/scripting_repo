@@ -1443,7 +1443,9 @@ begin
 end;
 
 function TScriptForm.CreateBirdhouseRunSettings(): TTabSheet;
-  type TScriptForm = TScriptForm;
+  type
+    TScriptForm = TScriptForm;
+    PAgilityGUI = ^TAgilityGUI;
 
   procedure TScriptForm._OnCheckBoxChanged(sender: TObject);
   var
@@ -1497,10 +1499,13 @@ var
   intervalLabel : TLabel;
   seedCombo  : TLabeledCombobox;
   seedIndex, fullWidth, w, space, y: Int32;
+  Gui: PAgilityGUI;
 
 begin
   Self.AddTab('Birdhouse Settings');
   Result := Self.Tabs[High(Self.Tabs)];
+
+  Gui := PAgilityGUI(Self);
 
   fullWidth := Self.Size.X;
   space := Floor(fullWidth * 0.1);
@@ -1584,18 +1589,18 @@ begin
     SetFontSize(9);
   end;
 
-  with Self.BirdhouseRunePouchCheckbox do
+  with Gui^.BirdhouseRunePouchCheckbox do
   begin
     Create(Result);
     SetCaption('Use Rune Pouch');
     SetTooltip('Reuses your rune pouch for farm runs and birdhouse runs when available.');
     SetLeft(nowRadio.getLeft());
     SetTop(laterRadio.getTop() + TControl.AdjustToDPI(30));
-    SetChecked(Self.GetRunePouchSelection());
-    CheckBox.SetOnChange(@Self.OnBirdhouseRunePouchCheckboxChanged);
+    SetChecked(Gui^.GetRunePouchSelection());
+    CheckBox.SetOnChange(@Gui^.OnBirdhouseRunePouchCheckboxChanged);
   end;
 
-  Self.OnRunePouchCheckboxChanged(Self.BirdhouseRunePouchCheckbox.CheckBox);
+  Gui^.OnRunePouchCheckboxChanged(Gui^.BirdhouseRunePouchCheckbox.CheckBox);
 
   BirdHouseRunner.TaskInterval := BHIncludeGUIRunIntervalMinutes;
 
