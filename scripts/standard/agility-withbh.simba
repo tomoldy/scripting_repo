@@ -120,7 +120,8 @@ type
     CurrentBirdHouse : CurrBirdhouse;
     HasRunStarted, HasRunFinished,
     ShouldTeleport,
-    AlwaysUseBestLog, IsDisabled, NeedClockworks, TerminateOnNoLogs, Initialized : Boolean;
+    AlwaysUseBestLog, IsDisabled, NeedClockworks, TerminateOnNoLogs, Initialized,
+    UseRunePouch : Boolean;
 
     RSW : TRSWalker;
     ScriptIntervalTimer, NextRunSpewTimer : TCountdown;
@@ -269,6 +270,9 @@ begin
     Result += TRSBankItem.Setup("Clockwork", 1, false);
 
   Result += TRSBankItem.Setup(Self.Seed, 40, false);
+
+  if Self.UseRunePouch then
+    Result += TRSBankItem.Setup('Rune pouch', 1, false);
 end;
 
 function TRSBank.FindAll(items: TRSItemArray): Boolean; overload;
@@ -1401,10 +1405,13 @@ begin
     end;
   end;
 
-  if not transporter.withdrawTeleportItem(RSTeleports.FOSSIL_ISLAND) then
+  if not Self.UseRunePouch then
   begin
-    Self.DebugLn("Could not get pendant");
-    Exit(false);
+    if not transporter.withdrawTeleportItem(RSTeleports.FOSSIL_ISLAND) then
+    begin
+      Self.DebugLn("Could not get pendant");
+      Exit(false);
+    end;
   end;
 
   Result := true;
@@ -3842,6 +3849,12 @@ begin
   Self.GetTab('Farm Run Settings').SetTabVisible(CheckBox.IsChecked());
 end;
 
+procedure TAgilityGUI.OnRunePouchCheckboxChanged(Sender: TObject);
+begin
+  UseRunePouch := Self.RunePouchCheckbox.IsChecked();
+  BirdHouseRunner.UseRunePouch := UseRunePouch;
+end;
+
 function TRSWalker.GetTileMSEx(Me, Loc: TPoint; Height:Double=0; Offx,Offy:Double=0): TRectangle; override;
 var
   angle: Double;
@@ -3924,10 +3937,13 @@ begin
   begin
     Create(Result);
     SetCaption('Use Rune Pouch');
-    SetTooltip('');
+    SetTooltip('Reuses your rune pouch for farm runs and birdhouse runs when available.');
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(310));
+    CheckBox.SetOnChange(@Self.OnRunePouchCheckboxChanged);
   end;
+
+  Self.OnRunePouchCheckboxChanged(Self.RunePouchCheckbox.CheckBox);
 
   with Self.BarbarianDibberCheckbox do
   begin
@@ -4282,6 +4298,9 @@ begin
   Food := Self.FoodInput.GetText();
   Course := ECourse(Self.CourseInput.GetItemIndex());
 
+  UseRunePouch := Self.RunePouchCheckbox.IsChecked();
+  BirdHouseRunner.UseRunePouch := UseRunePouch;
+
   if DoFarmRuns then
   begin
     CompostMethod := ECompostMethod(Self.CompostInput.GetItemIndex() + 2);
@@ -4290,7 +4309,6 @@ begin
     HosidiusHerb := Self.HosidiusHerbCheckbox.IsChecked();
     HosidiusFlower := Self.HosidiusFlowerCheckbox.IsChecked();
     UseMagicSecateurs := Self.MagicSecateursCheckbox.IsChecked();
-    UseRunePouch := Self.RunePouchCheckbox.IsChecked();
     BarbarianDibber := Self.BarbarianDibberCheckbox.IsChecked();
     FarmRunNow := Self.FarmRunNowCheckbox.IsChecked();
     CompostFlowers := Self.CompostFlowersCheckbox.IsChecked();
