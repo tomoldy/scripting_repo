@@ -2592,6 +2592,11 @@ procedure TFarmRun.WithdrawCompost();
 var
   Boxes: TBoxArray := [[160, 210, 245, 245], [275, 210, 360, 245], [390, 210, 475, 245], [390, 210, 475, 245], [0, 0, 0, 0]];
   WithdrawAmt: Int32 := Round(Inventory.CountEmptySlots * 0.2) + 1;
+  CompostArray: TStringArray := ['Compost', 'Supercompost', 'Ultracompost', 'Bottomless compost bucket', ''];
+  CompostItem: TRSItem := CompostArray[Self.CompostMethod];
+  StartingCount: Int32;
+  HadCompost: Boolean;
+  WithdrawIssued: Boolean := False;
   LeprechaunPt: TPoint;
 begin
   if not RSClient.IsLoggedIn() then
@@ -2619,14 +2624,32 @@ begin
 
   Mouse.Move(boxes[Self.CompostMethod]);
 
+  StartingCount := Inventory.CountItem(CompostItem);
+  HadCompost := Inventory.ContainsItem(CompostItem);
+
   if WithdrawAmt = 1 then
-    ChooseOption.Select('Remove-1')
+    WithdrawIssued := ChooseOption.Select('Remove-1')
   else if WithdrawAmt = 5 then
-    ChooseOption.Select('Remove-5')
+    WithdrawIssued := ChooseOption.Select('Remove-5')
   else
   begin
-    ChooseOption.Select('Remove-X');
-    Chat.AnswerQuery('Enter amount', ToStr(WithdrawAmt), 5000);
+    WithdrawIssued := ChooseOption.Select('Remove-X');
+    if WithdrawIssued then
+      WithdrawIssued := Chat.AnswerQuery('Enter amount', ToStr(WithdrawAmt), 5000);
+  end;
+
+  if not WithdrawIssued then
+  begin
+    WriteLn('Failed to issue withdraw command for compost.');
+    Exit();
+  end;
+
+  if not WaitUntil((Inventory.CountItem(CompostItem) > StartingCount)
+    or (not HadCompost and Inventory.ContainsItem(CompostItem)), 100, 5000) then
+  begin
+    WriteLn('Failed to confirm compost withdrawal; aborting attempt.');
+    RSInterface.Close(True);
+    Exit();
   end;
 
   RSInterface.Close(True);
