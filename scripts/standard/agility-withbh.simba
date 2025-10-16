@@ -2256,7 +2256,8 @@ var
   i: Int32;
 begin
   WriteLn('Getting runes needed for farm run.');
-  WriteLn('Spellbook detected: ', SpellBook := Magic.GetSpellBook());
+  SpellBook := Magic.GetSpellBook();
+  WriteLn('Spellbook detected: ', SpellBook);
 
   CanSBS := (SpellBook = ERSSpellBook.LUNAR) and (Stats.GetLevel(ERSSkill.MAGIC) >= 96);
 
