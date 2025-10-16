@@ -1425,13 +1425,10 @@ begin
     end;
   end;
 
-  if not Self.UseRunePouch then
+  if not transporter.withdrawTeleportItem(RSTeleports.FOSSIL_ISLAND) then
   begin
-    if not transporter.withdrawTeleportItem(RSTeleports.FOSSIL_ISLAND) then
-    begin
-      Self.DebugLn("Could not get pendant");
-      Exit(false);
-    end;
+    Self.DebugLn("Could not get pendant");
+    Exit(false);
   end;
 
   Result := true;
