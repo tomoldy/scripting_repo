@@ -4899,6 +4899,7 @@ var
   Ultracomposts: Int32;
   ActiveHerbSeed, ActiveFlowerSeed: TRSItem;
 begin
+  Ultracomposts := 0;
   // Side effects: resets farm inventory indices, populates FarmItems, and initializes farm timers and debug logging.
   HerbSeedItemIndex := -1;
   FlowerSeedItemIndex := -1;
