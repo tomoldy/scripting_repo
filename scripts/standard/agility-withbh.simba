@@ -2331,99 +2331,188 @@ begin
       Result += TmpRunes[i];
 end;
 
+function TFarmRun.IsInGiantSeaweedArea(): Boolean;
+begin
+  Result := ScriptWalker^.GetMyPos().InBox([1129, 5407, 1769, 5824]);
+end;
+
+function TFarmRun.HandleBarbarianBarge(var T: TCountdown): Boolean;
+var
+  Attempts: Int32;
+begin
+  Result := False;
+
+  if T.IsFinished() or not ScriptWalker^.GetMyPos().InBox([8448, 2342, 9273, 2895]) then
+    Exit;
+
+  FarmWriteDebug('Attempting quick-travel from the Barbarian barge.');
+
+  for Attempts := 1 to 3 do
+  begin
+    if not ScriptWalker^.AtTile([8840, 2672], 16) then
+      ScriptWalker^.WebWalk([8832, 2672]);
+
+    BargeAttendant.SelectOption(['Quick-Travel'], 10);
+
+    if WaitUntil(ScriptWalker^.GetMyPos().InBox([9113, 908, 9467, 1266]), 15, 5000) then
+    begin
+      FarmWriteDebug(ToStr('Reached the northern shore after attempt ', Attempts, '.'));
+      Exit(True);
+    end;
+  end;
+
+  FarmWriteDebug('Failed to leave the Barbarian barge after three attempts.');
+end;
+
+function TFarmRun.HandleBoatRide(var T: TCountdown): Boolean;
+var
+  Attempts: Int32;
+  B: TBox;
+begin
+  Result := False;
+
+  if T.IsFinished() or not ScriptWalker^.GetMyPos().InBox([9113, 908, 9467, 1266]) then
+    Exit;
+
+  FarmWriteDebug('Attempting boat ride to Fossil Island.');
+
+  for Attempts := 1 to 3 do
+  begin
+    Wait(750, 1000);
+    BoatyShore.WalkSelectOption(['Travel '], 10);
+
+    if WaitUntil(Chat.FindOption('Row out to sea', [CHAT_COLOR_BLACK]), 15, 5000) then
+    begin
+      B := ([146, 431, 371, 435]);
+      Mouse.Click(B, MOUSE_LEFT);
+
+      if WaitUntil(ScriptWalker^.GetMyPos().InBox([9303, 530, 9657, 888]), 15, 5000) then
+      begin
+        FarmWriteDebug(ToStr('Arrived at the Fossil Island shore after attempt ', Attempts, '.'));
+        Exit(True);
+      end;
+    end;
+  end;
+
+  FarmWriteDebug('Failed to take the boat after three attempts.');
+end;
+
+function TFarmRun.HandleDiveSequence(var T: TCountdown): Boolean;
+var
+  Attempts: Int32;
+  B: TBox;
+begin
+  Result := False;
+
+  if T.IsFinished() or not ScriptWalker^.GetMyPos().InBox([9303, 530, 9657, 888]) then
+    Exit;
+
+  FarmWriteDebug('Attempting to dive to the giant seaweed area.');
+
+  for Attempts := 1 to 3 do
+  begin
+    Wait(750, 1000);
+    BoatyIsland.WalkSelectOption(['Dive '], 10);
+
+    WaitUntil(Chat.FindOption('Dive and walk', [CHAT_COLOR_BLACK]) or
+              Chat.FindOption('it would be easier', [CHAT_COLOR_BLACK]) or
+              ScriptWalker^.GetMyPos().InBox([1129, 5407, 1769, 5824]), 15, 10000);
+
+    if Chat.FindOption('Dive and walk', [CHAT_COLOR_BLACK]) then
+    begin
+      B := ([67, 399, 442, 403]);
+      Mouse.Click(B, MOUSE_LEFT);
+
+      WaitUntil(ScriptWalker^.GetMyPos().InBox([1129, 5407, 1769, 5824]) or
+                Chat.FindOption('it would be easier', [CHAT_COLOR_BLACK]), 15, 10000);
+    end;
+
+    if Self.IsInGiantSeaweedArea() then
+    begin
+      FarmWriteDebug(ToStr('Successfully dived to the seaweed patch after attempt ', Attempts, '.'));
+      Exit(True);
+    end;
+
+    if Chat.FindOption('it would be easier', [CHAT_COLOR_BLACK]) then
+      Chat.ClickContinue(True);
+
+    if Chat.FindOption('dive anyway', [CHAT_COLOR_BLACK]) then
+    begin
+      B := ([120, 412, 401, 421]);
+      Mouse.Click(B, MOUSE_LEFT);
+
+      if Chat.FindOption('airin', [CHAT_COLOR_BLACK]) then
+        Chat.ClickContinue(True);
+
+      if WaitUntil(ScriptWalker^.GetMyPos().InBox([1129, 5407, 1769, 5824]), 15, 5000) then
+      begin
+        FarmWriteDebug(ToStr('Forced dive succeeded on attempt ', Attempts, '.'));
+        Exit(True);
+      end;
+    end;
+  end;
+
+  FarmWriteDebug('Failed to reach the seaweed patch after diving attempts.');
+end;
+
+function TFarmRun.TeleportBackToDigsite(var T: TCountdown): Boolean;
+var
+  Item: TRSItem;
+  B: TBox;
+begin
+  Result := False;
+
+  if T.IsFinished() then
+    Exit;
+
+  if ScriptWalker^.GetMyPos().InBox([8448, 2342, 9273, 2895]) then
+    Exit;
+
+  FarmWriteDebug('Teleporting back to the Digsite.');
+
+  Item := 'Digsite pendant (5)';
+  Wait(250, 500);
+
+  if Inventory.ClickItem(Item, 'Rub') and WaitUntil(Chat.FindOption('Digsite', [CHAT_COLOR_BLACK]), 10, 10000) then
+  begin
+    B := ([241, 396, 279, 406]);
+    Mouse.Click(B, MOUSE_LEFT);
+    Result := WaitUntil(ScriptWalker^.GetMyPos().InBox([8448, 2342, 9273, 2895]), 15, 10000);
+  end
+  else if Equipment.ClickItem(Item, 'Digsite') then
+    Result := WaitUntil(ScriptWalker^.GetMyPos().InBox([8448, 2342, 9273, 2895]), 15, 10000);
+
+  if Result then
+    FarmWriteDebug('Returned to the Digsite via pendant.');
+end;
+
 procedure TFarmRun.TravelToGiantSeaweed();
 var
   T: TCountdown;
   MyPos: TPoint;
-  Attempts: int32;
-  Item: TRSItem;
-  B: TBox;
 begin
   T.Init(ONE_MINUTE);
 
-  while not (MyPos := ScriptWalker^.GetMyPos).InBox([1129, 5407, 1769, 5824]) and not T.IsFinished() do
+  while not T.IsFinished() do
   begin
+    if Self.IsInGiantSeaweedArea() then
+      Exit();
+
     MyPos := ScriptWalker^.GetMyPos();
 
-    if MyPos.InBox([8448, 2342, 9273, 2895]) then
-    begin
-      for Attempts := 1 to 3 do
-      begin
-        if not ScriptWalker^.AtTile([8840,2672], 16) then
-          ScriptWalker^.WebWalk([8832,2672]);
+    if MyPos.InBox([8448, 2342, 9273, 2895]) and Self.HandleBarbarianBarge(T) then
+      Continue;
 
-        BargeAttendant.SelectOption(['Quick-Travel'], 10);
+    if MyPos.InBox([9113, 908, 9467, 1266]) and Self.HandleBoatRide(T) then
+      Continue;
 
-        if WaitUntil(ScriptWalker^.GetMyPos().InBox([9113, 908, 9467, 1266]), 15, 5000) then
-          break;
-      end;
-    end
-    else
-    if MyPos.InBox([9113, 908, 9467, 1266]) then
-    begin
-      for attempts := 1 to 3 do
-      begin
-        Wait(750,1000);
-        BoatyShore.WalkSelectOption(['Travel '], 10);
+    if MyPos.InBox([9303, 530, 9657, 888]) and Self.HandleDiveSequence(T) then
+      Continue;
 
-        if WaitUntil(Chat.FindOption('Row out to sea', [CHAT_COLOR_BLACK]), 15, 5000) then
-        begin
-          B := ([146,431,371,435]);
-          Mouse.Click(B, MOUSE_LEFT);
+    if Self.TeleportBackToDigsite(T) then
+      Continue;
 
-          if WaitUntil(ScriptWalker^.GetMyPos().InBox([9303, 530, 9657, 888]), 15, 5000) then
-            break;
-        end;
-      end;
-    end
-    else
-    if MyPos.InBox([9303, 530, 9657, 888]) then
-    begin
-      for Attempts := 1 to 3 do
-      begin
-        Wait(750,1000);
-        BoatyIsland.WalkSelectOption(['Dive '], 10);
-        WaitUntil(Chat.FindOption('Dive and walk', [CHAT_COLOR_BLACK]) or Chat.FindOption('it would be easier', [CHAT_COLOR_BLACK]) or (MyPos := ScriptWalker^.GetMyPos()).InBox([1129, 5407, 1769, 5824]), 15, 10000);
-
-        if Chat.FindOption('Dive and walk', [CHAT_COLOR_BLACK]) then begin
-          B := ([67,399,442,403]);
-          Mouse.Click(B, MOUSE_LEFT);
-          WaitUntil(ScriptWalker^.GetMyPos().InBox([1129, 5407, 1769, 5824]) or Chat.FindOption('it would be easier', [CHAT_COLOR_BLACK]), 15, 10000);
-        end;
-
-        if (ScriptWalker^.GetMyPos()).InBox([1129, 5407, 1769, 5824]) then
-          break;
-
-        if Chat.FindOption('it would be easier', [CHAT_COLOR_BLACK])then
-          Chat.ClickContinue(True);
-
-        if Chat.FindOption('dive anyway', [CHAT_COLOR_BLACK]) then
-        begin
-          B := ([120,412,401,421]);
-          Mouse.Click(B, MOUSE_LEFT);
-
-          if Chat.FindOption('airin', [CHAT_COLOR_BLACK])then
-            Chat.ClickContinue(True);
-
-          if WaitUntil(ScriptWalker^.GetMyPos().InBox([1129, 5407, 1769, 5824]), 15, 5000) then
-            break;
-        end;
-      end;
-    end
-    else
-    begin
-      Item := 'Digsite pendant (5)';
-      Wait(250,500);
-      if Inventory.ClickItem(Item, 'Rub') and WaitUntil(Chat.FindOption('Digsite', [CHAT_COLOR_BLACK]), 10, 10000) then
-      begin
-        B := ([241,396,279,406]);
-        Mouse.Click(B, MOUSE_LEFT);
-      end
-      else
-        Equipment.ClickItem(Item, 'Digsite');
-
-      WaitUntil(ScriptWalker^.GetMyPos().InBox([8448, 2342, 9273, 2895]), 15, 10000);
-    end;
+    Wait(250, 400);
   end;
 end;
 
