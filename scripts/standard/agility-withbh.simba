@@ -1601,8 +1601,8 @@ begin
     SetTooltip('Reuses your rune pouch for farm runs and birdhouse runs when available.');
     SetLeft(nowRadio.getLeft());
     SetTop(laterRadio.getTop() + TControl.AdjustToDPI(30));
-    SetChecked(Gui^.GetRunePouchSelection());
     CheckBox.SetOnChange(@Self._BirdhouseRunePouchCheckboxChanged);
+    SetChecked(True);
   end;
 
   Gui^.OnRunePouchCheckboxChanged(Gui^.BirdhouseRunePouchCheckbox.CheckBox);
@@ -4008,6 +4008,7 @@ begin
     SetLeft(TControl.AdjustToDPI(30));
     SetTop(TControl.AdjustToDPI(310));
     CheckBox.SetOnChange(@Self.OnRunePouchCheckboxChanged);
+    SetChecked(True);
   end;
 
   Self.OnRunePouchCheckboxChanged(Self.RunePouchCheckbox.CheckBox);
@@ -5614,6 +5615,9 @@ begin
 end;
 
 begin
+  UseRunePouch := True;
+  BirdHouseRunner.UseRunePouch := True;
+
   try
     GUI.Run();
     Initiate();
