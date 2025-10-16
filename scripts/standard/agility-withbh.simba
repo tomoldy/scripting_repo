@@ -5388,36 +5388,58 @@ begin
 end;
 
 function WithdrawReturnItems(): Boolean;
+const
+  MAX_WITHDRAW_ATTEMPTS = 3;
 var
   Item: TRSBankItem;
   needed: Int32;
-  i: Int32;
+  i, attempt: Int32;
+  success: Boolean;
 begin
+  Result := False;
+
   if not Bank.IsOpen() then
     Exit(False);
 
-  for i := 0 to High(ReturnItems) do
+  for attempt := 0 to MAX_WITHDRAW_ATTEMPTS - 1 do
   begin
-    if Inventory.ItemIsStackable(ReturnItems[i]) then
-      needed := ReturnItemAmounts[i] - Max(0, Inventory.CountItemStack(ReturnItems[i]))
-    else
-      needed := ReturnItemAmounts[i] - Inventory.CountItem(ReturnItems[i]);
+    for i := 0 to High(ReturnItems) do
+    begin
+      if Inventory.ItemIsStackable(ReturnItems[i]) then
+        needed := ReturnItemAmounts[i] - Max(0, Inventory.CountItemStack(ReturnItems[i]))
+      else
+        needed := ReturnItemAmounts[i] - Inventory.CountItem(ReturnItems[i]);
 
-    if needed <= 0 then
-      Continue;
+      if needed <= 0 then
+        Continue;
 
-    Item := TRSBankItem.Setup(ReturnItems[i], needed, False);
-    Bank.WithdrawItem(Item, False);
-    WaitEx(500, 450);
+      Item := TRSBankItem.Setup(ReturnItems[i], needed, False);
+      Bank.WithdrawItem(Item, False);
+      WaitEx(500, 450);
+    end;
+
+    success := WaitUntil(Inventory.ContainsAll(ReturnItems), 250, 2750);
+
+    if success then
+    begin
+      Result := True;
+      Exit(True);
+    end;
+
+    if attempt < MAX_WITHDRAW_ATTEMPTS - 1 then
+    begin
+      if Bank.GetCurrentTab() <> 0 then
+      begin
+        WriteDebug('Failed to withdraw return items on tab ' + ToStr(Bank.GetCurrentTab()) + '; retrying with all items tab.');
+        Bank.OpenTab(0);
+        WaitEx(350, 150);
+      end
+      else
+        WriteDebug('Failed to withdraw return items on the all items tab; retrying (attempt ' + ToStr(attempt + 2) + ').');
+    end;
   end;
 
-  Result := WaitUntil(Inventory.ContainsAll(ReturnItems), 250, 2750);
-
-  if (not Result) and (Bank.GetCurrentTab() <> 0) then
-  begin
-    WriteDebug('Failed to withdraw return items on tab ' + ToStr(Bank.GetCurrentTab()) + '; retrying with all items tab.');
-    Bank.OpenTab(0);
-  end;
+  WriteDebug('Failed to withdraw return items after ' + ToStr(MAX_WITHDRAW_ATTEMPTS) + ' attempts. Items may be unavailable.');
 end;
 
 procedure ApplySettings();
