@@ -2110,12 +2110,49 @@ begin
   end;
 end;
 
-function TFarmPatch.GetState(): EPatchState;
-label
-  Inspect;
+function TFarmPatch.InspectPatchForState(): EPatchState;
 var
   Message: String;
   i: Int32;
+begin
+  Result := EPatchState.FAILED;
+
+  if not WaitUntil(Chat.FindMessage('The soil'), 15, 10000) then
+    Exit;
+
+  Message := '';
+  for i := 5 to 8 do
+    Message += Chat.GetMessage(i);
+
+  if Message.Contains('is empty') then
+    Exit(EPatchState.PLANT);
+
+  if Message.Contains('not been') then
+  begin
+    if (Self.Data.PatchType = EPatchType.FLOWER) and (not Farm.CompostFlowers) then
+    begin
+      WriteLn('Inspection shows un-composted flower patch at ' + Self.Data.Name + '; skipping per settings.');
+      Self.Complete := True;
+      Exit(EPatchState.COMPLETE);
+    end;
+
+    Exit(EPatchState.COMPOST);
+  end;
+
+  if Message.Contains('fully grown') then
+    Exit(EPatchState.HARVEST);
+
+  if Message.ContainsAll(['has been', 'growing in it']) then
+    Exit(EPatchState.COMPLETE);
+
+  if Message.Contains('dead') then
+    Exit(EPatchState.DEAD);
+
+  if Message.Contains('diseas') then
+    Exit(EPatchState.DISEASED);
+end;
+
+function TFarmPatch.GetState(): EPatchState;
 begin
   if not RSClient.IsLoggedIn() then
     Exit(EPatchState.FAILED);
@@ -2160,19 +2197,19 @@ begin
   else
     Mouse.Move(Self.SearchBox);
 
-  if Mainscreen.IsUpText(Self.HarvestUpText) then
-    Exit(EPatchState.HARVEST);
-
   if Mainscreen.IsUpText('Dead') then
     Exit(EPatchState.DEAD);
 
   if Mainscreen.IsUpText('Cure') then
     Exit(EPatchState.DISEASED);
 
+  if Mainscreen.IsUpText(Self.HarvestUpText) then
+    Exit(EPatchState.HARVEST);
+
   if MainScreen.IsUpText('Inspect') then
   begin
     Mouse.Click(MOUSE_LEFT);
-    goto Inspect;
+    Exit(Self.InspectPatchForState());
   end;
 
   Mouse.Click(MOUSE_RIGHT);
@@ -2180,50 +2217,14 @@ begin
   if ChooseOption.HasOption('Dead', True, False) then
     Exit(EPatchState.DEAD);
 
-  if ChooseOption.HasOption(Self.HarvestUpText, True, False) then
-    Exit(EPatchState.HARVEST);
-
   if ChooseOption.HasOption('Cure', True, False) then
     Exit(EPatchState.DISEASED);
 
-  if ChooseOption.Select('Inspect') then
-      goto inspect
-  else
-    Exit(EPatchState.FAILED);
-
-  Inspect:
-  if not WaitUntil(Chat.FindMessage('The soil'), 15, 10000) then
-    Exit(EPatchState.FAILED);
-
-  for i := 5 to 8 do
-    Message += Chat.GetMessage(i);
-
-  if Message.Contains('is empty') then
-    Exit(EPatchState.PLANT);
-
-  if Message.Contains('not been') then
-  begin
-    if (Self.Data.PatchType = EPatchType.FLOWER) and (not Farm.CompostFlowers) then
-    begin
-      WriteLn('Inspection shows un-composted flower patch at ' + Self.Data.Name + '; skipping per settings.');
-      Self.Complete := True;
-      Exit(EPatchState.COMPLETE);
-    end;
-
-    Exit(EPatchState.COMPOST);
-  end;
-
-  if Message.Contains('fully grown') then
+  if ChooseOption.HasOption(Self.HarvestUpText, True, False) then
     Exit(EPatchState.HARVEST);
 
-  if Message.ContainsAll(['has been', 'growing in it']) then
-    Exit(EPatchState.COMPLETE);
-
-  if Message.Contains('dead') then
-    Exit(EPatchState.DEAD);
-
-  if Message.Contains('diseas') then
-    Exit(EPatchState.DISEASED);
+  if ChooseOption.Select('Inspect') then
+    Exit(Self.InspectPatchForState());
 
   Exit(EPatchState.FAILED);
 end;
