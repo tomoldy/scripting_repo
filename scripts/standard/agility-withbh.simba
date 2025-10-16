@@ -3907,10 +3907,10 @@ var
   CheckBox: TCheckBox;
   IsChecked: Boolean;
 begin
-  if not (Sender is TCheckBox) then
+  if Sender = nil then
     Exit;
 
-  CheckBox := Sender;
+  CheckBox := TCheckBox(Sender);
   IsChecked := CheckBox.IsChecked();
 
   Self.SyncRunePouchCheckboxes(CheckBox, IsChecked);
