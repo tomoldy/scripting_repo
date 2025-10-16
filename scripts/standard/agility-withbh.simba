@@ -1490,6 +1490,11 @@ function TScriptForm.CreateBirdhouseRunSettings(): TTabSheet;
     end;
   end;
 
+  procedure TScriptForm._BirdhouseRunePouchCheckboxChanged(sender: TObject);
+  begin
+    Gui^.OnBirdhouseRunePouchCheckboxChanged(sender);
+  end;
+
 const
   H_SPACING : Int32 := 50;
 var
@@ -1597,7 +1602,7 @@ begin
     SetLeft(nowRadio.getLeft());
     SetTop(laterRadio.getTop() + TControl.AdjustToDPI(30));
     SetChecked(Gui^.GetRunePouchSelection());
-    CheckBox.SetOnChange(@Gui^.OnBirdhouseRunePouchCheckboxChanged);
+    CheckBox.SetOnChange(@Self._BirdhouseRunePouchCheckboxChanged);
   end;
 
   Gui^.OnRunePouchCheckboxChanged(Gui^.BirdhouseRunePouchCheckbox.CheckBox);
