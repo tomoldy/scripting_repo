@@ -1908,7 +1908,7 @@ end;
 function TFarmRun.GetNextTime(): Int32;
 begin
   if Length(Self.Patches) = 2 then
-    if ('seaweed' in Self.Patches[0].Data.Name) and ('seaweed' in Self.Patches[1].Data.Name) then
+    if Self.Patches[0].Data.Name.Contains('seaweed') and Self.Patches[1].Data.Name.Contains('seaweed') then
       Exit(Random(46*ONE_MINUTE, 55*ONE_MINUTE));
 
   Exit(Random(86*ONE_MINUTE, 97*ONE_MINUTE));
