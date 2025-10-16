@@ -5566,6 +5566,7 @@ var
   B: TRSBankItem;
   itemNameLower: String;
   i: Int32;
+  fallbackLogged, fallbackUsed, withdrawSuccess: Boolean;
 begin
   if not Bank.IsOpen() then
     Exit(False);
@@ -5578,28 +5579,51 @@ begin
   if UseBestFlowerSeed and (FlowerSeedItemIndex >= 0) then
     WriteDebug('Withdrawing flower seed: ' + ToStr(Farm.SelectedFlowerSeed) + ' (auto-selected).');
 
-  for i := 0 to High(FarmItems) do
-  begin
-    B := TRSBankItem.Setup(FarmItems[i], FarmItemAmounts[i], False);
-    itemNameLower := LowerCase(ToStr(FarmItems[i]));
+  fallbackLogged := False;
+  fallbackUsed := False;
+  Result := False;
 
-    if Pos('seed', itemNameLower) > 0 then
+  repeat
+    withdrawSuccess := True;
+
+    for i := 0 to High(FarmItems) do
     begin
-      if not WithdrawSeedItem(B) then
-        Exit(False);
+      B := TRSBankItem.Setup(FarmItems[i], FarmItemAmounts[i], False);
+      itemNameLower := LowerCase(ToStr(FarmItems[i]));
+
+      if Pos('seed', itemNameLower) > 0 then
+      begin
+        if not WithdrawSeedItem(B) then
+        begin
+          withdrawSuccess := False;
+          Break;
+        end;
+      end else
+        Bank.WithdrawItem(B, False);
+
+      WaitEx(500, 450);
+    end;
+
+    if withdrawSuccess then
+    begin
+      Result := WaitUntil(Inventory.ContainsAll(FarmItems), 250, 2750);
+      if Result then
+        Exit(True);
     end else
-      Bank.WithdrawItem(B, False);
+      Result := False;
 
-    WaitEx(500, 450);
-  end;
+    if fallbackUsed then
+      Break;
 
-  Result := WaitUntil(Inventory.ContainsAll(FarmItems), 250, 2750);
+    if not fallbackLogged then
+    begin
+      WriteDebug('Failed to withdraw all farm items on tab ' + ToStr(Bank.GetCurrentTab()) + '; retrying with all items tab.');
+      fallbackLogged := True;
+    end;
 
-  if (not Result) and (Bank.GetCurrentTab() <> 0) then
-  begin
-    WriteDebug('Failed to withdraw all farm items on tab ' + ToStr(Bank.GetCurrentTab()) + '; retrying with all items tab.');
     Bank.OpenTab(0);
-  end;
+    fallbackUsed := True;
+  until False;
 end;
 
 procedure Farm.OnStart(); override;
