@@ -1354,12 +1354,15 @@ begin
 end;
 
 function TBirdHouseInclude.WithdrawNextRun() : Boolean;
+const
+  MAX_WITHDRAW_ATTEMPTS = 3;
 var
   itemList : TRSBankItemArray;
-  i, itemNumNeeded : Int32;
+  i, itemNumNeeded, attempts : Int32;
   itemName : string;
   nextBestLog : ERSLogType;
   transporter: TUniversalTransport;
+  withdrawSuccess: Boolean;
 
 begin
   if not Bank.IsOpen() then
@@ -1402,25 +1405,43 @@ begin
     end;
 
     itemList[i].Quantity := itemNumNeeded;
-    if not Bank.WithdrawItem(itemList[i], false) then
-    begin
-      Self.DebugLn('Bank is missing: ' + ToStr(itemList[i].Item));
-      if Bank.GetCurrentTab() <> 0 then
-      begin
-        Self.DebugLn('Retrying withdraw on all items tab.');
-        Bank.OpenTab(0);
-      end;
-      Exit(false);
-    end;
+    attempts := 0;
+    withdrawSuccess := False;
 
-    if not WaitUntil(Inventory.ContainsItem(itemList[i].Item), 100, 2000) then
-    begin
-      Self.DebugLn('Could not withdraw item: ' + ToStr(itemList[i].Item));
-      if Bank.GetCurrentTab() <> 0 then
+    repeat
+      Inc(attempts);
+
+      if not Bank.WithdrawItem(itemList[i], false) then
       begin
-        Self.DebugLn('Retrying withdraw on all items tab.');
-        Bank.OpenTab(0);
+        Self.DebugLn('Bank is missing: ' + ToStr(itemList[i].Item) +
+                     ' (attempt ' + ToStr(attempts) + '/' + ToStr(MAX_WITHDRAW_ATTEMPTS) + ')');
+
+        if (Bank.GetCurrentTab() <> 0) and (attempts < MAX_WITHDRAW_ATTEMPTS) then
+        begin
+          Self.DebugLn('Retrying withdraw on all items tab.');
+          Bank.OpenTab(0);
+        end;
+        continue;
       end;
+
+      if WaitUntil(Inventory.ContainsItem(itemList[i].Item), 100, 2000) then
+        withdrawSuccess := True
+      else
+      begin
+        Self.DebugLn('Could not withdraw item: ' + ToStr(itemList[i].Item) +
+                     ' (attempt ' + ToStr(attempts) + '/' + ToStr(MAX_WITHDRAW_ATTEMPTS) + ')');
+
+        if (Bank.GetCurrentTab() <> 0) and (attempts < MAX_WITHDRAW_ATTEMPTS) then
+        begin
+          Self.DebugLn('Retrying withdraw on all items tab.');
+          Bank.OpenTab(0);
+        end;
+      end;
+    until withdrawSuccess or (attempts >= MAX_WITHDRAW_ATTEMPTS);
+
+    if not withdrawSuccess then
+    begin
+      Self.DebugLn('Failed to withdraw ' + ToStr(itemList[i].Item) + ' after ' + ToStr(MAX_WITHDRAW_ATTEMPTS) + ' attempts.');
       Exit(false);
     end;
   end;
