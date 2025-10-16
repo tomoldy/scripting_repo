@@ -192,6 +192,7 @@ var
 
 procedure ReleaseRealInput(); forward;
 procedure WriteDebug(Message: String); forward;
+procedure FarmWriteDebug(const Message: String); forward;
 procedure ApplySettings(); forward;
 
 function TMushroom.GetMushButton() : ERSMushTreeButton;
