@@ -1492,7 +1492,7 @@ function TScriptForm.CreateBirdhouseRunSettings(): TTabSheet;
 
   procedure TScriptForm._BirdhouseRunePouchCheckboxChanged(sender: TObject);
   begin
-    Gui^.OnBirdhouseRunePouchCheckboxChanged(sender);
+    PAgilityGUI(@Self)^.OnBirdhouseRunePouchCheckboxChanged(sender);
   end;
 
 const
