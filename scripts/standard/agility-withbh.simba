@@ -543,19 +543,61 @@ begin
              and (SRL.FindColors(tpa, TEXT_COLOR, MainScreen.UpTextArea) > 0);
 end;
 
-function TBirdHouseInclude.DismantleBirdhouse(out shouldSkip : Boolean) : Boolean;
+function TBirdHouseInclude.HandleSeedLossPrompt(var shouldSkip : Boolean) : Boolean;
 var
-  birdhouseATPA : T2DPointArray;
-  dismantleTimeout, xpTimeout : TCountDown;
   chatTitle : string;
 begin
+  Result := False;
+  chatTitle := Chat.GetChatTitle();
 
-  Self.DebugLn("Moving");
+  if not chatTitle.Contains('will lose') then
+    Exit;
+
+  if Self.BirdHousesFilled = 3 then
+  begin
+    Wait(Random(327, 744));
+    repeat
+      chatTitle := Chat.GetChatTitle();
+
+      if not chatTitle.Contains('will lose') then
+        Break;
+
+      if SRL.Dice(15) then
+        Chat.ClickOption('leave it be', 0, [CHAT_COLOR_BLACK])
+      else
+        PressKey(VK_ESCAPE);
+
+      Wait(Random(137, 352));
+    until False;
+  end;
+
+  shouldSkip := True;
+  Result := True;
+end;
+
+function TBirdHouseInclude.WaitForBirdHouseSpace(timeout : Int32) : Boolean;
+begin
+  Result := WaitUntil(Length(Self.GetBirdHouseSpace()) > 1, 200, timeout);
+end;
+
+function TBirdHouseInclude.DismantleBirdhouse(out shouldSkip : Boolean) : Boolean;
+const
+  MAX_DISMANTLE_ATTEMPTS = 30;
+  MAX_XP_CHECK_ATTEMPTS = 40;
+var
+  birdhouseATPA : T2DPointArray;
+  attempt, xpAttempt : Int32;
+begin
+
+  shouldSkip := False;
+  Result := False;
+
+  Self.DebugLn('Moving');
   if not WaitUntil(Self.RSW.WalkBlind(Self.CurrentBirdHouse^.BirdhouseObject.Coordinates[0], 20), 150, 5000) then
     Exit;
 
   WaitUntil(not Minimap.IsPlayerMoving(), 50, 5000);
-  Self.DebugLn("Done Moving");
+  Self.DebugLn('Done Moving');
 
   if Self.NeedClockworks then
     if not Inventory.ContainsItem(Self.GetBirdhouseItem(Self.LogType)) then
@@ -563,17 +605,15 @@ begin
       Self.BuildBirdHouseItem();
     end;
 
-  dismantleTimeout.Init(6000);
-
-  while not dismantleTimeout.IsFinished() do
+  for attempt := 1 to MAX_DISMANTLE_ATTEMPTS do
   begin
-    birdHouseATPA := CurrentBirdHouse^.BirdhouseObject.FindOnMainScreen(CurrentBirdHouse^.BirdhouseObject.GetCuboidArray());
+    birdHouseATPA := Self.CurrentBirdHouse^.BirdhouseObject.FindOnMainScreen(Self.CurrentBirdHouse^.BirdhouseObject.GetCuboidArray());
 
     if birdHouseATPA.Len() < 1 then
     begin
       Antiban.RandomRotate();
-      Self.DebugLn("Failed to find bird house, rotating");
-      continue;
+      Self.DebugLn('Failed to find bird house, rotating');
+      Continue;
     end;
 
     birdHouseATPA := birdHouseATPA.SortFrom(MainScreen.Center);
@@ -583,56 +623,34 @@ begin
     if not Self.ConfirmUptext(['nteract']) then
     begin
       Antiban.RandomRotate();
-      continue;
+      Continue;
     end;
 
     Mouse.Click(MOUSE_RIGHT);
-    Self.DebugLn("Dismantling birdhouse");
+    Self.DebugLn('Dismantling birdhouse');
 
     if not WaitUntil(ChooseOption.IsOpen, 100, 1200) then
-      continue;
+      Continue;
 
     if not ChooseOption.Select(['mpty'], MOUSE_LEFT, false, true) then
-      continue;
+      Continue;
 
-    xpTimeout.Init(8000);
-    while not xpTimeout.IsFinished() do
+    for xpAttempt := 1 to MAX_XP_CHECK_ATTEMPTS do
     begin
       if XPBar.EarnedXP() then
-        break;
+        Break;
 
-      chatTitle := Chat.GetChatTitle();
-      if chatTitle.Contains("will lose") then
-      begin
-        //Close the last one because it'll break other interactions.
-        if Self.BirdHousesFilled = 3 then
-        begin
-          Wait(Random(327, 744)); //Looks more believable
-          while chatTitle.Contains("will lose") do
-          begin
-            chatTitle := Chat.GetChatTitle();
-
-            if SRL.Dice(15) then
-              Chat.ClickOption("leave it be", 0, [CHAT_COLOR_BLACK])
-            else
-              PressKey(VK_ESCAPE);
-
-            Wait(Random(137, 352));
-          end;
-        end;
-
-        shouldSkip := true;
-        Exit(false);
-      end;
+      if Self.HandleSeedLossPrompt(shouldSkip) then
+        Exit(False);
 
       Wait(120);
     end;
 
-    Result := WaitUntil(Length(Self.GetBirdHouseSpace()) > 1, 200, 2000);
+    Result := Self.WaitForBirdHouseSpace(2000);
     if Result then
     begin
-      Self.DebugLn("Cleared this birdhouse");
-      Exit(Result);
+      Self.DebugLn('Cleared this birdhouse');
+      Exit(True);
     end;
   end;
 end;
@@ -801,7 +819,7 @@ begin
   if Self.DismantleBirdhouse(shouldSkip) then
   begin
     Self.DebugLn("Dismantled our current birdhouse " + ToStr(Self.CurrentBirdHouse^.BirdhouseObject));
-    WaitUntil(Length(Self.GetBirdHouseSpace()) > 1, 200, 4000);
+    Self.WaitForBirdHouseSpace(4000);
     if not Self.NeedClockworks
     and WaitUntil(Inventory.ContainsItem("Clockwork"), 10, 2000) then
     begin
